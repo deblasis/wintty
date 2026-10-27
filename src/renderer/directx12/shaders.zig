@@ -3,6 +3,7 @@
 //! Loads DXIL bytecode via @embedFile and defines input element descriptions
 //! for all 5 pipelines. GPU data structs are imported from gpu_data.zig.
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const builtin = @import("builtin");
 const com = @import("com.zig");
 
@@ -22,7 +23,7 @@ pub const BgImage = gpu_data.BgImage;
 
 /// Embedded shader bytecode -- compiled at build time by HlslStep.zig.
 /// On non-Windows these are empty slices so the module still compiles.
-const shader_bytecode = if (builtin.os.tag == .windows) struct {
+const shader_bytecode = if (builtin.target.os.tag == .windows) struct {
     const bg_color_vs = @embedFile("ghostty_hlsl_bg_color_vs");
     const bg_color_ps = @embedFile("ghostty_hlsl_bg_color_ps");
     const cell_bg_ps = @embedFile("ghostty_hlsl_cell_bg_ps");
@@ -370,7 +371,7 @@ fn formatByteSize(format: dxgi.DXGI_FORMAT) usize {
 /// field, so a field cannot be added to a struct without an element that
 /// feeds it, nor an element added with no field behind it.
 fn checkLayout(comptime T: type, comptime elements: []const d3d12.D3D12_INPUT_ELEMENT_DESC) void {
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = comptime meta_compat.structFields(T);
     if (elements.len != fields.len)
         @compileError(std.fmt.comptimePrint(
             "{s} has {d} fields but its input layout lists {d} elements; every field must be fed to the shader",
@@ -439,7 +440,7 @@ pub const Shaders = struct {
     /// Release all PSOs that have been created so far.
     /// Used as errdefer cleanup during init.
     fn releasePipelines(pipelines: *Pipelines) void {
-        inline for (@typeInfo(Pipelines).@"struct".fields) |field| {
+        inline for (comptime meta_compat.structFields(Pipelines)) |field| {
             @field(pipelines, field.name).deinit();
         }
     }
@@ -629,7 +630,7 @@ pub const Shaders = struct {
         }
         self.post_pipelines = &.{};
 
-        inline for (@typeInfo(Pipelines).@"struct".fields) |field| {
+        inline for (comptime meta_compat.structFields(Pipelines)) |field| {
             @field(self.pipelines, field.name).deinit();
         }
         self.pipelines = .{};
@@ -712,12 +713,12 @@ test "pipeline deinit loop does not touch root_signature" {
     const sentinel: *d3d12.ID3D12RootSignature = @ptrFromInt(0xDEAD_BEF0);
     var pipelines: Shaders.Pipelines = .{};
 
-    inline for (@typeInfo(Shaders.Pipelines).@"struct".fields) |field| {
+    inline for (comptime meta_compat.structFields(Shaders.Pipelines)) |field| {
         @field(pipelines, field.name).root_signature = sentinel;
     }
 
     // Same loop as Shaders.deinit -- must not dereference root_signature.
-    inline for (@typeInfo(Shaders.Pipelines).@"struct".fields) |field| {
+    inline for (comptime meta_compat.structFields(Shaders.Pipelines)) |field| {
         @field(pipelines, field.name).deinit();
     }
 }
@@ -796,7 +797,7 @@ test "SRV table: texture tables match the shaders" {
     // table. A shader that grows a texture without a table, or a table
     // widened back over its neighbours, fails here or in Pipeline.zig
     // before it can reach a device.
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const Case = struct { name: []const u8, vs: []const u8, ps: []const u8, textures: u32 };
     const cases = [_]Case{
         .{ .name = "bg_color", .vs = shader_bytecode.bg_color_vs, .ps = shader_bytecode.bg_color_ps, .textures = 0 },

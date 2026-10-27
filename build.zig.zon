@@ -1,9 +1,10 @@
 .{
     .name = .ghostty,
-    .version = "1.3.2-dev",
+    .version = "1.4.1-dev",
     .paths = .{""},
     .fingerprint = 0x64407a2a0b4147e5,
-    .minimum_zig_version = "0.16.0",
+    // Keep in sync with snap/snapcraft.yaml and flatpak/dependencies.yml
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         // Our higher-level C translation helper (this also helps ensure we
         // only need to maintain one external dependency point)
@@ -11,29 +12,38 @@
 
         // Zig libs
         .libxev = .{
-            // deblasis/libxev: mitchellh/libxev 9ce8e8e6ff plus an IOCP fix
-            // (a timer canceled before it started stays active until its
-            // callback), tagged wintty-2026.10.07-iocp-cancel-before-start.
-            .url = "https://github.com/deblasis/libxev/archive/7f24148fc1884f69ffcfeb9568c949f0c3e7014e.tar.gz",
-            .hash = "libxev-0.0.0-86vtc5YjFACv9TvQj8m4HG6bSESzvha7In1vFnszQR02",
+            // deblasis/libxev: mitchellh/libxev 819ffa180c (Zig 0.17) plus
+            // an IOCP fix (a timer canceled before it started stays active
+            // until its callback), on branch
+            // wintty-0.17-iocp-cancel-before-start.
+            .url = "https://github.com/deblasis/libxev/archive/c958e37b37add7e9194115ced79bff4e6e57986a.tar.gz",
+            .hash = "libxev-0.0.0-86vtc1gjFABiTG74Me2HcFYF7cMx-rf7Dn2wlJXA98kd",
             .lazy = true,
         },
         .vaxis = .{
             // rockorager/libvaxis
-            .url = "https://deps.files.ghostty.org/vaxis-1dbbe575dff4586fe51e3217aa5c3fecdcbb6089.tar.gz",
-            .hash = "vaxis-0.6.0-BWNV_CrbCQCscGpzsAlR402rYQ_tV3aAl081c2iRRkka",
+            .url = "https://deps.files.ghostty.org/vaxis-6fd944a27fb3d6f596e981076381a3131f2448b4.tar.gz",
+            .hash = "vaxis-0.6.0-BWNV_MafDAAEzkVUvrW9NFUqnnMUoeHqrs2mecnD6D7w",
             .lazy = true,
+        },
+        .zigimg = .{
+            // sergot/zigimg (via vaxis)
+            // The commit vaxis pins is no longer on any upstream branch, so
+            // we pin the same hash to our mirror. Must not be lazy, or Zig
+            // falls back to the git URL in vaxis's build.zig.zon.
+            .url = "https://deps.files.ghostty.org/zigimg-c701c9f99779d7ddf594dcc6da8f858fd277d61f.tar.gz",
+            .hash = "zigimg-0.1.0-8_eo2ri_FwBqF5UYiggLz4IGjHJO_n9-B6gT9Ayqg8G4",
         },
         .z2d = .{
             // vancluever/z2d
-            .url = "https://deps.files.ghostty.org/z2d-7dbae85c81784dba9988320bf9543ed9a81350c8.tar.gz",
-            .hash = "z2d-0.12.1-j5P_Hsw8EQAKyZTQICCQnAH2xYkLDW8k9uefbsYdfPZ-",
+            .url = "https://deps.files.ghostty.org/z2d-40af3e84a4e15a9f31d126b3f281f23ce6a3dae5.tar.gz",
+            .hash = "z2d-0.13.0-j5P_HgsRFABzZDH54gI35P0OSrg7HFyJwS2bXX5uBdU4",
             .lazy = true,
         },
         .zig_objc = .{
             // mitchellh/zig-objc
-            .url = "https://deps.files.ghostty.org/zig_objc-c8de82ff80281215ad92900866dab7103a8efa8b.tar.gz",
-            .hash = "zig_objc-0.0.0-Ir_Sp9gsAQCPAJc0oF5xoWePHWP6Y6tCphDeyNUThJoi",
+            .url = "https://deps.files.ghostty.org/zig_objc-3352c12a868f8787ab71bf2ca6eab9fcfb635c52.tar.gz",
+            .hash = "zig_objc-0.0.0-Ir_Sp_4tAQDXtPi51nW_jD9LOEzBvU9lofwO9Pzi6IB4",
             .lazy = true,
         },
         .zig_js = .{
@@ -44,26 +54,26 @@
         },
         .uucode = .{
             // jacobsandlund/uucode
-            .url = "https://github.com/jacobsandlund/uucode/archive/9d55524551411b493cca41ca06363625d90aff1e.tar.gz",
-            .hash = "uucode-0.2.0-ZZjBPuuFVgC8YZ8eld4fOKsZANLIhTFMzULQxhkLi1C7",
+            .url = "https://deps.files.ghostty.org/uucode-ea62149739404a73c202b48a33bf6dd2af4bd9b0.tar.gz",
+            .hash = "uucode-0.2.0-ZZjBPoGFVgCiflJNFc6Io8xzC67B6PA5bUkk4LT0kCxg",
         },
         .zig_wayland = .{
             // codeberg ifreund/zig-wayland
-            .url = "https://deps.files.ghostty.org/wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX.tar.gz",
-            .hash = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX",
+            .url = "https://deps.files.ghostty.org/zig_wayland-27dda01712ddf3cb46ebd93380d88b01a7c828f8.tar.gz",
+            .hash = "wayland-0.7.0-dev-lQa1klz9AQB87V0pMKMdm8JvyOx32XR9FxcWnw9wh6XZ",
             .lazy = true,
         },
         .zf = .{
             // natecraddock/zf
-            .url = "https://deps.files.ghostty.org/zf-c35c421f84895193246db06c40683c1a30e616ef.tar.gz",
-            .hash = "zf-0.11.0-OIRy8X-RAAAwaRXHMYpj2uvBnuGTZWEE_3V7acqHQNtW",
+            .url = "https://deps.files.ghostty.org/zf-87153bb86b75d21fbac897b738f316d449f5d0c9.tar.gz",
+            .hash = "zf-0.11.0-OIRy8XCRAAB6FiMwIrtD6FqlagnFwpI6YyOu7bXeYH5J",
             .lazy = true,
         },
         .gobject = .{
             // https://github.com/ghostty-org/zig-gobject based on zig_gobject
             // Temporary until we generate them at build time automatically.
-            .url = "https://deps.files.ghostty.org/gobject-2026-07-28-36-1.tar.zst",
-            .hash = "gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3",
+            .url = "https://deps.files.ghostty.org/gobject-2026-10-02-38-1.tar.zst",
+            .hash = "gobject-0.3.2-Skun7LuIogBbEh-6WrLeEzMaRCnOMB3eOf__RaPYSMCZ",
             .lazy = true,
         },
 
@@ -90,9 +100,11 @@
         // Note for anyone diffing generated shader text: output can differ
         // between zioshade versions on unchanged input (lowering and
         // identifier fixes); regenerate any golden outputs.
+        // Pinned to the zig-0.17 branch (v0.8.4 plus the Zig 0.17 port) until
+        // a zioshade release carries it.
         .zioshade = .{
-            .url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.8.4.tar.gz",
-            .hash = "zioshade-0.8.4-8s3a2kNFVAA2mZkIZq45NvtR1fRSG-tKMIAHaFNZajS1",
+            .url = "https://github.com/zioShade/zioshade/archive/8a5b55ec87a249c16181ded0227453a4e4226e90.tar.gz",
+            .hash = "zioshade-0.8.4-8s3a2jFNVAB9XVfWg8Pga6oi3RnjqwLfD14fDu41wMk7",
             .lazy = true,
         },
 
@@ -129,8 +141,8 @@
         .apple_sdk = .{ .path = "./pkg/apple-sdk" },
         .android_ndk = .{ .path = "./pkg/android-ndk" },
         .iterm2_themes = .{
-            .url = "https://deps.files.ghostty.org/ghostty-themes-release-20261012-151317-d3e95e4.tgz",
-            .hash = "N-V-__8AAI2WBQDrsjfyEiqnmYZ4VfGdJaZhN2mKsaTaIVWq",
+            .url = "https://deps.files.ghostty.org/ghostty-themes-release-20261019-151001-86a776d.tgz",
+            .hash = "N-V-__8AAJ3vBQAq1fLMh5J8uWLkeDLS6WAdR2x5KcrmEyz6",
             .lazy = true,
         },
     },

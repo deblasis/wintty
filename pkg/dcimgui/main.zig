@@ -48,7 +48,7 @@ pub const ImGui_ImplDX12_InitInfo = extern struct {
     NumFramesInFlight: c_int = 0,
     // DXGI_FORMAT values. Kept as c_uint (not dxgi.DXGI_FORMAT) so this
     // vendored package stays independent of the renderer; the caller passes
-    // @intFromEnum(format).
+    // @backingInt(format).
     RTVFormat: c_uint = 0,
     DSVFormat: c_uint = 0,
     UserData: ?*anyopaque = null,

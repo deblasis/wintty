@@ -177,7 +177,7 @@ test "SrvHeap freeSlot recovers index from cpu handle" {
 }
 
 test "imgui dx12 backend produces and records draw data on a real device" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     // Device + command queue/allocator/list + fence. Skip if no GPU.
     var device: ?*d3d12.ID3D12Device = null;
@@ -244,7 +244,7 @@ test "imgui dx12 backend produces and records draw data on a real device" {
 
     var srv_heap = createHeap(dev) catch return error.SkipZigTest;
     defer srv_heap.deinit();
-    try std.testing.expect(init(dev, queue.?, 1, @intFromEnum(rtv_format), &srv_heap));
+    try std.testing.expect(init(dev, queue.?, 1, @backingInt(rtv_format), &srv_heap));
     defer shutdown();
 
     // Build a frame that generates geometry. imgui needs a couple of frames

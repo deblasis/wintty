@@ -85,7 +85,7 @@ fn buildLib(b: *std.Build, options: anytype) !*std.Build.Step.Compile {
     // with a positive control confirming a trap does fire. CFF/Type2
     // outlines and malformed fonts were not covered by that run; putting
     // the blanket flag back is a one line revert.
-    if (optimize == .Debug) try flags.append(
+    if (optimize == .debug) try flags.append(
         b.allocator,
         "-fno-sanitize=undefined",
     );

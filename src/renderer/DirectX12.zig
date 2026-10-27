@@ -361,7 +361,7 @@ pub fn init(
     _ = app_device;
     var result = DirectX12{ .allocator = alloc, .init_started = opts.init_started };
 
-    if (comptime builtin.os.tag != .windows) {
+    if (comptime builtin.target.os.tag != .windows) {
         return result;
     }
 
@@ -1031,7 +1031,7 @@ pub fn drawFrameEnd(self: *DirectX12) void {
 /// a shared texture (ghostty_surface_shared_texture) and has no
 /// presented frame to copy.
 pub fn snapshotLastFrame(self: *DirectX12) !device.Device.LastFrameSnapshot {
-    if (comptime builtin.os.tag != .windows) return error.NotWindows;
+    if (comptime builtin.target.os.tag != .windows) return error.NotWindows;
     if (self.swap_chain3 == null) return error.NoSwapChain;
     const dev_ptr = &(self.dev orelse return error.NoDevice);
     const src = self.back_buffers[self.pending_frame_index] orelse

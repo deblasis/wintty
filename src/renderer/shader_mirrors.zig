@@ -8,6 +8,7 @@
 //! line, change the live one) would ship drift green.
 
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 
 /// `src` with line and block comments blanked. The comment characters are
 /// replaced with spaces so offsets inside the remainder keep their spacing;
@@ -138,9 +139,9 @@ fn zigFloatClass(comptime T: type) bool {
         .bool => false,
         .vector => |v| @typeInfo(v.child) == .float,
         .array => |a| zigFloatClass(a.child),
-        .@"struct" => |s| blk: {
+        .@"struct" => blk: {
             var acc: ?bool = null;
-            inline for (s.fields) |field| {
+            inline for (comptime meta_compat.structFields(T)) |field| {
                 const f = zigFloatClass(field.type);
                 if (acc == null) acc = f else if (acc.? != f) @compileError(
                     "mixed float and integer fields; the scanner cannot class " ++
@@ -251,7 +252,7 @@ pub fn expectBlockLayout(
 ) void {
     const stripped = comptime stripComments(src);
     const members = comptime blockMembers(stripped, block, what);
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = comptime meta_compat.structFields(T);
 
     if (members.len != fields.len) {
         @compileError(std.fmt.comptimePrint(
@@ -366,7 +367,7 @@ fn memberNames(comptime members: []const Member) []const u8 {
 fn fieldNames(comptime T: type) []const u8 {
     comptime {
         var out: []const u8 = "";
-        for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+        for (meta_compat.structFields(T), 0..) |f, i| {
             if (i > 0) out = out ++ ", ";
             out = out ++ f.name;
         }

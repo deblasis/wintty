@@ -266,8 +266,10 @@ pub const StreamHandler = struct {
         self.terminal.setDefaultCursorBlink(config.cursor_blink);
         self.terminal.setDefaultXtChecksum(config.xt_checksum_extension);
 
-        // The config could have changed any of our colors so update mode 2031
-        self.messageWriter(.{ .color_scheme_report = .{ .force = false } });
+        // The config could have changed any of our colors, but the mode
+        // 2031 report is sent by Termio.changeConfig. This runs on the io
+        // thread, which is the only reader of the termio mailbox, so
+        // sending to it here would deadlock if the mailbox were full.
     }
 
     /// Send a surface message on behalf of the child's output.
@@ -1125,7 +1127,7 @@ pub const StreamHandler = struct {
                 // mode 2048 in-band size report (`size_report.zig`) ends
                 // in `t`, not `R`, and may precede this one.
                 var msg: termio.Message = .{ .write_small = .{} };
-                const resp = try std.fmt.bufPrint(&msg.write_small.data, "\x1B[{};{}R", .{
+                const resp = try std.mem.print(&msg.write_small.data, "\x1B[{};{}R", .{
                     pos.y + 1,
                     pos.x + 1,
                 });
@@ -1140,7 +1142,7 @@ pub const StreamHandler = struct {
                 const pos = self.cursorReportPos();
 
                 var msg: termio.Message = .{ .write_small = .{} };
-                const resp = try std.fmt.bufPrint(&msg.write_small.data, "\x1B[?{};{};1R", .{
+                const resp = try std.mem.print(&msg.write_small.data, "\x1B[?{};{};1R", .{
                     pos.y + 1,
                     pos.x + 1,
                 });
@@ -1218,7 +1220,7 @@ pub const StreamHandler = struct {
     pub fn queryKittyKeyboard(self: *StreamHandler) !void {
         log.debug("querying kitty keyboard mode", .{});
         var data: termio.Message.WriteReq.Small.Array = undefined;
-        const resp = try std.fmt.bufPrint(&data, "\x1b[?{}u", .{
+        const resp = try std.mem.print(&data, "\x1b[?{}u", .{
             self.terminal.screens.active.kitty_keyboard.current().int(),
         });
 
@@ -1235,7 +1237,7 @@ pub const StreamHandler = struct {
     ) !void {
         log.debug("reporting XTVERSION: ghostty {s}", .{build_config.version_string});
         var buf: [288]u8 = undefined;
-        const resp = try std.fmt.bufPrint(
+        const resp = try std.mem.print(
             &buf,
             "\x1BP>|{s} {s}\x1B\\",
             .{
@@ -1446,11 +1448,11 @@ pub const StreamHandler = struct {
         const req = try alloc.create(apprt.ClipboardRequest.KittyRead);
         const mimes = try alloc.alloc([:0]const u8, mimes_len);
         for (mimes_buf[0..mimes_len], mimes) |src, *dst| {
-            dst.* = try alloc.dupeZ(u8, src);
+            dst.* = try alloc.dupeSentinel(u8, src, 0);
         }
         const id = try alloc.dupe(u8, meta.id);
         const pw_owned = try alloc.dupe(u8, pw);
-        const name_owned = try alloc.dupeZ(u8, meta.name);
+        const name_owned = try alloc.dupeSentinel(u8, meta.name, 0);
         req.* = .{
             // The arena must be copied in last so it tracks every
             // allocation above.
@@ -1665,12 +1667,12 @@ pub const StreamHandler = struct {
             committed.contents.len,
         );
         for (committed.contents, contents) |src, *dst| dst.* = .{
-            .mime = try alloc.dupeZ(u8, src.mime),
-            .data = try alloc.dupeZ(u8, src.data),
+            .mime = try alloc.dupeSentinel(u8, src.mime, 0),
+            .data = try alloc.dupeSentinel(u8, src.data, 0),
         };
         const id = try alloc.dupe(u8, committed.id);
         const pw_owned = try alloc.dupe(u8, pw);
-        const name_owned = try alloc.dupeZ(u8, committed.name);
+        const name_owned = try alloc.dupeSentinel(u8, committed.name, 0);
         req.* = .{
             // The arena must be copied in last so it tracks every
             // allocation above.
@@ -1841,7 +1843,7 @@ pub const StreamHandler = struct {
         // UNC directory names, so adopting a remote one on the strength of
         // bytes alone would let anything writing to the pty pick who receives
         // the user's credentials.
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             if (internal_os.posix_path.isWindowsAbsolute(pwd)) {
                 const host = internal_os.posix_path.pathHost(pwd) catch {
                     log.warn("reported pwd (OSC 7/9;9/7777) names no directory we can use", .{});
@@ -1862,7 +1864,7 @@ pub const StreamHandler = struct {
         // for this OSC 7 context (e.g. kitty-shell-cwd expects the full,
         // unencoded path).
         const uri: std.Uri = internal_os.uri.parse(pwd, .{
-            .mac_address = comptime builtin.os.tag != .macos,
+            .mac_address = comptime builtin.target.os.tag != .macos,
             .raw_path = std.mem.startsWith(u8, pwd, "kitty-shell-cwd://"),
         }) catch |e| {
             log.warn("invalid url in reported pwd (OSC 7/9;9/7777): {}", .{e});
@@ -1880,11 +1882,15 @@ pub const StreamHandler = struct {
         // local as it gets -- skip the check (the same trust basis ghostty
         // applies to its own ssh sessions). What the surface kind decides on
         // Windows is the translation below, not whether we listen at all.
-        if (comptime builtin.os.tag != .windows) {
+        if (comptime builtin.target.os.tag != .windows) {
             var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-            const host = uri.getHost(&host_buffer) catch |err| switch (err) {
+            const host = std.Io.net.HostName.fromUri(uri, &host_buffer) catch |err| switch (err) {
                 error.UriMissingHost => {
                     log.warn("reported pwd (OSC 7/9;9/7777) uri must contain a hostname: {}", .{err});
+                    return;
+                },
+                error.NameTooLong, error.InvalidHostName => {
+                    log.warn("reported pwd (OSC 7/9;9/7777) uri contains an invalid hostname: {}", .{err});
                     return;
                 },
             };
@@ -1909,12 +1915,12 @@ pub const StreamHandler = struct {
         // We need the raw path, which might require unescaping. We try to
         // avoid making any heap allocations by using the stack first.
         var arena_alloc: std.heap.ArenaAllocator = .init(self.alloc);
-        var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
+        var stack_alloc_buf: [1024]u8 = undefined;
+        var stack_alloc: std.heap.BufferFirstAllocator = .init(&stack_alloc_buf, arena_alloc.allocator());
         defer arena_alloc.deinit();
-        // One `get()` for the whole function: it resets the stack buffer and
-        // asserts on a second call, so asking twice both invalidates `path`
-        // and aborts a safety-enabled build.
-        const salloc = stack_alloc.get();
+        // One allocator for the path and its translation: `reported` lives in
+        // the same buffer-first arena as `path`.
+        const salloc = stack_alloc.allocator();
         const path = try uri.path.toRawMaybeAlloc(salloc);
 
         // On Windows the URL path is in the reporting shell's own vocabulary;
@@ -1925,7 +1931,7 @@ pub const StreamHandler = struct {
         // once the URI's own path root is dropped. `reported` shares `path`'s
         // stack-fallback arena, and setPwd/WriteReq copy synchronously, so the
         // lifetime matches the untranslated path.
-        const reported = if (comptime builtin.os.tag == .windows)
+        const reported = if (comptime builtin.target.os.tag == .windows)
             (if (self.osc7) |ctx| switch (ctx) {
                 .wsl => |w| internal_os.posix_path.wslToWindows(salloc, path, w.distro),
                 .rooted => |r| internal_os.posix_path.rootedToWindows(salloc, path, r.install_root),
@@ -1968,7 +1974,7 @@ pub const StreamHandler = struct {
         if (!std.unicode.utf8ValidateSlice(path)) return false;
         for (path) |b| {
             if (b == 0) return false;
-            if (comptime builtin.os.tag == .windows) {
+            if (comptime builtin.target.os.tag == .windows) {
                 if (b < 0x20 or b == 0x7f) return false;
             }
         }
@@ -2177,7 +2183,7 @@ pub const StreamHandler = struct {
                             },
                         });
                     }
-                    mask.* = .initEmpty();
+                    mask.* = .empty;
                 },
 
                 .reset_special => log.warn(
@@ -2252,7 +2258,7 @@ pub const StreamHandler = struct {
                             .dynamic => |dynamic| try answer.print(
                                 color_report_fmt.dynamic_16,
                                 .{
-                                    @intFromEnum(dynamic),
+                                    @backingInt(dynamic),
                                     @as(u16, color.r) * 257,
                                     @as(u16, color.g) * 257,
                                     @as(u16, color.b) * 257,
@@ -2274,7 +2280,7 @@ pub const StreamHandler = struct {
                             .dynamic => |dynamic| try answer.print(
                                 color_report_fmt.dynamic_8,
                                 .{
-                                    @intFromEnum(dynamic),
+                                    @backingInt(dynamic),
                                     @as(u16, color.r),
                                     @as(u16, color.g),
                                     @as(u16, color.b),
@@ -2886,7 +2892,7 @@ test "tmux control mode commands survive a full pty write backlog" {
 test "pwd: one prompt's OSC 7, 9;9 and 7777 burst reports once" {
     // The burst is Windows-shaped: OSC 9;9 and OSC 7777 both carry a raw
     // Windows path, and only the Windows arm of reportPwd adopts one.
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var h: TestHandler = undefined;
@@ -2934,7 +2940,7 @@ test "pwd: conhost's quoted OSC 9;9 path is adopted" {
     // directory; Windows Terminal adopts the same bytes. Before the strip
     // in `reportPwd`, this was a "invalid url in reported pwd" warn at
     // every PowerShell prompt, and the surface kept a stale directory.
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var h: TestHandler = undefined;
@@ -2995,7 +3001,7 @@ test "pwd: what counts as a plausible directory name" {
     const legal_on_posix = [_][]const u8{ "/home/me/a\tb", "/home/me/a\nb", "/home/me/a\x1bb", "/home/me/a\x7fb" };
     for (legal_on_posix) |path| {
         try testing.expectEqual(
-            comptime builtin.os.tag != .windows,
+            comptime builtin.target.os.tag != .windows,
             StreamHandler.isPlausiblePwd(path),
         );
     }
@@ -3007,7 +3013,7 @@ test "pwd: a reported directory carrying control characters is refused" {
     // `%1B` and `%07` travel as ordinary ASCII and become real control bytes
     // in the path. OSC 9;9 needs no trick -- the parse table admits DEL as
     // payload. Either way the surface must keep the directory it had.
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var h: TestHandler = undefined;
@@ -3043,7 +3049,7 @@ test "pwd: a reported directory carrying control characters is refused" {
 }
 
 test "pwd: a title an application set survives the next prompt's burst" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var h: TestHandler = undefined;
@@ -3072,7 +3078,7 @@ test "pwd: a title an application set survives the next prompt's burst" {
 }
 
 test "pwd: the first report of a session is not swallowed by the spawn cwd" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var h: TestHandler = undefined;
@@ -3108,7 +3114,7 @@ test "stream handler refuses and frees an owned write at the backlog cap" {
     // Longer than WriteReq's inline capacity, so this is a .write_alloc
     // that owns its bytes. Refusing it has to free them: the testing
     // allocator fails the test if the drop path forgets.
-    const data: []const u8 = "\x1B]11;rgb:1111/2222/3333\x1B\\" ** 4;
+    const data: []const u8 = "\x1B]11;rgb:1111/2222/3333\x1B\\" ++ "\x1B]11;rgb:1111/2222/3333\x1B\\" ++ "\x1B]11;rgb:1111/2222/3333\x1B\\" ++ "\x1B]11;rgb:1111/2222/3333\x1B\\";
     const msg = try termio.Message.writeReq(testing.allocator, data);
     try testing.expect(msg == .write_alloc);
 
@@ -3356,7 +3362,7 @@ test "conpty handshake: a request split at the seam leaves the parser nothing to
     // The tab's cwd is the one the OSC 7 reported. The URL's host is
     // deliberately not this machine's: on Windows the surface is one we
     // spawned, and the host check is skipped by design.
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         const pwd = th.handler.terminal.getPwd() orelse "";
         try testing.expectEqualStrings("C:\\mvt-cwd-7", pwd);
     }

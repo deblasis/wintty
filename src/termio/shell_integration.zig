@@ -115,8 +115,8 @@ test "force shell" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
 
-    inline for (@typeInfo(Shell).@"enum".fields) |field| {
-        const shell = @field(Shell, field.name);
+    inline for (@typeInfo(Shell).@"enum".field_names) |field| {
+        const shell = @field(Shell, field);
 
         var res: TmpResourcesDir = try .init(shell);
         defer res.deinit();
@@ -248,10 +248,10 @@ pub fn setupFeatures(
     features: config.ShellIntegrationFeatures,
     cursor_blink: bool,
 ) !void {
-    const fields = @typeInfo(@TypeOf(features)).@"struct".fields;
+    const field_names = @typeInfo(@TypeOf(features)).@"struct".field_names;
     const capacity: usize = capacity: {
-        comptime var n: usize = fields.len - 1; // commas
-        inline for (fields) |field| n += field.name.len;
+        comptime var n: usize = field_names.len - 1; // commas
+        inline for (field_names) |name| n += name.len;
         n += ":steady".len; // cursor value
         break :capacity n;
     };
@@ -261,9 +261,8 @@ pub fn setupFeatures(
 
     // Sort the fields so that the output is deterministic. This is
     // done at comptime so it has no runtime cost
-    const fields_sorted: [fields.len][]const u8 = comptime fields: {
-        var fields_sorted: [fields.len][]const u8 = undefined;
-        for (fields, 0..) |field, i| fields_sorted[i] = field.name;
+    const fields_sorted: [field_names.len][]const u8 = comptime fields: {
+        var fields_sorted: [field_names.len][]const u8 = field_names.*;
         std.mem.sortUnstable(
             []const u8,
             &fields_sorted,
@@ -404,7 +403,7 @@ fn winToCygwinPath(alloc: Allocator, path: []const u8) ![]u8 {
 /// points `command` at it, the POSIX path simply won't resolve in the
 /// distro and integration silently no-ops, exactly as before this change.
 fn shellEnvPath(alloc: Allocator, win_path: []const u8) ![]const u8 {
-    if (comptime builtin.os.tag != .windows) return win_path;
+    if (comptime builtin.target.os.tag != .windows) return win_path;
     return try winToCygwinPath(alloc, win_path);
 }
 
@@ -414,8 +413,9 @@ fn setupBash(
     resource_dir: []const u8,
     env: *EnvMap,
 ) !?config.Command {
-    var stack_fallback = std.heap.stackFallback(4096, alloc);
-    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+    var stack_fallback_buf: [4096]u8 = undefined;
+    var stack_fallback: std.heap.BufferFirstAllocator = .init(&stack_fallback_buf, alloc);
+    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.allocator());
     defer cmd.deinit();
 
     // Iterator that yields each argument in the original command line.
@@ -481,7 +481,7 @@ fn setupBash(
 
     // Set our new ENV to point to our integration script.
     var script_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const script_path = try std.fmt.bufPrint(
+    const script_path = try std.mem.print(
         &script_path_buf,
         "{s}/shell-integration/bash/ghostty.bash",
         .{resource_dir},
@@ -510,7 +510,7 @@ fn setupBash(
         var home_buf: [1024]u8 = undefined;
         if (try homedir.home(global.io(), &environ_map, &home_buf)) |home| {
             var histfile_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const histfile = try std.fmt.bufPrint(
+            const histfile = try std.mem.print(
                 &histfile_buf,
                 "{s}/.bash_history",
                 .{home},
@@ -521,7 +521,7 @@ fn setupBash(
     }
 
     // Return a copy of our modified command line to use as the shell command.
-    return .{ .shell = try alloc.dupeZ(u8, cmd.buffer.written()) };
+    return .{ .shell = try alloc.dupeSentinel(u8, cmd.buffer.written(), 0) };
 }
 
 test "bash" {
@@ -543,7 +543,7 @@ test "bash" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
         // On Windows the ENV value is the Cygwin POSIX form; identity elsewhere.
-        try shellEnvPath(alloc, try std.fmt.bufPrint(&path_buf, "{s}/ghostty.bash", .{res.shell_path})),
+        try shellEnvPath(alloc, try std.mem.print(&path_buf, "{s}/ghostty.bash", .{res.shell_path})),
         env.get("ENV").?,
     );
 }
@@ -683,7 +683,7 @@ test "bash: ENV" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
         // On Windows the ENV value is the Cygwin POSIX form; identity elsewhere.
-        try shellEnvPath(alloc, try std.fmt.bufPrint(&path_buf, "{s}/ghostty.bash", .{res.shell_path})),
+        try shellEnvPath(alloc, try std.mem.print(&path_buf, "{s}/ghostty.bash", .{res.shell_path})),
         env.get("ENV").?,
     );
 }
@@ -754,7 +754,7 @@ fn setupXdgDataDirs(
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
     // Get our path to the shell integration directory.
-    const integ_path = try std.fmt.bufPrint(
+    const integ_path = try std.mem.print(
         &path_buf,
         "{s}/shell-integration",
         .{resource_dir},
@@ -772,7 +772,7 @@ fn setupXdgDataDirs(
     // The existence check above used the Windows path; the env vars must
     // carry the POSIX form for a Cygwin/MSYS2 shell (e.g. fish under MSYS2),
     // and that shell joins XDG_DATA_DIRS with `:`, not the Windows `;`.
-    const win_cygwin = builtin.os.tag == .windows and cygwin;
+    const win_cygwin = builtin.target.os.tag == .windows and cygwin;
     const env_path: []const u8 = if (win_cygwin)
         try winToCygwinPath(alloc, integ_path)
     else
@@ -795,7 +795,7 @@ fn setupXdgDataDirs(
     const joined = if (current.len == 0)
         try alloc.dupe(u8, env_path)
     else
-        try std.fmt.allocPrint(alloc, "{s}{c}{s}", .{ env_path, delimiter, current });
+        try alloc.print("{s}{c}{s}", .{ env_path, delimiter, current });
     try env.put(xdg_data_dirs_key, joined);
 
     return true;
@@ -819,7 +819,7 @@ fn prependEnv(
     // If there is no prior value, we return it as-is
     if (current.len == 0) return try alloc.dupe(u8, value);
 
-    return try std.fmt.allocPrint(alloc, "{s}{c}{s}", .{
+    return try alloc.print("{s}{c}{s}", .{
         value,
         delimiter,
         current,
@@ -854,7 +854,7 @@ test "prependEnv existing semicolon delimiter" {
 }
 
 test "xdg: empty XDG_DATA_DIRS" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
 
@@ -872,17 +872,17 @@ test "xdg: empty XDG_DATA_DIRS" {
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration", .{res.path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR").?,
     );
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration:/usr/local/share:/usr/share", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration:/usr/local/share:/usr/share", .{res.path}),
         env.get("XDG_DATA_DIRS").?,
     );
 }
 
 test "xdg: existing XDG_DATA_DIRS" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
 
@@ -902,11 +902,11 @@ test "xdg: existing XDG_DATA_DIRS" {
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration", .{res.path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR").?,
     );
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration:/opt/share", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration:/opt/share", .{res.path}),
         env.get("XDG_DATA_DIRS").?,
     );
 }
@@ -973,7 +973,7 @@ test "winToCygwinPath: UNC paths map to //server/share" {
 }
 
 test "bash: ENV is a POSIX path on Windows" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -995,7 +995,7 @@ test "bash: ENV is a POSIX path on Windows" {
 }
 
 test "zsh: ZDOTDIR is a POSIX path on Windows" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1016,7 +1016,7 @@ test "zsh: ZDOTDIR is a POSIX path on Windows" {
 }
 
 test "xdg fish: POSIX path and ':' delimiter on Windows" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1042,7 +1042,7 @@ test "xdg fish: POSIX path and ':' delimiter on Windows" {
 }
 
 test "xdg elvish: keeps the Windows path on Windows" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1079,8 +1079,9 @@ fn setupNushell(
     // of the later checks abort the rest of our automatic integration.
     if (!try setupXdgDataDirs(alloc, resource_dir, env, false)) return null;
 
-    var stack_fallback = std.heap.stackFallback(4096, alloc);
-    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+    var stack_fallback_buf: [4096]u8 = undefined;
+    var stack_fallback: std.heap.BufferFirstAllocator = .init(&stack_fallback_buf, alloc);
+    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.allocator());
     defer cmd.deinit();
 
     // Iterator that yields each argument in the original command line.
@@ -1099,7 +1100,7 @@ fn setupNushell(
     // We can consider making this more specific based on the set of
     // enabled shell features (e.g. `use ghostty sudo`). At the moment,
     // shell features are all runtime-guarded in the nushell script.
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         // On Windows the .shell command string is re-parsed by
         // ArgIteratorGeneral (single_quotes = false), which does not strip
         // single quotes: the POSIX form would reach nu as three arguments
@@ -1141,7 +1142,7 @@ fn setupNushell(
     }
 
     // Return a copy of our modified command line to use as the shell command.
-    return .{ .shell = try alloc.dupeZ(u8, cmd.buffer.written()) };
+    return .{ .shell = try alloc.dupeSentinel(u8, cmd.buffer.written(), 0) };
 }
 
 test "nushell" {
@@ -1159,7 +1160,7 @@ test "nushell" {
     const command = try setupNushell(alloc, .{ .shell = "nu" }, res.path, &env);
     // Windows re-parses the command string without single-quote support, so
     // the integration argument is double-quoted there (see setupNushell).
-    const expected = if (builtin.os.tag == .windows)
+    const expected = if (builtin.target.os.tag == .windows)
         "nu --execute \"use ghostty *\""
     else
         "nu --execute 'use ghostty *'";
@@ -1167,12 +1168,12 @@ test "nushell" {
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration", .{res.path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR").?,
     );
     try testing.expectStringStartsWith(
         env.get("XDG_DATA_DIRS").?,
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration", .{res.path}),
     );
 }
 
@@ -1247,8 +1248,7 @@ fn setupPowerShell(
     // Use forward slashes for path composition to match the style of the
     // other shell-integration setup functions. PowerShell on Windows
     // accepts forward slashes in paths just fine.
-    const script_path = try std.fmt.allocPrint(
-        alloc_arena,
+    const script_path = try alloc_arena.print(
         "{s}/shell-integration/powershell/ghostty.ps1",
         .{resource_dir},
     );
@@ -1274,8 +1274,7 @@ fn setupPowerShell(
     // `-Command` payload survives downstream argv parsing as a single
     // argument (a `.shell` string would be re-split on spaces, breaking the
     // dot-source expression).
-    const dot_source = try std.fmt.allocPrintSentinel(
-        alloc_arena,
+    const dot_source = try alloc_arena.printSentinel(
         ". '{s}'",
         .{script_path},
         0,
@@ -1323,11 +1322,11 @@ fn setupPowerShell(
     // shipping a portable build rather than a problem here, and it is filed
     // as one.
     const argv = try alloc_arena.alloc([:0]const u8, 6);
-    argv[0] = try alloc_arena.dupeZ(u8, exe);
-    argv[1] = try alloc_arena.dupeZ(u8, "-NoExit");
-    argv[2] = try alloc_arena.dupeZ(u8, "-ExecutionPolicy");
-    argv[3] = try alloc_arena.dupeZ(u8, "RemoteSigned");
-    argv[4] = try alloc_arena.dupeZ(u8, "-Command");
+    argv[0] = try alloc_arena.dupeSentinel(u8, exe, 0);
+    argv[1] = try alloc_arena.dupeSentinel(u8, "-NoExit", 0);
+    argv[2] = try alloc_arena.dupeSentinel(u8, "-ExecutionPolicy", 0);
+    argv[3] = try alloc_arena.dupeSentinel(u8, "RemoteSigned", 0);
+    argv[4] = try alloc_arena.dupeSentinel(u8, "-Command", 0);
     argv[5] = dot_source;
 
     return .{ .direct = argv };
@@ -1367,7 +1366,7 @@ test "powershell" {
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/ghostty.ps1", .{res.shell_path}),
+        try std.mem.print(&path_buf, "{s}/ghostty.ps1", .{res.shell_path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_PS1").?,
     );
 }
@@ -1398,7 +1397,7 @@ test "powershell: user-supplied args are left untouched" {
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/ghostty.ps1", .{res.shell_path}),
+        try std.mem.print(&path_buf, "{s}/ghostty.ps1", .{res.shell_path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_PS1").?,
     );
 }
@@ -1493,8 +1492,7 @@ fn setupCmd(
         // (a pane split, a font change, the user dragging the edge) waiting
         // for a repaint that never comes, leaving the prompt blank until
         // Enter. With it, Ghostty leaves prompt lines alone on resize.
-        const wrapped = try std.fmt.allocPrint(
-            alloc_arena,
+        const wrapped = try alloc_arena.print(
             "$e]133;A;redraw=0$e\\$e]9;9;$p$e\\{s}$e]133;B$e\\",
             .{body},
         );
@@ -1504,7 +1502,7 @@ fn setupCmd(
     // Forward slashes are fine for Clink on Windows, matching the other
     // setup functions' path style.
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const clink_dir = try std.fmt.bufPrint(
+    const clink_dir = try std.mem.print(
         &path_buf,
         "{s}/shell-integration/cmd",
         .{resource_dir},
@@ -1740,7 +1738,7 @@ test "cmd: CLINK_PATH includes the shell-integration cmd dir" {
     // Exact match: with no prior CLINK_PATH, ours is the sole entry.
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration/cmd", .{res.path}),
+        try std.mem.print(&path_buf, "{s}/shell-integration/cmd", .{res.path}),
         env.get("CLINK_PATH") orelse return error.NoClinkPath,
     );
 }
@@ -1803,7 +1801,7 @@ fn setupZsh(
 
     // Set our new ZDOTDIR to point to our shell resource directory.
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const integ_path = try std.fmt.bufPrint(
+    const integ_path = try std.mem.print(
         &path_buf,
         "{s}/shell-integration/zsh",
         .{resource_dir},
@@ -1907,9 +1905,10 @@ fn setupFish(
 ) !?config.Command {
     if (!try setupXdgDataDirs(alloc, resource_dir, env, true)) return null;
 
-    if (comptime builtin.os.tag == .windows) {
-        var stack_fallback = std.heap.stackFallback(4096, alloc);
-        var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+    if (comptime builtin.target.os.tag == .windows) {
+        var stack_fallback_buf: [4096]u8 = undefined;
+        var stack_fallback: std.heap.BufferFirstAllocator = .init(&stack_fallback_buf, alloc);
+        var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.allocator());
         defer cmd.deinit();
 
         // Preserve the original command line.
@@ -1940,7 +1939,7 @@ fn setupFish(
             "\"source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/fish/vendor_conf.d/ghostty-shell-integration.fish\"",
         );
 
-        return .{ .shell = try alloc.dupeZ(u8, try cmd.toOwnedSlice()) };
+        return .{ .shell = try alloc.dupeSentinel(u8, try cmd.toOwnedSlice(), 0) };
     }
 
     // Non-Windows: the XDG export above is sufficient (Linux/macOS fish).
@@ -1965,7 +1964,7 @@ test "fish" {
     // ghostty_restore_xdg_data_dir cleanup relies on it.
     try testing.expect(env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR") != null);
 
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         // Windows fish is always MSYS2/Cygwin, whose $__fish_vendor_confdirs
         // ignores runtime XDG_DATA_DIRS, so the vendor conf is delivered
         // explicitly via `-C source`. The path is referenced through the
@@ -2016,7 +2015,7 @@ const TmpResourcesDir = struct {
         errdefer tmp_dir.cleanup();
 
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const relative_shell_path = try std.fmt.bufPrint(
+        const relative_shell_path = try std.mem.print(
             &path_buf,
             "shell-integration/{s}",
             .{@tagName(shell)},
@@ -2026,8 +2025,7 @@ const TmpResourcesDir = struct {
         const path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
         errdefer std.testing.allocator.free(path);
 
-        const shell_path = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const shell_path = try std.testing.allocator.print(
             "{s}/{s}",
             .{ path, relative_shell_path },
         );
@@ -2100,7 +2098,7 @@ const TmpPackagedResourcesDir = struct {
 
         for (shell_integration_files) |rel| {
             var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const sub_path = try std.fmt.bufPrint(
+            const sub_path = try std.mem.print(
                 &buf,
                 "shell-integration/{s}",
                 .{rel},
@@ -2165,17 +2163,17 @@ test "packaged tree: the fixture matches what the build installs" {
 
     // Every shell in the enum must own at least one of those files, so a new
     // shell cannot be added with a directory nothing ever installs into.
-    inline for (@typeInfo(Shell).@"enum".fields) |field| {
+    inline for (@typeInfo(Shell).@"enum".field_names) |field_name| {
         var found = false;
         for (shell_integration_files) |rel| {
-            if (std.mem.startsWith(u8, rel, field.name ++ "/")) found = true;
+            if (std.mem.startsWith(u8, rel, field_name ++ "/")) found = true;
         }
         try testing.expect(found);
     }
 }
 
 test "packaged layout windows: every supported shell is detected and injected" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2252,7 +2250,7 @@ test "packaged layout windows: every supported shell is detected and injected" {
 }
 
 test "packaged layout windows: an unsupported shell injects nothing" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

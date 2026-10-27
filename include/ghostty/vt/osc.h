@@ -317,7 +317,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
  * Create a new OSC parser instance.
  * 
  * Creates a new OSC (Operating System Command) parser using the provided
- * allocator. The parser must be freed using ghostty_vt_osc_free() when
+ * allocator. The parser must be freed using ghostty_osc_free() when
  * no longer needed.
  * 
  * @param allocator Pointer to the allocator to use for memory management, or NULL to use the default allocator

@@ -8,6 +8,7 @@ const Config = @import("Config.zig");
 const LibsystemOverrideStep = @import("LibsystemOverrideStep.zig");
 const SharedDeps = @import("SharedDeps.zig");
 const LipoStep = @import("LipoStep.zig");
+const GhosttyPkgConfig = @import("GhosttyPkgConfig.zig");
 
 /// The step that generates the file.
 step: *std.Build.Step,
@@ -153,8 +154,7 @@ pub fn initShared(
                     .aarch64 => "arm64",
                     else => "x64",
                 };
-                const ucrt_lib_path = std.fmt.allocPrint(
-                    b.allocator,
+                const ucrt_lib_path = b.allocator.print(
                     "{s}\\Lib\\{s}\\ucrt\\{s}",
                     .{ w10.path, w10.version, arch_str },
                 ) catch null;
@@ -195,7 +195,7 @@ pub fn initShared(
     // it doesn't change -lghostty into an archive-only reference when
     // both shared and static libraries are installed. Install a dedicated
     // static module so consumers can request the archive explicitly.
-    const pcs = pkgConfigFiles(b, deps);
+    const pcs = try pkgConfigFiles(b, deps);
 
     return .{
         .step = &lib.step,
@@ -287,35 +287,22 @@ const PkgConfigFiles = struct {
 fn pkgConfigFiles(
     b: *std.Build,
     deps: *const SharedDeps,
-) PkgConfigFiles {
+) !PkgConfigFiles {
     const os_tag = deps.config.target.result.os.tag;
-    const wf = b.addWriteFiles();
+
+    const pkg_config: GhosttyPkgConfig = try .init(b, .{
+        .name = "libghostty",
+        .name_static = "libghostty-static",
+        .description = "Ghostty terminal emulator library",
+        .description_static = "Ghostty terminal emulator library (static)",
+        .version = deps.config.version,
+        .libs = &.{"-L${libdir} -lghostty"},
+        .libs_static = &.{b.fmt("${{libdir}}/{s}", .{staticLibraryName(os_tag)})},
+    });
 
     return .{
-        .shared = wf.add("libghostty.pc", b.fmt(
-            \\prefix={s}
-            \\includedir=${{prefix}}/include
-            \\libdir=${{prefix}}/lib
-            \\
-            \\Name: libghostty
-            \\URL: https://github.com/ghostty-org/ghostty
-            \\Description: Ghostty terminal emulator library
-            \\Version: {f}
-            \\Cflags: -I${{includedir}}
-            \\Libs: -L${{libdir}} -lghostty
-        , .{ b.install_prefix, deps.config.version })),
-        .static = wf.add("libghostty-static.pc", b.fmt(
-            \\prefix={s}
-            \\includedir=${{prefix}}/include
-            \\libdir=${{prefix}}/lib
-            \\
-            \\Name: libghostty-static
-            \\URL: https://github.com/ghostty-org/ghostty
-            \\Description: Ghostty terminal emulator library (static)
-            \\Version: {f}
-            \\Cflags: -I${{includedir}}
-            \\Libs: ${{libdir}}/{s}
-        , .{ b.install_prefix, deps.config.version, staticLibraryName(os_tag) })),
+        .shared = pkg_config.getSharedFile(),
+        .static = pkg_config.getStaticFile(),
     };
 }
 

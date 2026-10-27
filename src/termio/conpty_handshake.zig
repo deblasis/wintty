@@ -368,7 +368,7 @@ test "conpty handshake: a read longer than the window keeps the bytes past it" {
     // the result spans the whole read, one request shorter.
     var hs: Handshake = .{};
     const preamble = "\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001h";
-    const banner = "!" ** 297;
+    const banner = @as([297]u8, @splat('!'));
     const chunk = preamble ++ banner;
     var buf: [CARRY_MAX + chunk.len]u8 = undefined;
     @memcpy(buf[CARRY_MAX..][0..chunk.len], chunk);
@@ -386,14 +386,14 @@ test "conpty handshake: a hold flushed by a longer read keeps the bytes past it"
     // prefix first, in the order it was read.
     var hs: Handshake = .{};
     var head_buf: [CARRY_MAX + 250]u8 = undefined;
-    const head = "x" ** 248 ++ "\x1b[";
+    const head = @as([248]u8, @splat('x')) ++ "\x1b[";
     @memcpy(head_buf[CARRY_MAX..][0..head.len], head);
     const first = hs.filter(&head_buf, head.len);
     try testing.expect(!first.reply);
     try testing.expectEqual(@as(usize, head.len - 2), first.bytes.len);
     try testing.expect(!hs.done);
 
-    const tail = "y" ** 300;
+    const tail = @as([300]u8, @splat('y'));
     var tail_buf: [CARRY_MAX + tail.len]u8 = undefined;
     @memcpy(tail_buf[CARRY_MAX..][0..tail.len], tail);
     const second = hs.filter(&tail_buf, tail.len);

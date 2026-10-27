@@ -177,7 +177,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Update our zoom state
         if let window = window as? TerminalWindow {
-            window.surfaceIsZoomed = to.zoomed != nil
+            window.surfaceIsZoomed = to.isZoomed
         }
 
         // If our surface tree is now nil then we close our window.
@@ -654,7 +654,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let window = window as? TerminalWindow else { return }
 
         // Sync our zoom state for splits
-        window.surfaceIsZoomed = surfaceTree.zoomed != nil
+        window.surfaceIsZoomed = surfaceTree.isZoomed
 
         // Set the font for the window and tab titles.
         if let titleFontName = surfaceConfig.windowTitleFontFamily {
@@ -1583,10 +1583,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Reproduction: titlebar tabs, create two tabs, "move tab left"
         if #available(macOS 26, *) {
             if window is TitlebarTabsTahoeTerminalWindow {
-                tabGroup.removeWindow(selectedWindow)
-                targetWindow.addTabbedWindowSafely(selectedWindow, ordered: action.amount < 0 ? .below : .above)
-                DispatchQueue.main.async {
-                    selectedWindow.makeKey()
+                // Move the tabs we pass over to the other side of our tab
+                // instead of moving our tab: removing the selected tab makes
+                // AppKit briefly show a neighbor.
+                if action.amount < 0 {
+                    for passed in tabbedWindows[finalIndex..<selectedIndex].reversed() {
+                        tabGroup.removeWindow(passed)
+                        selectedWindow.addTabbedWindowSafely(passed, ordered: .above)
+                    }
+                } else {
+                    for passed in tabbedWindows[(selectedIndex + 1)...finalIndex] {
+                        tabGroup.removeWindow(passed)
+                        selectedWindow.addTabbedWindowSafely(passed, ordered: .below)
+                    }
                 }
 
                 return

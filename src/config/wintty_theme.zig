@@ -38,7 +38,7 @@ const conditional = @import("conditional.zig");
 /// Windows only: the macOS and Linux builds share this source tree and are
 /// expected to behave like upstream Ghostty, whose unconfigured default is
 /// the compile-time colours in Config.zig.
-pub const enabled = builtin.os.tag == .windows;
+pub const enabled = builtin.target.os.tag == .windows;
 
 /// The theme source for a given desktop colour scheme, in Ghostty config
 /// syntax. Parsed by the same iterator that reads a theme file, so any

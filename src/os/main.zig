@@ -78,9 +78,9 @@ test {
     _ = windows_shell;
     _ = posix_path;
 
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         _ = kernel_info;
-    } else if (comptime builtin.os.tag.isDarwin()) {
+    } else if (comptime builtin.target.os.tag.isDarwin()) {
         _ = mach;
         _ = macos;
     }

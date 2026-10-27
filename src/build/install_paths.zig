@@ -11,8 +11,8 @@ const std = @import("std");
 /// Whether two install paths name the same place.
 ///
 /// Both sides are whole locations rather than fragments: the caller composes
-/// the required path and the step's own destination through the same
-/// `getInstallPath` before comparing, because a step keeps part of where it
+/// the required path and the step's own destination into prefix-relative
+/// paths the same way before comparing, because a step keeps part of where it
 /// goes in an install-base it does not spell out. Comparing the tails alone
 /// let a step move out from under `share` with the guard still matching.
 ///

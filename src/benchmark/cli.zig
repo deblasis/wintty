@@ -352,7 +352,7 @@ test "mainAction preloads a real codepoint-width corpus through setup" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try writeTmpDataFile(&tmp, "hello world", &path_buf);
 
-    const args = try std.fmt.allocPrint(alloc, "--mode=table --data={s}", .{path});
+    const args = try alloc.print("--mode=table --data={s}", .{path});
     defer alloc.free(args);
 
     _ = try mainAction(alloc, .@"codepoint-width", .{ .string = args });
@@ -367,7 +367,7 @@ test "mainAction preloads a real grapheme-break corpus through setup" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try writeTmpDataFile(&tmp, "e\u{301} world", &path_buf);
 
-    const args = try std.fmt.allocPrint(alloc, "--mode=table --data={s}", .{path});
+    const args = try alloc.print("--mode=table --data={s}", .{path});
     defer alloc.free(args);
 
     _ = try mainAction(alloc, .@"grapheme-break", .{ .string = args });
@@ -392,7 +392,7 @@ test "mainAction preloads a real osc-parser corpus through setup" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try writeTmpDataFile(&tmp, &record, &path_buf);
 
-    const args = try std.fmt.allocPrint(alloc, "--data={s}", .{path});
+    const args = try alloc.print("--data={s}", .{path});
     defer alloc.free(args);
 
     _ = try mainAction(alloc, .@"osc-parser", .{ .string = args });
@@ -407,8 +407,7 @@ test "mainAction preloads a real terminal-stream corpus through setup" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try writeTmpDataFile(&tmp, "hello\r\nworld", &path_buf);
 
-    const args = try std.fmt.allocPrint(
-        alloc,
+    const args = try alloc.print(
         "--terminal-rows=4 --terminal-cols=10 --data={s}",
         .{path},
     );
@@ -426,8 +425,7 @@ test "mainAction opens a real data file for screen-clone through setup" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try writeTmpDataFile(&tmp, "hello\r\nworld", &path_buf);
 
-    const args = try std.fmt.allocPrint(
-        alloc,
+    const args = try alloc.print(
         "--terminal-rows=4 --terminal-cols=10 --data={s}",
         .{path},
     );
@@ -454,7 +452,7 @@ test "mainAction opens a real data file for apc-parser through setup" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try writeTmpDataFile(&tmp, "\x1b_Gi=1,a=q;abc\x1b\\", &path_buf);
 
-    const args = try std.fmt.allocPrint(alloc, "--data={s}", .{path});
+    const args = try alloc.print("--data={s}", .{path});
     defer alloc.free(args);
 
     _ = try mainAction(alloc, .@"apc-parser", .{ .string = args });
@@ -469,7 +467,7 @@ test "mainAction opens a real data file for is-symbol through setup" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try writeTmpDataFile(&tmp, "a\u{2665}b", &path_buf);
 
-    const args = try std.fmt.allocPrint(alloc, "--mode=table --data={s}", .{path});
+    const args = try alloc.print("--mode=table --data={s}", .{path});
     defer alloc.free(args);
 
     _ = try mainAction(alloc, .@"is-symbol", .{ .string = args });
@@ -484,7 +482,7 @@ test "mainAction opens a real data file for terminal-parser through setup" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try writeTmpDataFile(&tmp, "hello\x1b[31mworld", &path_buf);
 
-    const args = try std.fmt.allocPrint(alloc, "--data={s}", .{path});
+    const args = try alloc.print("--data={s}", .{path});
     defer alloc.free(args);
 
     _ = try mainAction(alloc, .@"terminal-parser", .{ .string = args });
@@ -501,8 +499,7 @@ test "mainAction replays a real data file for terminal-resize through setup" {
 
     // Small dimensions and fill, matching TerminalResize's own test, so
     // the reflow loop stays fast in a debug build.
-    const args = try std.fmt.allocPrint(
-        alloc,
+    const args = try alloc.print(
         "--mode=cols --terminal-rows=10 --terminal-cols=20 " ++
             "--fill-lines=50 --data={s}",
         .{path},

@@ -69,11 +69,11 @@ const PipelineDescription = struct {
 
 /// We create a type for the pipeline collection based on our desc array.
 const PipelineCollection = t: {
-    const StructField = std.builtin.Type.StructField;
-
     var names: [pipeline_descs.len][]const u8 = undefined;
-    var types = [_]type{Pipeline} ** pipeline_descs.len;
-    var attrs = [_]StructField.Attributes{.{ .@"align" = @alignOf(Pipeline) }} ** pipeline_descs.len;
+    var types: [pipeline_descs.len]type = @splat(Pipeline);
+    var attrs: [pipeline_descs.len]std.lang.Type.Struct.FieldAttributes = @splat(.{
+        .@"align" = @alignOf(Pipeline),
+    });
 
     for (pipeline_descs, &names) |pipeline, *name| {
         name.* = pipeline[0];
@@ -169,7 +169,7 @@ pub const Shaders = struct {
 pub const Uniforms = extern struct {
     /// The projection matrix for turning world coordinates to normalized.
     /// This is calculated based on the size of the screen.
-    projection_matrix: math.Mat align(16),
+    projection_matrix: [4][4]f32 align(16),
 
     /// Size of the screen (render target) in pixels.
     screen_size: [2]f32 align(8),
@@ -309,11 +309,11 @@ comptime {
     // The vertex shader reads CellText.bools as raw bits through these
     // constants, so each packed field needs its exact mask there.
     @setEvalBranchQuota(200000);
-    for (std.meta.fields(@FieldType(CellText, "bools")), 0..) |field, bit| {
-        if (std.mem.startsWith(u8, field.name, "_")) continue;
+    for (@typeInfo(@FieldType(CellText, "bools")).@"struct".field_names, 0..) |field_name, bit| {
+        if (std.mem.startsWith(u8, field_name, "_")) continue;
         mirrors.expectMirrored(
             cell_text_v_source,
-            mirrors.upper(field.name),
+            mirrors.upper(field_name),
             std.fmt.comptimePrint("{d}u", .{@as(u32, 1) << @as(u5, @intCast(bit))}),
             "cell_text.v.glsl CellText.bools vs opengl.CellText",
         );
@@ -327,11 +327,11 @@ comptime {
         "15u",
         "bg_image.v.glsl BgImage.Info position mask vs opengl.BgImage",
     );
-    for (@typeInfo(BgImage.Info.Position).@"enum".fields) |field| {
+    for (@typeInfo(BgImage.Info.Position).@"enum".field_names, @typeInfo(BgImage.Info.Position).@"enum".field_values) |field_name, field_value| {
         mirrors.expectMirrored(
             bg_image_v_source,
-            "BG_IMAGE_" ++ mirrors.upper(field.name),
-            std.fmt.comptimePrint("{d}u", .{field.value}),
+            "BG_IMAGE_" ++ mirrors.upper(field_name),
+            std.fmt.comptimePrint("{d}u", .{field_value}),
             "bg_image.v.glsl BgImage.Info.Position vs opengl.BgImage",
         );
     }
@@ -341,15 +341,15 @@ comptime {
         "3u << 4",
         "bg_image.v.glsl BgImage.Info fit mask vs opengl.BgImage",
     );
-    for (@typeInfo(BgImage.Info.Fit).@"enum".fields) |field| {
-        const glsl_name = if (std.mem.eql(u8, field.name, "none"))
+    for (@typeInfo(BgImage.Info.Fit).@"enum".field_names, @typeInfo(BgImage.Info.Fit).@"enum".field_values) |field_name, field_value| {
+        const glsl_name = if (std.mem.eql(u8, field_name, "none"))
             "NO_FIT"
         else
-            mirrors.upper(field.name);
+            mirrors.upper(field_name);
         mirrors.expectMirrored(
             bg_image_v_source,
             "BG_IMAGE_" ++ glsl_name,
-            std.fmt.comptimePrint("{d}u << 4", .{field.value}),
+            std.fmt.comptimePrint("{d}u << 4", .{field_value}),
             "bg_image.v.glsl BgImage.Info.Fit vs opengl.BgImage",
         );
     }
@@ -378,20 +378,20 @@ comptime {
         },
         "common.glsl Globals vs opengl.Uniforms",
     );
-    for (std.meta.fields(@FieldType(Uniforms, "bools")), 0..) |field, bit| {
-        if (std.mem.startsWith(u8, field.name, "_")) continue;
+    for (@typeInfo(@FieldType(Uniforms, "bools")).@"struct".field_names, 0..) |field_name, bit| {
+        if (std.mem.startsWith(u8, field_name, "_")) continue;
         mirrors.expectMirrored(
             common_source,
-            mirrors.upper(field.name),
+            mirrors.upper(field_name),
             std.fmt.comptimePrint("{d}u", .{@as(u32, 1) << @as(u5, @intCast(bit))}),
             "common.glsl Uniforms.bools vs opengl.Uniforms",
         );
     }
-    for (std.meta.fields(@FieldType(Uniforms, "padding_extend")), 0..) |field, bit| {
-        if (std.mem.startsWith(u8, field.name, "_")) continue;
+    for (@typeInfo(@FieldType(Uniforms, "padding_extend")).@"struct".field_names, 0..) |field_name, bit| {
+        if (std.mem.startsWith(u8, field_name, "_")) continue;
         mirrors.expectMirrored(
             common_source,
-            "EXTEND_" ++ mirrors.upper(field.name),
+            "EXTEND_" ++ mirrors.upper(field_name),
             std.fmt.comptimePrint("{d}u", .{@as(u32, 1) << @as(u5, @intCast(bit))}),
             "common.glsl padding extend vs opengl.Uniforms",
         );

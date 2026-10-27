@@ -120,7 +120,7 @@ fn initThreadImpl(gpa: Allocator, environ_map_: std.process.Environ.Map) !void {
     // Right now, on Darwin, `std.Thread.setName` can only name the current
     // thread, and we have no way to get the current thread from within it,
     // so instead we use this code to name the thread instead.
-    if (builtin.os.tag.isDarwin()) {
+    if (builtin.target.os.tag.isDarwin()) {
         internal_os.macos.pthread_setname_np(&"sentry-init".*);
     }
 
@@ -178,7 +178,7 @@ fn initThreadImpl(gpa: Allocator, environ_map_: std.process.Environ.Map) !void {
         cache_dir.len,
     );
 
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         // Debug logging for Sentry
         sentry.c.sentry_options_set_debug(opts, @intFromBool(true));
     }
@@ -212,7 +212,7 @@ fn cacheDir(io: std.Io, alloc: Allocator, environ_map: *const std.process.Enviro
     // On macOS, we prefer to use the NSCachesDirectory value to be
     // a more idiomatic macOS application. But if XDG env vars are set
     // we will respect them.
-    if (comptime builtin.os.tag == .macos) macos: {
+    if (comptime builtin.target.os.tag == .macos) macos: {
         const xdg_cache_home = environ_map.get("XDG_CACHE_HOME") orelse break :macos;
         if (xdg_cache_home.len > 0) {
             return try internal_os.macos.cacheDir(
@@ -254,7 +254,7 @@ var panic_capture_done: std.atomic.Value(bool) = .init(false);
 /// would duplicate every crash report.
 pub fn capturePanic(msg: []const u8) void {
     if (comptime !build_options.sentry) return;
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
 
     // Re-entry on THIS thread means reporting the panic itself panicked, and
     // there is nothing left to try: return immediately so panicImpl falls
@@ -525,7 +525,7 @@ fn scrubKey(alloc: Allocator, json: []const u8, key: []const u8) ![]const u8 {
         }
     }
     var needle_buf: [needle_buf_len]u8 = undefined;
-    const needle = std.fmt.bufPrint(&needle_buf, "\"{s}\":\"", .{key}) catch
+    const needle = std.mem.print(&needle_buf, "\"{s}\":\"", .{key}) catch
         unreachable;
     if (std.mem.indexOf(u8, json, needle) == null) return json;
 
@@ -700,7 +700,7 @@ fn writeItemHeader(
 
     var digits: [24]u8 = undefined;
     try out.appendSlice(alloc, header[0..digits_start]);
-    try out.appendSlice(alloc, std.fmt.bufPrint(&digits, "{d}", .{length}) catch
+    try out.appendSlice(alloc, std.mem.print(&digits, "{d}", .{length}) catch
         return error.LengthTooLarge);
     try out.appendSlice(alloc, header[i..]);
 }
@@ -720,7 +720,7 @@ test "a scrubbed envelope still parses" {
     defer raw.deinit(alloc);
     var head: [64]u8 = undefined;
     try raw.appendSlice(alloc, "{}\n");
-    try raw.appendSlice(alloc, try std.fmt.bufPrint(
+    try raw.appendSlice(alloc, try std.mem.print(
         &head,
         "{{\"type\":\"event\",\"length\":{d}}}\n",
         .{payload.len},
@@ -753,7 +753,7 @@ test "every path key is scrubbed at the envelope level, not just code_file" {
 
     inline for (image_path_keys) |key| {
         var payload_buf: [128]u8 = undefined;
-        const payload = try std.fmt.bufPrint(
+        const payload = try std.mem.print(
             &payload_buf,
             "{{\"images\":[{{\"{s}\":\"C:\\\\\\\\Users\\\\\\\\alex\\\\\\\\a.bin\"}}]}}",
             .{key},
@@ -763,7 +763,7 @@ test "every path key is scrubbed at the envelope level, not just code_file" {
         defer raw.deinit(alloc);
         var head: [64]u8 = undefined;
         try raw.appendSlice(alloc, "{}\n");
-        try raw.appendSlice(alloc, try std.fmt.bufPrint(
+        try raw.appendSlice(alloc, try std.mem.print(
             &head,
             "{{\"type\":\"event\",\"length\":{d}}}\n",
             .{payload.len},
@@ -898,7 +898,7 @@ pub const Transport = struct {
         // Build our final path and write to it.
         const path = try std.fs.path.join(alloc, &.{
             state_dir,
-            try std.fmt.allocPrint(alloc, "{s}.winttycrash", .{uuid.string()}),
+            try alloc.print("{s}.winttycrash", .{uuid.string()}),
         });
         const file = try std.Io.Dir.cwd().createFile(single_threaded.io(), path, .{});
         defer file.close(single_threaded.io());

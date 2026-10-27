@@ -29,7 +29,7 @@ pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
 
     if (!config_path.exists) try createIfMissing(config_path.name);
 
-    return try alloc_gpa.dupeZ(u8, config_path.name);
+    return try alloc_gpa.dupeSentinel(u8, config_path.name, 0);
 }
 
 /// The path a caller should NAME, without the create: the same resolution
@@ -45,7 +45,7 @@ pub fn openPathNoCreate(alloc_gpa: Allocator) ![:0]const u8 {
     const alloc_arena = arena.allocator();
 
     const config_path = try configPath(alloc_arena);
-    return try alloc_gpa.dupeZ(u8, config_path.name);
+    return try alloc_gpa.dupeSentinel(u8, config_path.name, 0);
 }
 
 fn createIfMissing(name: []const u8) !void {
@@ -152,7 +152,7 @@ fn configPathCandidates(alloc_arena: Allocator) ![]const []const u8 {
     var paths: std.ArrayList([]const u8) = try .initCapacity(alloc_arena, 6);
     errdefer paths.deinit(alloc_arena);
 
-    if (comptime builtin.os.tag == .macos) {
+    if (comptime builtin.target.os.tag == .macos) {
         paths.appendAssumeCapacity(try file_load.defaultAppSupportPath(alloc_arena));
         paths.appendAssumeCapacity(try file_load.ghosttyAppSupportPath(alloc_arena));
         paths.appendAssumeCapacity(try file_load.legacyDefaultAppSupportPath(alloc_arena));

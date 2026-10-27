@@ -51,11 +51,11 @@ comptime {
     // generic.zig writes cursor.Style ordinals straight into
     // iCurrentCursorStyle / iPreviousCursorStyle and the prefix hands the
     // same values back as defines, so every style needs its exact copy.
-    for (@typeInfo(cursor.Style).@"enum".fields) |field| {
+    for (@typeInfo(cursor.Style).@"enum".field_names, @typeInfo(cursor.Style).@"enum".field_values) |field_name, field_value| {
         mirrors.expectMirrored(
             prefix_source,
-            "CURSORSTYLE_" ++ mirrors.upper(field.name),
-            std.fmt.comptimePrint("{d}", .{field.value}),
+            "CURSORSTYLE_" ++ mirrors.upper(field_name),
+            std.fmt.comptimePrint("{d}", .{field_value}),
             "shadertoy_prefix.glsl CURSORSTYLE defines vs cursor.Style",
         );
     }
@@ -131,7 +131,7 @@ pub fn loadFromFile(
     path: []const u8,
     target: Target,
 ) ![:0]const u8 {
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         const Ctx = struct {
             alloc_gpa: Allocator,
             path: []const u8,

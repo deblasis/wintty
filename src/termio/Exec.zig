@@ -67,8 +67,8 @@ subprocess: Subprocess,
 /// handed a pointer to this before the thread data exists, so it lives
 /// here rather than on the thread data. Unused on POSIX, where the quit
 /// pipe is part of the reader's poll set.
-read_quit: if (builtin.os.tag == .windows) ReadThread.Quit else void =
-    if (builtin.os.tag == .windows) .{} else {},
+read_quit: if (builtin.target.os.tag == .windows) ReadThread.Quit else void =
+    if (builtin.target.os.tag == .windows) .{} else {},
 
 /// Initialize the exec state. This will NOT start it, this only sets
 /// up the internal state necessary to start it later.
@@ -138,7 +138,7 @@ pub fn threadEnter(
     // IOCP completion never fires and processExitCommon is never called. We
     // replace the whole mechanism with a dedicated WaitForSingleObject thread
     // (see winProcessWaitThread below) that works regardless of job assignment.
-    var process: ?xev.Process = if (comptime builtin.os.tag == .windows)
+    var process: ?xev.Process = if (comptime builtin.target.os.tag == .windows)
         null
     else if (self.subprocess.process) |v| switch (v) {
         .fork_exec => |cmd| try xev.Process.init(
@@ -156,8 +156,8 @@ pub fn threadEnter(
     // On Windows, get a duplicated process handle for the wait thread.
     // We duplicate so that the wait thread owns its copy and can close it
     // independently of the Command's handle.
-    const win_proc_handle: if (builtin.os.tag == .windows) windows.HANDLE else void =
-        if (comptime builtin.os.tag == .windows) blk: {
+    const win_proc_handle: if (builtin.target.os.tag == .windows) windows.HANDLE else void =
+        if (comptime builtin.target.os.tag == .windows) blk: {
             const cmd = switch (self.subprocess.process orelse return error.ProcessNotStarted) {
                 .fork_exec => |c| c,
                 .flatpak => unreachable, // Flatpak is Linux-only
@@ -212,8 +212,8 @@ pub fn threadEnter(
     io.write_limit.reset();
 
     // Start our read thread
-    if (comptime builtin.os.tag == .windows) self.read_quit = .{};
-    const read_thread = if (comptime builtin.os.tag == .windows)
+    if (comptime builtin.target.os.tag == .windows) self.read_quit = .{};
+    const read_thread = if (comptime builtin.target.os.tag == .windows)
         try std.Thread.spawn(
             .{},
             ReadThread.threadMainWindows,
@@ -258,7 +258,7 @@ pub fn threadEnter(
     // for the child process. This replaces the xev.Process watcher which does
     // not work under ConPTY because the child is already in ConPTY's job object
     // before we can assign it to our own.
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         const ctx = try io.alloc.create(WinProcessWaitCtx);
         ctx.* = .{ .handle = win_proc_handle, .td = td };
         // On error: close the dup handle and free ctx. The thread takes
@@ -298,7 +298,7 @@ pub fn threadEnter(
     // Start our termios timer. We don't support this on Windows.
     // Fundamentally, we could support this on Windows so we're just
     // waiting for someone to implement it.
-    if (comptime builtin.os.tag != .windows) {
+    if (comptime builtin.target.os.tag != .windows) {
         termios_timer.run(
             td.loop,
             &td.backend.exec.termios_timer_c,
@@ -335,7 +335,7 @@ fn stopReadThread(
     // Windows cannot poll the pty handle and this pipe together, so the
     // reader there watches the quit flag below instead and never reads
     // the pipe. A write would wake nobody.
-    if (comptime builtin.os.tag != .windows) {
+    if (comptime builtin.target.os.tag != .windows) {
         switch (internal_os.writePipeEnd(quit_pipe, "x")) {
             .ok => {},
 
@@ -351,7 +351,7 @@ fn stopReadThread(
         }
     }
 
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         // Ask the reader to stop, then interrupt its blocking read.
         //
         // CancelIoEx only cancels a read that is already pending. If the
@@ -411,7 +411,7 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // Surface.deinit reached this join), so the notice would have been
     // discarded on arrival anyway; see processExitCommon for the other
     // teardown shapes and what the skip costs on each.
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         if (exec.process_wait_thread) |wt| wt.join();
     }
 }
@@ -427,7 +427,7 @@ pub fn focusGained(
     const execdata = &td.backend.exec;
 
     // Windows has no termios, so there is nothing to poll.
-    if (comptime builtin.os.tag == .windows) return;
+    if (comptime builtin.target.os.tag == .windows) return;
 
     if (!focused) {
         // Flag the timer to end on the next iteration. This is
@@ -445,7 +445,7 @@ pub fn focusGained(
         // callback because that'll trigger an immediate state check AND
         // start the timer.
         // Skip on Windows where termios polling is not yet implemented.
-        if (comptime builtin.os.tag != .windows) {
+        if (comptime builtin.target.os.tag != .windows) {
             if (execdata.termios_timer_c.state() != .active) {
                 _ = termiosTimer(td, undefined, undefined, {});
             }
@@ -582,7 +582,7 @@ fn termiosTimer(
     // timer on windows but we want this assertion to fire if
     // we ever do start the timer on windows.
     // TODO: support on windows
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         @panic("termios timer not implemented on Windows");
     }
 
@@ -858,9 +858,9 @@ pub const ThreadData = struct {
 
     /// Dedicated Windows process-exit watcher thread. Null on POSIX.
     /// Must be joined in threadExit before td is freed. Only valid when
-    /// builtin.os.tag == .windows; always null on other platforms.
-    process_wait_thread: if (builtin.os.tag == .windows) ?std.Thread else void =
-        if (builtin.os.tag == .windows) null else {},
+    /// builtin.target.os.tag == .windows; always null on other platforms.
+    process_wait_thread: if (builtin.target.os.tag == .windows) ?std.Thread else void =
+        if (builtin.target.os.tag == .windows) null else {},
 
     /// Latched by `threadExit` before it stops the subprocess, and handed
     /// to the child-exit push as its abort token. The wait thread reads
@@ -901,6 +901,10 @@ pub const ThreadData = struct {
 
 pub const Config = struct {
     command: ?configpkg.Command = null,
+
+    /// The environment for the subprocess. init takes ownership of this
+    /// whether or not it succeeds, so the caller must not free it after
+    /// calling init.
     env: EnvMap,
     env_override: configpkg.RepeatableStringMap = .{},
     shell_integration: configpkg.Config.ShellIntegration = .detect,
@@ -920,17 +924,17 @@ pub const Config = struct {
     /// Windows UTF-8 console preamble policy. Resolved at spawn time
     /// against the system ANSI codepage (see `resolveUtf8Console`).
     /// Ignored on POSIX.
-    utf8_console: if (builtin.os.tag == .windows)
+    utf8_console: if (builtin.target.os.tag == .windows)
         configpkg.Config.Utf8Console
     else
-        void = if (builtin.os.tag == .windows) .auto else {},
+        void = if (builtin.target.os.tag == .windows) .auto else {},
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
 };
 
 const Subprocess = struct {
-    const c = if (builtin.os.tag != .windows) @import("posix_c") else {};
+    const c = if (builtin.target.os.tag != .windows) @import("posix_c") else {};
 
     arena: std.heap.ArenaAllocator,
     cwd: ?[:0]const u8,
@@ -943,10 +947,10 @@ const Subprocess = struct {
 
     /// Captured from Config.utf8_console at init time; resolved against
     /// the system ACP per-spawn inside maybeInjectUtf8Preamble.
-    utf8_console: if (builtin.os.tag == .windows)
+    utf8_console: if (builtin.target.os.tag == .windows)
         configpkg.Config.Utf8Console
     else
-        void = if (builtin.os.tag == .windows) .auto else {},
+        void = if (builtin.target.os.tag == .windows) .auto else {},
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
@@ -983,6 +987,7 @@ const Subprocess = struct {
         // Get our env. If a default env isn't provided by the caller
         // then we get it ourselves.
         var env = cfg.env;
+        errdefer env.deinit();
 
         // If we have a resources dir then set our env var
         if (cfg.resources_dir) |dir| {
@@ -1044,7 +1049,7 @@ const Subprocess = struct {
             var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
             const xdg_data_dir_key = "XDG_DATA_DIRS";
-            if (std.fmt.bufPrint(&buf, "{s}/..", .{resources_dir})) |data_dir| {
+            if (std.mem.print(&buf, "{s}/..", .{resources_dir})) |data_dir| {
                 try env.put(
                     xdg_data_dir_key,
                     try appendEnv(
@@ -1058,7 +1063,7 @@ const Subprocess = struct {
             }
 
             const manpath_key = "MANPATH";
-            if (std.fmt.bufPrint(&buf, "{s}/../man", .{resources_dir})) |man_dir| {
+            if (std.mem.print(&buf, "{s}/../man", .{resources_dir})) |man_dir| {
                 // Always append with colon in front, as it mean that if
                 // `MANPATH` is empty, then it should be treated as an extra
                 // path instead of overriding all paths set by OS.
@@ -1088,7 +1093,7 @@ const Subprocess = struct {
         // Setup our shell integration, if we can.
         const shell_command: configpkg.Command = shell: {
             const default_shell_command: configpkg.Command =
-                cfg.command orelse .{ .shell = switch (builtin.os.tag) {
+                cfg.command orelse .{ .shell = switch (builtin.target.os.tag) {
                     .windows => "cmd.exe",
                     else => "sh",
                 } };
@@ -1129,7 +1134,7 @@ const Subprocess = struct {
             // detectShell (it sees the launcher, not the distro's shell).
             // Inject zsh/fish integration into the distro via WSLENV instead.
             // Login bash is unreachable (documented no-op).
-            if (comptime builtin.os.tag == .windows) wsl: {
+            if (comptime builtin.target.os.tag == .windows) wsl: {
                 var it = default_shell_command.argIterator(alloc) catch break :wsl;
                 defer it.deinit();
                 const arg0 = it.next() orelse break :wsl;
@@ -1181,7 +1186,7 @@ const Subprocess = struct {
             alloc,
             shell_command,
             internal_os.passwd,
-            if (comptime builtin.os.tag == .windows)
+            if (comptime builtin.target.os.tag == .windows)
                 cfg.utf8_console
             else
                 .auto,
@@ -1196,7 +1201,7 @@ const Subprocess = struct {
 
                 // The comptime here is important to ensure the full slice
                 // is put into the binary data and not the stack.
-                break :oom comptime switch (builtin.os.tag) {
+                break :oom comptime switch (builtin.target.os.tag) {
                     .windows => &.{"cmd.exe"},
                     else => &.{"/bin/sh"},
                 };
@@ -1219,7 +1224,7 @@ const Subprocess = struct {
         const cwd: ?[:0]u8 = if (wsl_default_cwd)
             null
         else if (cfg.working_directory) |cwd|
-            try alloc.dupeZ(u8, cwd)
+            try alloc.dupeSentinel(u8, cwd, 0)
         else
             null;
         const spawn_args: []const [:0]const u8 = if (wsl_default_cwd)
@@ -1275,7 +1280,7 @@ const Subprocess = struct {
         // it. Best-effort and self-gating to `wsl` commands; never fails the
         // spawn. Runs here (the IO-thread spawn site) rather than at argv-build
         // time, which is on the UI thread.
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             maybeProvisionWslTerminfo(alloc, self.args);
         }
 
@@ -1300,7 +1305,7 @@ const Subprocess = struct {
         });
         self.pty = pty;
         errdefer if (!in_child) {
-            if (comptime builtin.os.tag != .windows) {
+            if (comptime builtin.target.os.tag != .windows) {
                 _ = posix.system.close(pty.slave);
             }
 
@@ -1311,7 +1316,7 @@ const Subprocess = struct {
         // Cleanup we only run in our parent when we successfully start
         // the process.
         defer if (!in_child and self.process != null) {
-            if (comptime builtin.os.tag != .windows) {
+            if (comptime builtin.target.os.tag != .windows) {
                 // Once our subcommand is started we can close the slave
                 // side. This prevents the slave fd from being leaked to
                 // future children.
@@ -1413,31 +1418,31 @@ const Subprocess = struct {
             .args = self.args,
             .env = if (self.env) |*env| env else null,
             .cwd = cwd,
-            .stdin = if (comptime builtin.os.tag == .windows)
+            .stdin = if (comptime builtin.target.os.tag == .windows)
                 null
             else
                 .{
                     .handle = pty.slave,
                     .flags = .{ .nonblocking = false },
                 },
-            .stdout = if (comptime builtin.os.tag == .windows)
+            .stdout = if (comptime builtin.target.os.tag == .windows)
                 null
             else
                 .{
                     .handle = pty.slave,
                     .flags = .{ .nonblocking = false },
                 },
-            .stderr = if (comptime builtin.os.tag == .windows)
+            .stderr = if (comptime builtin.target.os.tag == .windows)
                 null
             else
                 .{
                     .handle = pty.slave,
                     .flags = .{ .nonblocking = false },
                 },
-            .pseudo_console = if (comptime builtin.os.tag == .windows)
+            .pseudo_console = if (comptime builtin.target.os.tag == .windows)
                 pty.pseudo_console
             else {},
-            .os_pre_exec = switch (comptime builtin.os.tag) {
+            .os_pre_exec = switch (comptime builtin.target.os.tag) {
                 .windows => null,
                 else => f: {
                     const f = struct {
@@ -1481,7 +1486,7 @@ const Subprocess = struct {
         log.info("started subcommand path={s} pid={?}", .{ self.args[0], cmd.pid });
 
         self.process = .{ .fork_exec = cmd };
-        return switch (builtin.os.tag) {
+        return switch (builtin.target.os.tag) {
             .windows => .{
                 .read = pty.out_pipe,
                 .write = pty.in_pipe,
@@ -1560,7 +1565,7 @@ const Subprocess = struct {
     /// exit code.
     fn killCommand(command: *Command) !void {
         if (command.pid) |pid| {
-            switch (builtin.os.tag) {
+            switch (builtin.target.os.tag) {
                 .windows => {
                     if (windows.exp.kernel32.TerminateProcess(pid, 0) == windows.FALSE) {
                         return windows.unexpectedError(windows.GetLastError());
@@ -1667,7 +1672,7 @@ const Subprocess = struct {
         // is the spawned shell itself; descendants are walked client-side
         // via Toolhelp32. Resolve that here from the Command HANDLE rather
         // than going through Pty, which returns null on Windows.
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             if (info == .foreground_pid) {
                 // Local capture intentionally named differently from the
                 // file-level `c = @cImport(...)` to avoid a shadow error
@@ -1898,7 +1903,7 @@ pub const ReadThread = struct {
         // Right now, on Darwin, `std.Thread.setName` can only name the current
         // thread, and we have no way to get the current thread from within it,
         // so instead we use this code to name the thread instead.
-        if (builtin.os.tag.isDarwin()) {
+        if (builtin.target.os.tag.isDarwin()) {
             internal_os.macos.pthread_setname_np(&"io-reader".*);
             setQosClass();
         }
@@ -1953,7 +1958,7 @@ pub const ReadThread = struct {
             return;
         };
         defer gather_thread.join();
-        if (comptime !builtin.os.tag.isDarwin()) {
+        if (comptime !builtin.target.os.tag.isDarwin()) {
             gather_thread.setName(global.io(), "io-gather") catch {};
         }
 
@@ -2006,7 +2011,7 @@ pub const ReadThread = struct {
     /// and publishes each batch to the parse stage. This thread owns
     /// all fd monitoring, including the quit fd.
     fn gatherMainPosix(fd: posix.fd_t, quit: posix.fd_t, pipeline: *Pipeline) void {
-        if (builtin.os.tag.isDarwin()) {
+        if (builtin.target.os.tag.isDarwin()) {
             internal_os.macos.pthread_setname_np(&"io-gather".*);
             setQosClass();
         }
@@ -2612,7 +2617,7 @@ fn execCommand(
 
         // The comptime here is important to ensure the full slice
         // is put into the binary data and not the stack.
-        return comptime switch (builtin.os.tag) {
+        return comptime switch (builtin.target.os.tag) {
             .windows => &.{"cmd.exe"},
             else => &.{"/bin/sh"},
         };
@@ -2717,8 +2722,7 @@ fn execCommand(
                 // Use "exec" to replace the bash process with
                 // our intended command so we don't have a parent
                 // process hanging around.
-                const cmd = try std.fmt.allocPrintSentinel(
-                    alloc,
+                const cmd = try alloc.printSentinel(
                     "exec -l {s}",
                     .{v},
                     0,
@@ -2743,7 +2747,7 @@ fn execCommand(
         // We need to clone the command since there's no guarantee the config remains valid.
         .direct => direct: {
             const cloned = (try command.clone(alloc)).direct;
-            if (comptime builtin.os.tag == .windows) {
+            if (comptime builtin.target.os.tag == .windows) {
                 const with_preamble = try maybeInjectUtf8Preamble(
                     alloc,
                     cloned,
@@ -2755,7 +2759,7 @@ fn execCommand(
         },
 
         .shell => |v| shell: {
-            if (comptime builtin.os.tag == .windows) {
+            if (comptime builtin.target.os.tag == .windows) {
                 // On Windows we only fall back to `cmd.exe /C <cmd>` when
                 // the command actually needs cmd.exe features (pipes,
                 // redirects, chaining, env expansion). Otherwise we parse
@@ -2783,7 +2787,7 @@ fn execCommand(
                     defer iter.deinit();
 
                     while (iter.next()) |arg| {
-                        const copy = try alloc.dupeZ(u8, arg);
+                        const copy = try alloc.dupeSentinel(u8, arg, 0);
                         try args.append(alloc, copy);
                     }
 
@@ -2805,7 +2809,7 @@ fn execCommand(
                         std.ascii.eqlIgnoreCase(args.items[0], "cmd.exe"))
                     {
                         if (global.environ().getAlloc(alloc, "COMSPEC")) |comspec| {
-                            args.items[0] = try alloc.dupeZ(u8, comspec);
+                            args.items[0] = try alloc.dupeSentinel(u8, comspec, 0);
                         } else |_| {}
                     }
 
@@ -2844,14 +2848,13 @@ fn execCommand(
                 // `.always` on non-CJK Windows) still forces UTF-8
                 // across the whole pipeline.
                 const script: [:0]const u8 = if (resolveUtf8Console(utf8_console) == .always)
-                    try std.fmt.allocPrintSentinel(
-                        alloc,
+                    try alloc.printSentinel(
                         "chcp 65001 >nul && {s}",
                         .{v},
                         0,
                     )
                 else
-                    try alloc.dupeZ(u8, v);
+                    try alloc.dupeSentinel(u8, v, 0);
 
                 try args.append(alloc, cmd);
                 try args.append(alloc, "/C");
@@ -2893,7 +2896,7 @@ fn execCommand(
 fn terminfoDir(buf: []u8, resources_dir: ?[]const u8) ?[]const u8 {
     const base = resources_dir orelse return null;
     const parent = std.fs.path.dirname(base) orelse return null;
-    return std.fmt.bufPrint(buf, "{s}/" ++ terminfo_paths.db_dir, .{parent}) catch null;
+    return std.mem.print(buf, "{s}/" ++ terminfo_paths.db_dir, .{parent}) catch null;
 }
 
 /// Compose the terminal-identification environment a child is spawned with:
@@ -2978,7 +2981,7 @@ fn setupTermEnvBy(
     // asks them separately so the log can say which one said no, and
     // `has_entry` is only consulted when the path is readable, since a
     // database we cannot point at is not worth a stat.
-    const gate = comptime builtin.os.tag == .windows;
+    const gate = comptime builtin.target.os.tag == .windows;
     const readable = if (gate) dir != null and
         pathReadable(dir.?) else true;
     const has_entry = if (gate) readable and
@@ -3035,7 +3038,7 @@ fn setupTermEnvBy(
 /// Elsewhere TERMINFO stays as it was, since that is the established
 /// behaviour on those platforms and their resources directory is not one an
 /// update rewrites.
-const terminfo_var = if (builtin.os.tag == .windows) "TERMINFO_DIRS" else "TERMINFO";
+const terminfo_var = if (builtin.target.os.tag == .windows) "TERMINFO_DIRS" else "TERMINFO";
 
 /// What a child is told about its terminal, decided from facts alone.
 const TermDecision = struct {
@@ -3254,7 +3257,7 @@ fn terminfoHasEntry(dir: []const u8, term: []const u8) bool {
     if (!std.fs.path.isAbsolute(dir)) return false;
 
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(
+    const path = std.mem.print(
         &buf,
         "{s}/" ++ terminfo_paths.hashed_leaf_format,
         .{ dir, term[0], term },
@@ -3374,7 +3377,7 @@ fn appendEnvAlways(
     current: []const u8,
     value: []const u8,
 ) Allocator.Error![]u8 {
-    return try std.fmt.allocPrint(alloc, "{s}{c}{s}", .{
+    return try alloc.print("{s}{c}{s}", .{
         current,
         std.fs.path.delimiter,
         value,
@@ -3482,7 +3485,7 @@ fn maybeProvisionWslTerminfo(
     alloc: Allocator,
     argv: []const [:0]const u8,
 ) void {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
 
     // Cheap gate first: most spawns are not WSL, so avoid the view alloc below.
     if (argv.len == 0 or !internal_os.windows_shell.isWslExe(argv[0])) return;
@@ -3582,7 +3585,7 @@ test "wslDistroSlug always yields a valid DiskCache key" {
         " -weird- ", // leading/trailing junk
         "My_Distro_",
         "....", // all non-alnum
-        "" ++ ("x" ** 100), // over-long label
+        &@as([100]u8, @splat('x')), // over-long label
         "",
     };
     inline for (names) |name| {
@@ -3594,7 +3597,7 @@ test "wslDistroSlug always yields a valid DiskCache key" {
     try testing.expectEqualStrings("Ubuntu-24-04", wslDistroSlug(&buf, "Ubuntu-24.04"));
     try testing.expectEqualStrings("Ubuntu", wslDistroSlug(&buf, "Ubuntu "));
     try testing.expectEqualStrings("wsl", wslDistroSlug(&buf, "...."));
-    try testing.expect(wslDistroSlug(&buf, "" ++ ("x" ** 100)).len == 63);
+    try testing.expect(wslDistroSlug(&buf, &@as([100]u8, @splat('x'))).len == 63);
 }
 
 /// When no wrap applies the input `args` slice is returned unchanged.
@@ -3603,7 +3606,7 @@ fn maybeWrapGitBashWithWinpty(
     alloc: Allocator,
     args: []const [:0]const u8,
 ) Allocator.Error![]const [:0]const u8 {
-    if (comptime builtin.os.tag != .windows) return args;
+    if (comptime builtin.target.os.tag != .windows) return args;
     if (args.len == 0) return args;
     if (internal_os.windows_shell.identify(args[0]) != .bash) return args;
 
@@ -3625,7 +3628,7 @@ fn maybeWrapGitBashWithWinpty(
     };
 
     const out = try alloc.alloc([:0]const u8, args.len + 1);
-    out[0] = try alloc.dupeZ(u8, winpty);
+    out[0] = try alloc.dupeSentinel(u8, winpty, 0);
     @memcpy(out[1..], args);
     return out;
 }
@@ -3649,7 +3652,7 @@ fn maybeInjectUtf8Preamble(
     args: []const [:0]const u8,
     utf8_console: configpkg.Config.Utf8Console,
 ) Allocator.Error![]const [:0]const u8 {
-    if (comptime builtin.os.tag != .windows) return args;
+    if (comptime builtin.target.os.tag != .windows) return args;
     if (args.len == 0) return args;
 
     // Honor the user kill switch first. `.auto` resolves against the
@@ -4133,7 +4136,7 @@ fn resolveUtf8Console(cfg: configpkg.Config.Utf8Console) ResolvedUtf8Console {
 }
 
 test "execCommand darwin: shell command" {
-    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    if (comptime !builtin.target.os.tag.isDarwin()) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4160,7 +4163,7 @@ test "execCommand darwin: shell command" {
 }
 
 test "execCommand darwin: direct command" {
-    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+    if (comptime !builtin.target.os.tag.isDarwin()) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4206,13 +4209,13 @@ test "execCommand: empty direct command" {
     // Never empty: argv[0] is always read by the caller.
     try testing.expectEqual(1, result.len);
     try testing.expectEqualStrings(
-        if (comptime builtin.os.tag == .windows) "cmd.exe" else "/bin/sh",
+        if (comptime builtin.target.os.tag == .windows) "cmd.exe" else "/bin/sh",
         result[0],
     );
 }
 
 test "execCommand: shell command, empty passwd" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4239,7 +4242,7 @@ test "execCommand: shell command, empty passwd" {
 }
 
 test "execCommand: shell command, error passwd" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4266,7 +4269,7 @@ test "execCommand: shell command, error passwd" {
 }
 
 test "execCommand: direct command, error passwd" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4292,7 +4295,7 @@ test "execCommand: direct command, error passwd" {
 }
 
 test "execCommand: direct command, config freed" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4324,7 +4327,7 @@ test "execCommand: direct command, config freed" {
 }
 
 test "execCommand windows: bare cmd.exe resolves via COMSPEC" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4359,7 +4362,7 @@ fn expectedCmdExeArg0(alloc: Allocator) Allocator.Error![]const u8 {
 }
 
 test "execCommand windows: shell command, single token spawns directly" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4386,7 +4389,7 @@ test "execCommand windows: shell command, single token spawns directly" {
 }
 
 test "execCommand windows: shell command, args split without cmd wrap" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4411,7 +4414,7 @@ test "execCommand windows: shell command, args split without cmd wrap" {
 }
 
 test "execCommand windows: shell command, quoted path kept as one arg" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4438,7 +4441,7 @@ test "execCommand windows: shell command, quoted path kept as one arg" {
 }
 
 test "execCommand windows: shell command with pipe falls back to cmd.exe" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4467,7 +4470,7 @@ test "execCommand windows: shell command with pipe falls back to cmd.exe" {
 }
 
 test "execCommand windows: shell command with redirect falls back to cmd.exe" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4492,7 +4495,7 @@ test "execCommand windows: shell command with redirect falls back to cmd.exe" {
 }
 
 test "execCommand windows: direct command is passed through unchanged" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4542,7 +4545,7 @@ test "windowsShellNeedsCmdWrapping" {
 }
 
 test "resolveUtf8Console: always returns always" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     try std.testing.expectEqual(
         @as(ResolvedUtf8Console, .always),
         resolveUtf8Console(.always),
@@ -4550,7 +4553,7 @@ test "resolveUtf8Console: always returns always" {
 }
 
 test "resolveUtf8Console: never returns never" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     try std.testing.expectEqual(
         @as(ResolvedUtf8Console, .never),
         resolveUtf8Console(.never),
@@ -4558,7 +4561,7 @@ test "resolveUtf8Console: never returns never" {
 }
 
 test "resolveUtf8Console: auto agrees with isCjkAnsiCodePage" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     // Cross-check the resolved value against the linked CJK helper for
     // whatever ACP the test host actually has. Catches a regression
     // where the auto branch silently stops calling isCjkAnsiCodePage.
@@ -4591,7 +4594,7 @@ fn testExecWindowsShell(
 }
 
 test "execCommand windows: cmd.exe under auto mode gets cmd preamble" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4607,7 +4610,7 @@ test "execCommand windows: cmd.exe under auto mode gets cmd preamble" {
 }
 
 test "execCommand windows: pwsh under forced never mode gets pwsh preamble" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4624,7 +4627,7 @@ test "execCommand windows: pwsh under forced never mode gets pwsh preamble" {
 }
 
 test "execCommand windows: powershell 5.1 under auto mode gets pwsh preamble" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4640,7 +4643,7 @@ test "execCommand windows: powershell 5.1 under auto mode gets pwsh preamble" {
 }
 
 test "execCommand windows: unknown shell under ConPTY has no preamble" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4654,7 +4657,7 @@ test "execCommand windows: unknown shell under ConPTY has no preamble" {
 }
 
 test "execCommand windows: vt-aware non-powershell (bash) under ConPTY has no preamble" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4668,7 +4671,7 @@ test "execCommand windows: vt-aware non-powershell (bash) under ConPTY has no pr
 }
 
 test "execCommand windows: utf8-console=never is a kill switch across transports" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4708,7 +4711,7 @@ test "execCommand windows: utf8-console=never is a kill switch across transports
 }
 
 test "execCommand windows: cmd with existing /c arg wraps user script" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4725,7 +4728,7 @@ test "execCommand windows: cmd with existing /c arg wraps user script" {
 }
 
 test "execCommand windows: cmd with existing /K arg wraps user script" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4745,7 +4748,7 @@ test "execCommand windows: cmd with existing /K arg wraps user script" {
 }
 
 test "execCommand windows: pwsh with existing -Command wraps user script" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4769,7 +4772,7 @@ test "execCommand windows: pwsh with existing -Command wraps user script" {
 }
 
 test "execCommand windows: pwsh with multi-token -Command script is joined" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4789,7 +4792,7 @@ test "execCommand windows: pwsh with multi-token -Command script is joined" {
 }
 
 test "execCommand windows: pwsh -Command script with spaces stays executable" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4813,7 +4816,7 @@ test "execCommand windows: pwsh -Command script with spaces stays executable" {
 }
 
 test "execCommand windows: pwsh -Command quoted path among tokens is not re-quoted" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4836,7 +4839,7 @@ test "execCommand windows: pwsh -Command quoted path among tokens is not re-quot
 }
 
 test "execCommand windows: cmd /c with quoted path preserves quoting on wrap" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4861,7 +4864,7 @@ test "execCommand windows: cmd /c with quoted path preserves quoting on wrap" {
 }
 
 test "execCommand windows: cmd /c single quoted script is wrapped verbatim" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4891,7 +4894,7 @@ test "execCommand windows: cmd /c single quoted script is wrapped verbatim" {
 }
 
 test "execCommand windows: pwsh with -c short form wraps user script" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4910,7 +4913,7 @@ test "execCommand windows: pwsh with -c short form wraps user script" {
 }
 
 test "execCommand windows: pwsh with -File leaves args untouched" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4931,7 +4934,7 @@ test "execCommand windows: pwsh with -File leaves args untouched" {
 }
 
 test "execCommand windows: pwsh -EncodedCommand gets preamble injected end-to-end" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4965,7 +4968,7 @@ test "execCommand windows: pwsh -EncodedCommand gets preamble injected end-to-en
 }
 
 test "execCommand windows: pwsh with trailing -Command (no script) leaves args untouched" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -4983,7 +4986,7 @@ test "execCommand windows: pwsh with trailing -Command (no script) leaves args u
 }
 
 test "writeQuotedArg: MS C runtime quoting edge cases" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5018,7 +5021,7 @@ test "writeQuotedArg: MS C runtime quoting edge cases" {
 }
 
 test "execCommand windows: cmd with trailing /c (no script) leaves args untouched" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5031,7 +5034,7 @@ test "execCommand windows: cmd with trailing /c (no script) leaves args untouche
 }
 
 test "execCommand windows: pwsh -Command with param() is left untouched" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5067,7 +5070,7 @@ test "execCommand windows: pwsh -Command with param() is left untouched" {
 }
 
 test "execCommand windows: pwsh -Command with #requires is left untouched" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5087,7 +5090,7 @@ test "execCommand windows: pwsh -Command with #requires is left untouched" {
 }
 
 test "execCommand windows: pwsh -Command with leading scriptblock is left untouched" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5107,7 +5110,7 @@ test "execCommand windows: pwsh -Command with leading scriptblock is left untouc
 }
 
 test "execCommand windows: pwsh -Command with leading whitespace + param is left untouched" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5137,7 +5140,7 @@ test "execCommand windows: pwsh -Command with leading whitespace + param is left
 }
 
 test "execCommand windows: pwsh with benign args gets appended preamble" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5154,7 +5157,7 @@ test "execCommand windows: pwsh with benign args gets appended preamble" {
 }
 
 test "execCommand windows: cmd-wrap path (pipes) gets chcp prepended to /C script" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5171,7 +5174,7 @@ test "execCommand windows: cmd-wrap path (pipes) gets chcp prepended to /C scrip
 }
 
 test "execCommand windows: direct command for cmd.exe gets cmd preamble" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5195,7 +5198,7 @@ test "execCommand windows: direct command for cmd.exe gets cmd preamble" {
 }
 
 test "execCommand windows: direct command for pwsh under never gets pwsh preamble" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5220,7 +5223,7 @@ test "execCommand windows: direct command for pwsh under never gets pwsh preambl
 }
 
 test "execCommand windows: pwsh.exe under auto/auto gets pwsh preamble (regression for #341)" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5256,7 +5259,7 @@ test "execCommand windows: pwsh.exe under auto/auto gets pwsh preamble (regressi
 }
 
 test "execCommand windows: pwsh.exe under utf8-console=never returns args unchanged" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5279,7 +5282,7 @@ test "execCommand windows: pwsh.exe under utf8-console=never returns args unchan
 }
 
 test "execCommand windows: bash.exe never gets a preamble (Preamble.none guard)" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -5329,7 +5332,7 @@ fn utf8FromUtf16LeBase64(alloc: Allocator, b64: []const u8) ![]u8 {
 }
 
 test "maybeInjectUtf8Preamble windows: -EncodedCommand gets preamble injected" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5351,7 +5354,7 @@ test "maybeInjectUtf8Preamble windows: -EncodedCommand gets preamble injected" {
 }
 
 test "maybeInjectUtf8Preamble windows: -EncodedCommand with param() is skipped" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5366,7 +5369,7 @@ test "maybeInjectUtf8Preamble windows: -EncodedCommand with param() is skipped" 
 }
 
 test "maybeInjectUtf8Preamble windows: invalid base64 -EncodedCommand is skipped" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5378,7 +5381,7 @@ test "maybeInjectUtf8Preamble windows: invalid base64 -EncodedCommand is skipped
 }
 
 test "maybeInjectUtf8Preamble windows: -EncodedCommand skipped when policy never" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5398,7 +5401,7 @@ test "maybeInjectUtf8Preamble windows: -EncodedCommand skipped when policy never
 // literal text (#1184). ---
 
 test "maybeInjectUtf8Preamble windows: single-token cmd /c script is not re-quoted" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5422,7 +5425,7 @@ test "maybeInjectUtf8Preamble windows: single-token cmd /c script is not re-quot
 }
 
 test "maybeInjectUtf8Preamble windows: single-token cmd /k script is not re-quoted" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5442,7 +5445,7 @@ test "maybeInjectUtf8Preamble windows: single-token cmd /k script is not re-quot
 }
 
 test "maybeInjectUtf8Preamble windows: single-token cmd /c script keeps its own quotes verbatim" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5466,7 +5469,7 @@ test "maybeInjectUtf8Preamble windows: single-token cmd /c script keeps its own 
 }
 
 test "maybeInjectUtf8Preamble windows: multi-token cmd /c tail still re-quotes per arg" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5490,7 +5493,7 @@ test "maybeInjectUtf8Preamble windows: multi-token cmd /c tail still re-quotes p
 }
 
 test "maybeInjectUtf8Preamble windows: composed cmd /c line carries exactly one quote pair" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5514,7 +5517,7 @@ test "maybeInjectUtf8Preamble windows: composed cmd /c line carries exactly one 
 }
 
 test "maybeInjectUtf8Preamble windows: quote-initial single-token script passes through verbatim" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5541,7 +5544,7 @@ test "maybeInjectUtf8Preamble windows: quote-initial single-token script passes 
 }
 
 test "maybeInjectUtf8Preamble windows: bare spaced program path loses its accidental quoting" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5569,7 +5572,7 @@ test "maybeInjectUtf8Preamble windows: bare spaced program path loses its accide
 }
 
 test "maybeInjectUtf8Preamble windows: cmd /c script under never policy is untouched" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5593,7 +5596,7 @@ test "maybeInjectUtf8Preamble windows: cmd /c script under never policy is untou
 }
 
 test "maybeInjectUtf8Preamble windows: caller-supplied /s keeps its place in the wrap" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5634,7 +5637,7 @@ fn utf16LeBase64FromUtf8WithBom(alloc: Allocator, s: []const u8) ![:0]u8 {
 }
 
 test "maybeInjectUtf8Preamble windows: -EncodedCommand with leading BOM preserves BOM and injects" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5648,14 +5651,14 @@ test "maybeInjectUtf8Preamble windows: -EncodedCommand with leading BOM preserve
     // original script (the script's own BOM is not duplicated mid-stream).
     const decoded = try utf8FromUtf16LeBase64(alloc, out[2]);
     const prefix = internal_os.windows_shell.Preamble.pwsh.prefix();
-    const expected_head = try std.fmt.allocPrint(alloc, "\u{FEFF}{s}", .{prefix});
+    const expected_head = try alloc.print("\u{FEFF}{s}", .{prefix});
     try testing.expect(std.mem.startsWith(u8, decoded, expected_head));
     try testing.expect(std.mem.endsWith(u8, decoded, "Write-Output 'hi'"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, decoded, "\u{FEFF}"));
 }
 
 test "maybeInjectUtf8Preamble windows: -EncodedCommand with BOM + param() is skipped" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5670,7 +5673,7 @@ test "maybeInjectUtf8Preamble windows: -EncodedCommand with BOM + param() is ski
 }
 
 test "maybeWrapGitBashWithWinpty windows: non-bash is left untouched" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5682,7 +5685,7 @@ test "maybeWrapGitBashWithWinpty windows: non-bash is left untouched" {
 }
 
 test "maybeWrapGitBashWithWinpty windows: relative bash is skipped (no accessAbsolute panic)" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5699,7 +5702,7 @@ test "maybeWrapGitBashWithWinpty windows: relative bash is skipped (no accessAbs
 }
 
 test "maybeWrapGitBashWithWinpty windows: absolute bash with adjacent winpty is wrapped" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5712,8 +5715,8 @@ test "maybeWrapGitBashWithWinpty windows: absolute bash with adjacent winpty is 
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "bash.exe", .data = "" });
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "winpty.exe", .data = "" });
     const real = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
-    const bash = try std.fmt.allocPrintSentinel(alloc, "{s}\\bash.exe", .{real}, 0);
-    const winpty = try std.fmt.allocPrint(alloc, "{s}\\winpty.exe", .{real});
+    const bash = try alloc.printSentinel("{s}\\bash.exe", .{real}, 0);
+    const winpty = try alloc.print("{s}\\winpty.exe", .{real});
 
     const args: []const [:0]const u8 = &.{ bash, "--login" };
     const out = try maybeWrapGitBashWithWinpty(alloc, args);
@@ -5944,8 +5947,7 @@ test "terminfoHasEntry rejects a truncated extended section" {
 
     // Trailing bytes are refused too. The size has to be exactly what the
     // header accounts for, which is stricter than ncurses on purpose.
-    const padded = try std.fmt.allocPrint(
-        alloc,
+    const padded = try alloc.print(
         "{s}\x00\x00",
         .{compiled_entry_bytes_ext},
     );
@@ -6085,7 +6087,7 @@ test "terminfoHasEntry rejects a missing directory, an empty term and a short fi
     try testing.expect(!terminfoHasEntry(dir, ""));
     try testing.expect(!terminfoHasEntry(dir, "xterm-short"));
 
-    const missing = try std.fmt.allocPrint(alloc, "{s}/nope", .{dir});
+    const missing = try alloc.print("{s}/nope", .{dir});
     try testing.expect(!terminfoHasEntry(missing, "xterm-ghostty"));
 }
 
@@ -6109,7 +6111,7 @@ fn testResourcesTree(
 
     if (entry) |name| {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const sub_dir = try std.fmt.bufPrint(
+        const sub_dir = try std.mem.print(
             &buf,
             "share/terminfo/{x:0>2}",
             .{name[0]},
@@ -6117,7 +6119,7 @@ fn testResourcesTree(
         try tmp.dir.createDirPath(io, sub_dir);
 
         var file_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const sub_path = try std.fmt.bufPrint(
+        const sub_path = try std.mem.print(
             &file_buf,
             "share/terminfo/{x:0>2}/{s}",
             .{ name[0], name },
@@ -6129,7 +6131,7 @@ fn testResourcesTree(
     }
 
     const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    return try std.fmt.allocPrint(alloc, "{s}/share/ghostty", .{root});
+    return try alloc.print("{s}/share/ghostty", .{root});
 }
 
 test "termDecision opens the gate when both facts are true" {
@@ -6173,13 +6175,13 @@ test "termDecision refuses for the right reason and says which" {
     // Every reason has its own sentence, so the log line can be acted on. A
     // new variant with no sentence, or one copied from its neighbour, fails
     // here rather than shipping an unactionable warning.
-    inline for (@typeInfo(TermDecision.Refusal).@"enum".fields) |a| {
-        const ra: TermDecision.Refusal = @enumFromInt(a.value);
+    inline for (@typeInfo(TermDecision.Refusal).@"enum".field_values) |a_value| {
+        const ra: TermDecision.Refusal = @fromBackingInt(a_value);
         try testing.expect(ra.explain().len > 0);
 
-        inline for (@typeInfo(TermDecision.Refusal).@"enum".fields) |b| {
-            if (a.value == b.value) continue;
-            const rb: TermDecision.Refusal = @enumFromInt(b.value);
+        inline for (@typeInfo(TermDecision.Refusal).@"enum".field_values) |b_value| {
+            if (a_value == b_value) continue;
+            const rb: TermDecision.Refusal = @fromBackingInt(b_value);
             try testing.expect(!std.mem.eql(u8, ra.explain(), rb.explain()));
         }
     }
@@ -6208,11 +6210,11 @@ test "applyTermEnv writes the configured term and the pointer when told to" {
     // Both names spelled out, not terminfo_var: the const follows its own
     // flip, so an assertion through it cannot tell TERMINFO from
     // TERMINFO_DIRS. Naming both makes the flip a failure on every platform.
-    const expected_var = if (comptime builtin.os.tag == .windows)
+    const expected_var = if (comptime builtin.target.os.tag == .windows)
         "TERMINFO_DIRS"
     else
         "TERMINFO";
-    const other_var = if (comptime builtin.os.tag == .windows)
+    const other_var = if (comptime builtin.target.os.tag == .windows)
         "TERMINFO"
     else
         "TERMINFO_DIRS";
@@ -6243,7 +6245,7 @@ test "applyTermEnv withholds the pointer when told to" {
 }
 
 test "setupTermEnv windows: a source-only tree keeps the conservative TERM" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -6271,7 +6273,7 @@ test "setupTermEnv windows: a source-only tree keeps the conservative TERM" {
 }
 
 test "setupTermEnv windows: a compiled entry does not open the gate under a drive letter" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -6300,7 +6302,7 @@ test "setupTermEnv windows: a compiled entry does not open the gate under a driv
 }
 
 test "setupTermEnvBy windows: a readable path with a compiled entry opens the gate" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -6409,7 +6411,7 @@ test "setupTermEnv: no resources directory means no terminfo pointer at all" {
 }
 
 test "setupTermEnv non-windows: the configured term is used as given" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -6552,7 +6554,7 @@ test "ReadThread windows: the reader is interrupted until it acknowledges" {
 }
 
 test "ReadThread windows: a blocked real read is interrupted and decoded" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
 
@@ -6666,7 +6668,7 @@ test "ReadThread windows: a blocked real read is interrupted and decoded" {
 }
 
 test "ReadThread windows: conpty's startup DA1 is answered on the pty input and kept from the parser" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
 
@@ -6688,7 +6690,7 @@ test "ReadThread windows: conpty's startup DA1 is answered on the pty input and 
 
     var name_buf: [128]u8 = undefined;
     var name_buf_w: [128]u16 = undefined;
-    const name = try std.fmt.bufPrint(
+    const name = try std.mem.print(
         &name_buf,
         "\\\\.\\pipe\\LOCAL\\ghostty-test-handshake-{d}",
         .{windows.GetCurrentProcessId()},
@@ -6827,4 +6829,54 @@ test "ReadThread windows: conpty's startup DA1 is answered on the pty input and 
         null,
     ) != windows.FALSE);
     try testing.expectEqualStrings(conpty_handshake.DA1_REPLY, reply_buf[0..got]);
+}
+
+test "init frees the env when it fails" {
+    const testing = std.testing;
+
+    var config = try configpkg.Config.default(testing.allocator);
+    defer config.deinit();
+
+    const Run = struct {
+        fn initWithEnv(alloc: Allocator, cfg: *const configpkg.Config) !void {
+            var env: EnvMap = .init(alloc);
+            {
+                errdefer env.deinit();
+                try env.put("HOME", "/home/ghostty");
+                try env.put("SHELL", "/bin/sh");
+            }
+
+            // The env is not freed here once init has it: the failing
+            // allocator reports it as a leak unless init freed it.
+            var exec = try init(alloc, .{
+                .env = env,
+                .resources_dir = null,
+                .term = "xterm-ghostty",
+                .rt_pre_exec_info = .init(cfg),
+                .rt_post_fork_info = .init(cfg),
+            });
+            exec.deinit();
+        }
+    };
+
+    // Fail each allocation in turn, while building the env and inside init,
+    // as std.testing.checkAllAllocationFailures does. That function cannot
+    // be used directly: init deliberately falls back to a basic shell when
+    // building the command fails, so some runs succeed despite the failure.
+    // Every run must still free all it allocated.
+    const count = count: {
+        var failing: testing.FailingAllocator = .init(testing.allocator, .{});
+        try Run.initWithEnv(failing.allocator(), &config);
+        break :count failing.alloc_index;
+    };
+    for (0..count) |fail_index| {
+        var failing: testing.FailingAllocator = .init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        Run.initWithEnv(failing.allocator(), &config) catch |err| switch (err) {
+            error.OutOfMemory => {},
+            else => return err,
+        };
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }

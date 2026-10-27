@@ -5,6 +5,7 @@
 //! file but do not cross-reference the Metal definitions; verify manually
 //! if drift is suspected.
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const math = @import("../../math.zig");
 const mirrors = @import("../shader_mirrors.zig");
 
@@ -13,7 +14,7 @@ const hlsl_source = @embedFile("../shaders/hlsl/shaders.hlsl");
 
 /// GPU uniform values for the cell shaders.
 pub const Uniforms = extern struct {
-    projection_matrix: math.Mat align(16),
+    projection_matrix: [16]f32 align(16),
     screen_size: [2]f32 align(8),
     cell_size: [2]f32 align(8),
     grid_size: [2]u16 align(4),
@@ -291,10 +292,10 @@ comptime {
     // added on one side only, in either direction, and the body scan
     // refuses a member HLSL would default-pack.
     const uniforms_cbuffer = hlslCbufferBody(hlsl_source);
-    if (uniforms_hlsl_fields.len != @typeInfo(Uniforms).@"struct".fields.len)
+    if (uniforms_hlsl_fields.len != meta_compat.structFields(Uniforms).len)
         @compileError(std.fmt.comptimePrint(
             "Uniforms has {d} fields but uniforms_hlsl_fields maps {d} to HLSL cbuffer fields; every field needs a mapping",
-            .{ @typeInfo(Uniforms).@"struct".fields.len, uniforms_hlsl_fields.len },
+            .{ meta_compat.structFields(Uniforms).len, uniforms_hlsl_fields.len },
         ));
     if (hlslPackoffsetCount(uniforms_cbuffer) != uniforms_hlsl_fields.len)
         @compileError(std.fmt.comptimePrint(
@@ -322,7 +323,7 @@ comptime {
 
     // The pixel shader reads CellText.bools as raw bits through these
     // defines, so each packed field needs its exact mask there.
-    for (std.meta.fields(@FieldType(CellText, "bools")), 0..) |field, bit| {
+    for (meta_compat.structFields(@FieldType(CellText, "bools")), 0..) |field, bit| {
         if (std.mem.startsWith(u8, field.name, "_")) continue;
         mirrors.expectMirrored(
             hlsl_source,
@@ -344,7 +345,7 @@ comptime {
     // block of its own so a layout failure above does not mask these.
     @setEvalBranchQuota(1_000_000);
     const bools_ty = @FieldType(Uniforms, "bools");
-    if (@sizeOf(bools_ty) != @typeInfo(bools_ty).@"struct".fields.len)
+    if (@sizeOf(bools_ty) != meta_compat.structFields(bools_ty).len)
         @compileError("Uniforms.bools must stay one byte per flag: shaders.hlsl reads the flags as bytes of one uint");
     const wide_index = std.meta.fieldIndex(bools_ty, "cursor_wide") orelse
         @compileError("Uniforms.bools must keep a cursor_wide flag");

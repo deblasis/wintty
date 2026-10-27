@@ -36,7 +36,7 @@ pub fn setup(alloc: Allocator, resource_dir: []const u8, env: *EnvMap) !void {
     // GHOSTTY_ZSH_ZDOTDIR unset yields.
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const win = try std.fmt.bufPrint(&buf, "{s}/shell-integration/zsh", .{resource_dir});
+        const win = try std.mem.print(&buf, "{s}/shell-integration/zsh", .{resource_dir});
         if (dirExists(win)) {
             if (try posix_path.windowsToWsl(alloc, win)) |wsl_path| {
                 defer alloc.free(wsl_path);
@@ -49,7 +49,7 @@ pub fn setup(alloc: Allocator, resource_dir: []const u8, env: *EnvMap) !void {
     // fish: prepend <resource_dir>/shell-integration to XDG_DATA_DIRS.
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const win = try std.fmt.bufPrint(&buf, "{s}/shell-integration", .{resource_dir});
+        const win = try std.mem.print(&buf, "{s}/shell-integration", .{resource_dir});
         if (dirExists(win)) {
             if (try posix_path.windowsToWsl(alloc, win)) |wsl_dir| {
                 defer alloc.free(wsl_dir);
@@ -60,7 +60,7 @@ pub fn setup(alloc: Allocator, resource_dir: []const u8, env: *EnvMap) !void {
                 const joined = if (current.len == 0)
                     try alloc.dupe(u8, wsl_dir)
                 else
-                    try std.fmt.allocPrint(alloc, "{s}:{s}", .{ wsl_dir, current });
+                    try alloc.print("{s}:{s}", .{ wsl_dir, current });
                 defer alloc.free(joined);
                 try env.put("XDG_DATA_DIRS", joined);
                 try names.append(alloc, "XDG_DATA_DIRS");
@@ -133,7 +133,7 @@ test "setup: injects zsh + fish env and registers WSLENV" {
     // The translator only produces a /mnt path from a Windows drive path, so
     // this end-to-end assertion is meaningful only on Windows (tmp realpath is
     // a drive path there). The translator itself is unit-tested cross-platform.
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
 
@@ -152,7 +152,7 @@ test "setup: injects zsh + fish env and registers WSLENV" {
     // ZDOTDIR -> /mnt form of <res>/shell-integration/zsh
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const zsh_win = try std.fmt.bufPrint(&buf, "{s}/shell-integration/zsh", .{res});
+        const zsh_win = try std.mem.print(&buf, "{s}/shell-integration/zsh", .{res});
         const expected = (try posix_path.windowsToWsl(alloc, zsh_win)).?;
         defer alloc.free(expected);
         try std.testing.expectEqualStrings(expected, env.get("ZDOTDIR").?);
@@ -161,7 +161,7 @@ test "setup: injects zsh + fish env and registers WSLENV" {
     // XDG_DATA_DIRS prefixed with the /mnt integration dir + Linux defaults.
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const integ_win = try std.fmt.bufPrint(&buf, "{s}/shell-integration", .{res});
+        const integ_win = try std.mem.print(&buf, "{s}/shell-integration", .{res});
         const integ = (try posix_path.windowsToWsl(alloc, integ_win)).?;
         defer alloc.free(integ);
         try std.testing.expectEqualStrings(integ, env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR").?);
@@ -181,7 +181,7 @@ test "setup: injects zsh + fish env and registers WSLENV" {
 }
 
 test "setup: omits GHOSTTY_SHELL_FEATURES from WSLENV when unset" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});

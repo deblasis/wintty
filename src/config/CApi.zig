@@ -277,7 +277,7 @@ fn commandString(
     command: @import("command.zig").Command,
 ) std.mem.Allocator.Error![:0]const u8 {
     switch (command) {
-        .shell => |v| return try alloc.dupeZ(u8, v),
+        .shell => |v| return try alloc.dupeSentinel(u8, v, 0),
         .direct => |argv| {
             var buf: std.ArrayList(u8) = .empty;
             errdefer buf.deinit(alloc);
@@ -402,7 +402,7 @@ test "ghostty_config_load_default_files reports and counts, and creates nothing"
 
     // macOS also searches Application Support, which this root does not
     // move, so the counts below would not be the whole picture there.
-    if (comptime builtin.os.tag == .macos) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .macos) return error.SkipZigTest;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -494,7 +494,7 @@ test "ghostty_config_create_default_file writes one, and never over one that arr
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    if (comptime builtin.os.tag == .macos) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .macos) return error.SkipZigTest;
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -742,7 +742,7 @@ test "ghostty_config_command: a defaulted command is not a request" {
     // desktop build does it: on Windows that fills `command` with cmd.exe.
     // The host must still hear "unset", or it runs cmd.exe in place of the
     // user's default profile.
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     Config.testing_desktop_defaults = true;
     defer Config.testing_desktop_defaults = false;
 
@@ -777,7 +777,7 @@ test "finalize: a command the user set is not marked defaulted" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     Config.testing_desktop_defaults = true;
     defer Config.testing_desktop_defaults = false;
 
@@ -789,8 +789,7 @@ test "finalize: a command the user set is not marked defaulted" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "t3-theme", .data = "background = #123456\n" });
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = buf[0..try tmp.dir.realPath(testing.io, &buf)];
-    const theme_arg = try std.fmt.allocPrint(
-        alloc,
+    const theme_arg = try alloc.print(
         "--theme={s}{s}t3-theme",
         .{ root, std.fs.path.sep_str },
     );

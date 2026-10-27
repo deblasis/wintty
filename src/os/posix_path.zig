@@ -499,7 +499,7 @@ test "posix_path: OSC 7 URL forms extract and translate (reportPwd seam)" {
 
     for (cases) |c| {
         const u = try uri.parse(c.url, .{
-            .mac_address = comptime builtin.os.tag != .macos,
+            .mac_address = comptime builtin.target.os.tag != .macos,
             .raw_path = std.mem.startsWith(u8, c.url, "kitty-shell-cwd://"),
         });
         const path = try u.path.toRawMaybeAlloc(aa);
@@ -510,7 +510,7 @@ test "posix_path: OSC 7 URL forms extract and translate (reportPwd seam)" {
     // Rooted (MSYS2/Cygwin) form through the same parse chain.
     {
         const u = try uri.parse("kitty-shell-cwd://msys/c/Users/alex", .{
-            .mac_address = comptime builtin.os.tag != .macos,
+            .mac_address = comptime builtin.target.os.tag != .macos,
             .raw_path = true,
         });
         const path = try u.path.toRawMaybeAlloc(aa);
@@ -903,7 +903,7 @@ test "posix_path: OSC 7 file:// from a native Windows shell (reportPwd seam)" {
     const aa = arena.allocator();
 
     const u = try uri.parse("file://MYPC/c:/Users/alex", .{
-        .mac_address = comptime builtin.os.tag != .macos,
+        .mac_address = comptime builtin.target.os.tag != .macos,
         .raw_path = false,
     });
     const path = try u.path.toRawMaybeAlloc(aa);

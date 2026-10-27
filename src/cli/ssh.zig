@@ -18,7 +18,7 @@ const usage =
     \\Usage: wintty +ssh [flags] [--] <ssh args...>
     \\
     \\Flags:
-    \\  --forward-env[=bool]  Enable TERM / SendEnv forwarding. Default: true.
+    \\  --forward-env[=bool]  Send Wintty env vars to the remote. Default: true.
     \\  --terminfo[=bool]     Install Wintty terminfo on first connect. Default: true.
     \\  --cache[=bool]        Use the terminfo install cache. Default: true.
     \\  --ssh=<path>          Path to the ssh binary. Default: first `ssh` on PATH.
@@ -33,10 +33,13 @@ pub const Options = struct {
     /// Set by the CLI parser for deinit.
     _arena: ?ArenaAllocator = null,
 
-    /// Maps to the `ssh-env` shell integration feature.
+    /// Send `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION` to
+    /// the remote host. Maps to the `ssh-env` shell integration feature.
     @"forward-env": bool = true,
 
-    /// Maps to the `ssh-terminfo` shell integration feature.
+    /// Install Ghostty's terminfo on the remote host and use
+    /// `xterm-ghostty` as `TERM` when it's available. Maps to the
+    /// `ssh-terminfo` shell integration feature.
     terminfo: bool = true,
 
     /// When false, both cache read and write are bypassed.
@@ -120,34 +123,54 @@ pub const Options = struct {
 /// `alias ssh='ghostty +ssh --'`) if you prefer not to use the shell
 /// integration.
 ///
-/// `+ssh` performs up to two pieces of setup before launching `ssh`:
+/// Before it starts `ssh`, `+ssh` can do two pieces of setup. Both are
+/// on by default, and each has its own flag:
 ///
-///   1. **Environment forwarding** (`--forward-env`). Sets `TERM` to
-///      `xterm-256color` and requests `SendEnv` forwarding of
-///      `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION` so the
-///      remote shell can still detect that it's running inside Ghostty.
-///      The remote `sshd_config` must list these in `AcceptEnv` for
-///      forwarding to succeed.
+///   1. **Forward Ghostty's environment** (`--forward-env`). Asks `ssh` to
+///      send `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION` to the
+///      remote host using `SendEnv`. Programs on the remote host can use
+///      these to tell that they're running inside Ghostty. The remote
+///      server only accepts them if its `sshd_config` allows them:
 ///
-///   2. **Terminfo install** (`--terminfo`). On the first connection to a
-///      given destination, installs Ghostty's embedded terminfo entry on the
-///      remote host using `ssh tic -x -` over a shared `ControlMaster`
-///      connection. Successful installs are cached
-///      (see `ghostty +ssh-cache`) so subsequent connections skip this
-///      step. When terminfo is successfully installed or already cached,
-///      `TERM` is set to `xterm-ghostty` instead of `xterm-256color`.
+///          AcceptEnv COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION
 ///
-/// If `--terminfo` install fails (e.g. `tic` not available on the
-/// remote, filesystem permissions), a warning is logged and the
-/// connection continues with `TERM=xterm-256color`.
+///   2. **Install Ghostty's terminfo** (`--terminfo`). The first time you
+///      connect to a host, `+ssh` copies Ghostty's terminfo entry to it and
+///      compiles it with `tic`. This teaches programs on the remote host
+///      how to use the `xterm-ghostty` terminal type. Successful installs
+///      are cached (see `ghostty +ssh-cache`), so later connections to the
+///      same host skip this step.
+///
+/// When either flag is enabled, `+ssh` also sets `TERM` for the remote
+/// session:
+///
+///   * `xterm-ghostty` if the terminfo entry was just installed, or if the
+///     host is already in the cache.
+///
+///   * `xterm-256color` in every other case. This includes
+///     `--terminfo=false` and installs that fail, for example because the
+///     remote host has no `tic`. A failed install prints a warning, and the
+///     connection continues. Almost every system knows `xterm-256color`,
+///     so it's a safe fallback.
+///
+/// `+ssh` sets `TERM` in the environment of the `ssh` process instead of
+/// passing `-o SetEnv=TERM=...`. `ssh` always sends `TERM` when it opens a
+/// remote terminal, so the server doesn't need to allow it with
+/// `AcceptEnv`. This also keeps any `SetEnv` lines in your `~/.ssh/config`
+/// working. `ssh` only uses the first `SetEnv` it finds, so a `SetEnv` on
+/// the command line would quietly replace yours.
+///
+/// When both flags are disabled, `+ssh` leaves `TERM` alone and runs
+/// `ssh` with your environment unchanged.
 ///
 /// Flags:
 ///
-///   * `--forward-env=<bool>`: Enable `TERM` / `SendEnv` environment
-///     forwarding. Default: `true`.
+///   * `--forward-env=<bool>`: Send `COLORTERM`, `TERM_PROGRAM`, and
+///     `TERM_PROGRAM_VERSION` to the remote host. Default: `true`.
 ///
-///   * `--terminfo=<bool>`: Enable automatic terminfo install on first
-///     connection. Default: `true`.
+///   * `--terminfo=<bool>`: Install Ghostty's terminfo on the first
+///     connection to each host, and use `xterm-ghostty` as `TERM` when it's
+///     available. Default: `true`.
 ///
 ///   * `--cache=<bool>`: Use the terminfo install cache. Default: `true`.
 ///     When `false`, both the cache read (skip-if-installed) and the
@@ -167,8 +190,21 @@ pub const Options = struct {
 ///     # Basic invocation using defaults:
 ///     ghostty +ssh user@example.com
 ///
-///     # Forward Ghostty env vars but skip the terminfo install:
+///     # Forward Ghostty env vars but skip the terminfo install.
+///     # The remote session uses TERM=xterm-256color:
 ///     ghostty +ssh --terminfo=false user@example.com
+///
+///     # Install terminfo but don't send any extra env vars:
+///     ghostty +ssh --forward-env=false user@example.com
+///
+///     # SetEnv lines in your ssh config still apply. With this entry in
+///     # ~/.ssh/config:
+///     #
+///     #   Host dev
+///     #       SetEnv EDITOR=vim
+///     #
+///     # ssh still sends EDITOR=vim, along with the TERM chosen by +ssh:
+///     ghostty +ssh dev
 ///
 ///     # `ssh` flags (short-form `-p`, etc.) pass through unchanged:
 ///     ghostty +ssh -p 2222 -i ~/.ssh/id_ed25519 user@example.com
@@ -290,19 +326,27 @@ fn runInner(
         };
     };
 
+    // Set TERM in ssh's own environment instead of passing
+    // `-o SetEnv=TERM=...`. ssh only uses the first SetEnv it finds, so a
+    // SetEnv on the command line would replace every SetEnv in the user's
+    // ssh config. ssh sends TERM on its own when it opens a remote
+    // terminal, so the server doesn't need `AcceptEnv TERM` either.
+    //
+    // We do this whenever either feature is on, not only --forward-env.
+    // Otherwise a failed install with --forward-env=false would leave the
+    // inherited TERM=xterm-ghostty on a host that can't use it.
+    var environ_map: ?std.process.Environ.Map = if (opts.@"forward-env" or opts.terminfo)
+        try global.environMap()
+    else
+        null;
+    defer if (environ_map) |*m| m.deinit();
+    if (environ_map) |*m| try m.put("TERM", session.term);
+
     // Build the full argv: [ssh, ...our opts, ...user args]
-    const env_opts: []const []const u8 = if (opts.@"forward-env") env_opts: {
-        const set_term = try std.fmt.allocPrint(
-            alloc,
-            "SetEnv=TERM={s}",
-            .{session.term},
-        );
-        break :env_opts &.{
-            "-o", set_term,
-            "-o", "SendEnv=COLORTERM",
-            "-o", "SendEnv=TERM_PROGRAM",
-            "-o", "SendEnv=TERM_PROGRAM_VERSION",
-        };
+    const env_opts: []const []const u8 = if (opts.@"forward-env") &.{
+        "-o", "SendEnv=COLORTERM",
+        "-o", "SendEnv=TERM_PROGRAM",
+        "-o", "SendEnv=TERM_PROGRAM_VERSION",
     } else &.{};
     const argv = try std.mem.concat(alloc, []const u8, &.{
         &.{opts.ssh},
@@ -311,7 +355,7 @@ fn runInner(
     });
     verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
 
-    const exit_code = childExec(argv) catch |err| {
+    const exit_code = childExec(argv, if (environ_map) |*m| m else null) catch |err| {
         try stderr.print("Error: failed to run {s}: {t}\n", .{ argv[0], err });
         return 1;
     };
@@ -474,13 +518,13 @@ fn parseDestination(alloc: Allocator, stdout: []const u8) ?[]const u8 {
     }
 
     if (port.len == 0 or std.mem.eql(u8, port, "22")) {
-        return std.fmt.allocPrint(alloc, "{s}@{s}", .{ user, host }) catch null;
+        return alloc.print("{s}@{s}", .{ user, host }) catch null;
     }
 
     if (std.mem.indexOfScalar(u8, host, ':') != null) {
-        return std.fmt.allocPrint(alloc, "{s}@[{s}]:{s}", .{ user, host, port }) catch null;
+        return alloc.print("{s}@[{s}]:{s}", .{ user, host, port }) catch null;
     }
-    return std.fmt.allocPrint(alloc, "{s}@{s}:{s}", .{ user, host, port }) catch null;
+    return alloc.print("{s}@{s}:{s}", .{ user, host, port }) catch null;
 }
 
 /// Install Ghostty's terminfo on the remote host over a short-lived SSH
@@ -496,8 +540,7 @@ fn installRemoteTerminfo(
     // limits sockaddr_un.sun_path to ~104 bytes, so keeping the path
     // short leaves margin.
     const control_path = try internal_os.randomTmpPath(alloc, "ghostty-ssh-");
-    const control_path_opt = try std.fmt.allocPrint(
-        alloc,
+    const control_path_opt = try alloc.print(
         "ControlPath={s}",
         .{control_path},
     );
@@ -521,10 +564,19 @@ fn installRemoteTerminfo(
     terminfo_install.install(alloc, prefix, opts.verbose) catch return error.InstallFailed;
 }
 
-/// Returns `128 + signum` for signal-killed children, matching shell convention.
-fn childExec(argv: []const []const u8) !u8 {
+/// Run `argv` with the terminal's stdin, stdout, and stderr, and wait for
+/// it to exit. When `environ_map` is null, the child inherits our
+/// environment. Otherwise, it replaces the environment entirely.
+///
+/// Returns the child's exit code, or `128 + signum` if a signal killed it,
+/// matching shell convention.
+fn childExec(
+    argv: []const []const u8,
+    environ_map: ?*const std.process.Environ.Map,
+) !u8 {
     var child = try std.process.spawn(global.io(), .{
         .argv = argv,
+        .environ_map = environ_map,
         .stdin = .inherit,
         .stdout = .inherit,
         .stderr = .inherit,
@@ -533,7 +585,7 @@ fn childExec(argv: []const []const u8) !u8 {
     const term = try child.wait(global.io());
     return switch (term) {
         .exited => |rc| rc,
-        .signal => |sig| @as(u8, 128) + @as(u8, @intCast(@min(@intFromEnum(sig), 127))),
+        .signal => |sig| @as(u8, 128) + @as(u8, @intCast(@min(@backingInt(sig), 127))),
         .stopped, .unknown => 1,
     };
 }

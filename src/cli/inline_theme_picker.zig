@@ -177,7 +177,7 @@ pub const InlineThemePicker = struct {
     /// Write a formatted string.
     fn print(self: *InlineThemePicker, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
-        const slice = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        const slice = std.mem.print(&buf, fmt, args) catch return;
         self.write(slice);
     }
 

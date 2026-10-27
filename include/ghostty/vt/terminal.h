@@ -78,7 +78,7 @@ extern "C" {
  *
  * All callbacks are invoked synchronously during VT writes. Callbacks
  * **must not** call ghostty_terminal_vt_write() or
- * ghostty_terminal_vt_write_until_ground() on the same terminal
+ * ghostty_terminal_vt_write_until() on the same terminal
  * (no reentrancy).
  * And callbacks must be very careful to not block for too long or perform 
  * expensive operations, since they are blocking further IO processing.
@@ -399,6 +399,250 @@ typedef enum GHOSTTY_ENUM_TYPED {
 } GhosttyTerminalCursorStyle;
 
 /**
+ * A point in the VT stream where ghostty_terminal_vt_write_until() can stop.
+ *
+ * The values are bit flags. Combine them with `|` to stop at any of several
+ * boundaries.
+ *
+ * Most boundaries mark the first or last byte of a control string: an APC,
+ * DCS or OSC sequence, made of an introducer, some content, and a
+ * terminator. GROUND is different. It marks the state between sequences
+ * rather than a byte inside one.
+ *
+ * Terminal protocols spell control bytes two ways, and both are recognized.
+ * A 7-bit introducer is ESC followed by one byte, such as `ESC ]` for OSC.
+ * The 8-bit form is a single byte in the range 0x80 to 0x9F, such as 0x9D
+ * for OSC. The string terminator ST is `ESC \` or the single byte 0x9C.
+ *
+ * @ingroup terminal
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /**
+   * The stream is not inside any escape sequence or partial UTF-8
+   * character. This is a safe point to insert your own sequences.
+   *
+   * Ground is a state, not an event. If the stream is already at ground,
+   * the call stops immediately and consumes nothing.
+   */
+  GHOSTTY_TERMINAL_BOUNDARY_GROUND = 1 << 0,
+
+  /**
+   * The byte that started an APC string: `_` after ESC, or 0x9F.
+   *
+   * SOS (`X` or 0x98) and PM (`^` or 0x9E) strings also report this
+   * boundary, because the parser handles all three the same way. Check
+   * GhosttyTerminalWriteStop.byte to tell them apart.
+   */
+  GHOSTTY_TERMINAL_BOUNDARY_APC_START = 1 << 1,
+
+  /** The byte that ended an APC, SOS or PM string. */
+  GHOSTTY_TERMINAL_BOUNDARY_APC_END = 1 << 2,
+
+  /**
+   * The byte that started a DCS string: `P` after ESC, or 0x90.
+   *
+   * A DCS has a header before its payload: parameters, intermediates and
+   * a final byte, in the same shape as a CSI sequence. The stop lands on
+   * the introducer, so the header follows it. A 0x90 inside the header
+   * restarts the header without leaving the string, so it does not stop.
+   */
+  GHOSTTY_TERMINAL_BOUNDARY_DCS_START = 1 << 3,
+
+  /**
+   * The byte that ended a DCS string, whether it was still in its header
+   * or already in its payload. A DCS cut short in its header reports this
+   * without ever having had a payload.
+   */
+  GHOSTTY_TERMINAL_BOUNDARY_DCS_END = 1 << 4,
+
+  /** The byte that started an OSC string: `]` after ESC, or 0x9D. */
+  GHOSTTY_TERMINAL_BOUNDARY_OSC_START = 1 << 5,
+
+  /**
+   * The byte that ended an OSC string. This is reported for every OSC,
+   * including ones the terminal does not understand.
+   */
+  GHOSTTY_TERMINAL_BOUNDARY_OSC_END = 1 << 6,
+  GHOSTTY_TERMINAL_BOUNDARY_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyTerminalBoundary;
+
+/**
+ * The kind of control string that started or ended.
+ *
+ * @ingroup terminal
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /**
+   * An APC, SOS or PM string. GhosttyTerminalWriteStop.byte at the start
+   * of the string tells you which one it is:
+   *
+   * | Byte               | String |
+   * |--------------------|--------|
+   * | `_` (0x5F) or 0x9F | APC    |
+   * | `X` (0x58) or 0x98 | SOS    |
+   * | `^` (0x5E) or 0x9E | PM     |
+   */
+  GHOSTTY_TERMINAL_STRING_KIND_APC = 0,
+
+  /** A DCS string, started by `P` (0x50) after ESC or by 0x90. */
+  GHOSTTY_TERMINAL_STRING_KIND_DCS = 1,
+
+  /** An OSC string, started by `]` (0x5D) after ESC or by 0x9D. */
+  GHOSTTY_TERMINAL_STRING_KIND_OSC = 2,
+  GHOSTTY_TERMINAL_STRING_KIND_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyTerminalStringKind;
+
+/**
+ * How a control string started.
+ *
+ * @ingroup terminal
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /**
+   * ESC followed by `_`, `X`, `^`, `P` or `]`. The stop's `consumed`
+   * count includes only the final byte, because the ESC may have arrived
+   * in an earlier call.
+   */
+  GHOSTTY_TERMINAL_STRING_INTRODUCER_ESC = 0,
+
+  /**
+   * A single 8-bit byte: 0x9F (APC), 0x98 (SOS), 0x9E (PM), 0x90 (DCS) or
+   * 0x9D (OSC).
+   *
+   * When the stream is at ground, these bytes are decoded as UTF-8 and do
+   * not start a string. They only start a string when they arrive while
+   * the stream is already inside another escape sequence.
+   */
+  GHOSTTY_TERMINAL_STRING_INTRODUCER_C1 = 1,
+  GHOSTTY_TERMINAL_STRING_INTRODUCER_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyTerminalStringIntroducer;
+
+/**
+ * How a control string ended.
+ *
+ * @ingroup terminal
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /**
+   * ESC, the first byte of the string terminator `ESC \`.
+   *
+   * The ESC is consumed but the `\` after it is not. Pass the `\` as the
+   * first byte of your next write, where it completes the terminator. If
+   * you forward the stream elsewhere, forward the ESC along with the
+   * string.
+   */
+  GHOSTTY_TERMINAL_STRING_END_ST_ESC = 0,
+
+  /**
+   * 0x9C, the 8-bit string terminator. The stream is now at ground.
+   *
+   * Inside an OSC, and inside a DCS once its header is complete, 0x9C is
+   * content rather than a terminator. So this is only reported for an APC
+   * or for a DCS still in its header.
+   */
+  GHOSTTY_TERMINAL_STRING_END_ST_C1 = 1,
+
+  /**
+   * CAN (0x18) or SUB (0x1A) cancelled the string. The stream is now at
+   * ground.
+   *
+   * The terminal discards a cancelled APC or OSC. Its command does not
+   * run and it is not passed to the unknown sequence callback. For
+   * example, `ESC _ G a=t,i=7;AAAA` followed by CAN stores no image.
+   */
+  GHOSTTY_TERMINAL_STRING_END_CANCELLED = 2,
+
+  /**
+   * Another 8-bit control byte cut the string short. Most of these return
+   * the stream to ground. CSI (0x9B) starts a CSI sequence instead. The
+   * introducers DCS (0x90), OSC (0x9D), APC (0x9F), SOS (0x98) and PM
+   * (0x9E) start a new string on the same byte, which the stop reports
+   * with a START flag as well. See GhosttyTerminalWriteStop.reached.
+   *
+   * Inside an OSC, and inside a DCS once its header is complete, 8-bit
+   * bytes are content. So this is only reported for an APC or for a DCS
+   * still in its header.
+   *
+   * The terminal discards an aborted APC, just like a cancelled one.
+   */
+  GHOSTTY_TERMINAL_STRING_END_ABORTED = 3,
+
+  /** BEL (0x07) terminated the string. Only an OSC ends this way. */
+  GHOSTTY_TERMINAL_STRING_END_BEL = 4,
+  GHOSTTY_TERMINAL_STRING_END_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyTerminalStringEnd;
+
+/**
+ * Where ghostty_terminal_vt_write_until() stopped, and why.
+ *
+ * Initialize this struct with GHOSTTY_INIT_SIZED(). The call resets every
+ * field except `size` before it writes the result, so you can reuse one
+ * struct across calls.
+ *
+ * Fields that don't apply to a stop are zero. Zero is also a valid value
+ * for `kind`, `introducer` and `end`, so always check `reached` first to
+ * see which fields apply.
+ *
+ * @ingroup terminal
+ */
+typedef struct {
+  /** Size of this struct in bytes. Set by GHOSTTY_INIT_SIZED(). */
+  size_t size;
+
+  /**
+   * Number of input bytes consumed, including the byte that reached the
+   * boundary. This is 0 when the stream was already at ground and you
+   * asked for GHOSTTY_TERMINAL_BOUNDARY_GROUND.
+   */
+  size_t consumed;
+
+  /**
+   * The GhosttyTerminalBoundary flags that the stopping byte reached. Only
+   * flags you asked for are set, and this is 0 when no boundary was
+   * reached.
+   *
+   * This is usually one flag. It holds two when a single byte does two
+   * things:
+   *
+   * - It ends a string and returns to ground. BEL, CAN, SUB, 0x9C and the
+   *   other 8-bit control bytes all do this. So if you asked for both
+   *   OSC_END and GROUND, an OSC_END stop can include GROUND too.
+   * - It ends one string and starts another. An 8-bit introducer of a
+   *   different kind does this inside an APC, or inside a DCS header: 0x90
+   *   or 0x9D in an APC ends it and starts a DCS or OSC, and 0x9F, 0x98,
+   *   0x9E or 0x9D in a DCS header ends it and starts an APC or OSC. The
+   *   stop has an END flag and a START flag, `end` is ABORTED and
+   *   `introducer` is C1. See ghostty_terminal_vt_write_until() for an
+   *   example.
+   *
+   * A START flag and an END flag of the same kind are never set together.
+   */
+  uint32_t reached;
+
+  /**
+   * The kind of string. Valid when `reached` has a START or END flag.
+   *
+   * When one byte both ends a string and starts another, this is the kind
+   * of the string that ended. The START flag in `reached` names the kind
+   * that started, since APC_START, DCS_START and OSC_START each belong to
+   * one kind.
+   */
+  GhosttyTerminalStringKind kind;
+
+  /** How the string started. Valid when `reached` has a START flag. */
+  GhosttyTerminalStringIntroducer introducer;
+
+  /** How the string ended. Valid when `reached` has an END flag. */
+  GhosttyTerminalStringEnd end;
+
+  /**
+   * The byte that started or ended the string, such as `]`, 0x90, ESC or
+   * BEL. Valid when `reached` has a START or END flag.
+   */
+  uint8_t byte;
+} GhosttyTerminalWriteStop;
+
+/**
  * Scrollbar state for the terminal viewport.
  *
  * Represents the scrollable area dimensions needed to render a scrollbar.
@@ -654,7 +898,8 @@ typedef struct {
  *
  * These are not reported:
  *
- * - Sequences the program cancelled partway through with CAN or SUB.
+ * - Sequences cut short before their terminator, either cancelled by CAN
+ *   or SUB or aborted by another 8-bit control byte.
  * - Sequences libghostty-vt implements, even when their contents are
  *   malformed.
  * - Supported protocols that the embedder turned off.
@@ -3064,7 +3309,7 @@ GHOSTTY_API GhosttyResult ghostty_terminal_resize(GhosttyTerminal terminal,
  *
  * Callbacks are invoked synchronously during VT writes. Callbacks must not
  * call ghostty_terminal_vt_write() or
- * ghostty_terminal_vt_write_until_ground() on the same terminal
+ * ghostty_terminal_vt_write_until() on the same terminal
  * (no reentrancy).
  *
  * @param terminal The terminal handle (may be NULL, in which case this is a no-op)
@@ -3104,36 +3349,132 @@ GHOSTTY_API void ghostty_terminal_vt_write(GhosttyTerminal terminal,
                                 size_t len);
 
 /**
- * Write VT-encoded data, but only the shortest prefix needed to reach ground.
+ * Write VT-encoded data to the terminal, stopping right after the first
+ * byte that reaches one of the requested boundaries.
  *
- * Ground is when the stream isn't in the middle of any type of sequence:
- * UTF-8, ESC, CSI, OSC, etc. It is the stateless point of the stream.
+ * This works like ghostty_terminal_vt_write(), but it can pause at points
+ * you care about. It tells you exactly where a control string starts or
+ * ends, using the same parse that updates the terminal. For example, a
+ * program that sits between a shell and a terminal can use it to:
  *
- * This is useful to know because it is a point at which you can
- * safely insert out-of-band VT sequences. For example, while reading
- * from a pty if you want to make your own changes, you can wait until
- * the pty input reaches ground, then write yours.
+ * - Find the exact bytes of each APC, DCS or OSC string, such as a Kitty
+ *   graphics command, a tmux control mode message or a clipboard write,
+ *   so it can forward, rewrite or drop that string.
+ * - Wait until the stream is at ground before inserting its own
+ *   sequences, so it never splits a sequence from the program.
  *
- * If the stream is already at ground then this consumes nothing and returns
- * GHOSTTY_SUCCESS. On success, out_consumed is the number of bytes consumed
- * before reaching ground, including the byte that reaches it.
- * GHOSTTY_NO_VALUE means the full slice was consumed without reaching ground.
+ * Pass the boundaries to stop at as GhosttyTerminalBoundary flags. The
+ * call consumes input up to and including the first byte that reaches one
+ * of them, and reports that point in `out`. The terminal only processes
+ * the consumed bytes, and callbacks only run for those bytes. Pass the
+ * remaining bytes in your next call.
+ *
+ * Every byte you pass is eventually consumed in order, so the terminal
+ * ends up in the same state as if you had called
+ * ghostty_terminal_vt_write() with all of it.
+ *
+ * ## Finding string content
+ *
+ * After a START stop, the string's content begins at the first byte that
+ * was not consumed. For a Kitty graphics command that byte is `G`. For an
+ * OSC it is the first digit of the command number. An END stop consumes
+ * the byte that ended the string, which is not part of the content. A
+ * string can start in one call and end several calls later.
+ *
+ * This loop handles one chunk of output and finds the content of the APC
+ * strings in it. DCS and OSC strings work the same way with their own
+ * flags:
+ *
+ * @code{.c}
+ * uint32_t want = GHOSTTY_TERMINAL_BOUNDARY_APC_START |
+ *                 GHOSTTY_TERMINAL_BOUNDARY_APC_END;
+ * size_t off = 0;
+ * while (off < len) {
+ *   GhosttyTerminalWriteStop stop =
+ *       GHOSTTY_INIT_SIZED(GhosttyTerminalWriteStop);
+ *   GhosttyResult r = ghostty_terminal_vt_write_until(
+ *       terminal, data + off, len - off, want, &stop);
+ *   if (r == GHOSTTY_NO_VALUE) {
+ *     // No boundary in the rest of the chunk. Everything was consumed.
+ *     break;
+ *   }
+ *
+ *   off += stop.consumed;
+ *   if (stop.reached & GHOSTTY_TERMINAL_BOUNDARY_APC_START) {
+ *     // The content starts at data + off.
+ *   }
+ *   if (stop.reached & GHOSTTY_TERMINAL_BOUNDARY_APC_END) {
+ *     // The ending byte is at data + off - 1. The content stops just
+ *     // before it.
+ *   }
+ * }
+ * @endcode
+ *
+ * ## Strings that end with ESC
+ *
+ * The usual string terminator is the two bytes `ESC \`. The call stops
+ * after the ESC with GHOSTTY_TERMINAL_STRING_END_ST_ESC and does not
+ * consume the `\`. The loop above needs no special case for this. The
+ * `\` is simply the first byte of the next call, where it completes the
+ * terminator and brings the stream back to ground.
+ *
+ * ## DCS strings
+ *
+ * A DCS_START stop lands on the introducer, before the header. The bytes
+ * after it are the parameters, intermediates and final byte of the header,
+ * then the payload. For `ESC P 1 ; 2 | data ESC \` the stop lands on `P`,
+ * and `1;2|` is the header that follows.
+ *
+ * The string can end in its header. CAN, SUB, 0x9C, ESC or another 8-bit
+ * control byte there gives a DCS_END stop for a DCS that never had a
+ * payload. Past the header, only ESC, CAN and SUB end the string, and
+ * every other byte is payload, 8-bit bytes included. A 0x90 in the header
+ * restarts the header without ending the string, so it does not stop.
+ *
+ * ## One byte that ends a string and starts another
+ *
+ * An 8-bit introducer of a different kind inside an APC, or inside a DCS
+ * header, ends that string and starts the new one on the same byte. The
+ * stop has both an END flag and a START flag in `reached`, `end` is
+ * ABORTED and `introducer` is C1. The content of the new string begins
+ * right after the stop.
+ *
+ * For example, in `ESC _ a 0x9D 2 ; t BEL` the 0x9D ends the APC and
+ * starts an OSC. Asking for APC_END and OSC_START gives one stop on the
+ * 0x9D with both flags set, `kind` APC and `byte` 0x9D. The OSC content
+ * `2;t` begins right after it, and the BEL then gives an OSC_END stop.
+ * GhosttyTerminalWriteStop.reached lists which bytes do this.
+ *
+ * ## Waiting for ground
+ *
+ * GHOSTTY_TERMINAL_BOUNDARY_GROUND is a state, not an event. If the
+ * stream is already at ground, the call returns GHOSTTY_SUCCESS right away
+ * with `consumed` set to 0. If you keep asking for ground with the same
+ * input, you never make progress. After a ground stop, write the next
+ * bytes without the GROUND flag, or with ghostty_terminal_vt_write().
  *
  * @param terminal The terminal handle (must not be NULL)
  * @param data Pointer to the data to write, or NULL when len is zero
  * @param len Length of the data in bytes
- * @param[out] out_consumed Number of bytes consumed (must not be NULL)
- * @return GHOSTTY_SUCCESS if ground was reached, GHOSTTY_NO_VALUE if all input
- *         was consumed without reaching ground, or GHOSTTY_INVALID_VALUE if
- *         an argument is invalid
+ * @param boundaries GhosttyTerminalBoundary flags to stop at. Must be
+ *                   nonzero and contain only defined flags.
+ * @param[out] out Where the call stopped. Must not be NULL, and its `size`
+ *                 must be set with GHOSTTY_INIT_SIZED().
+ * @return GHOSTTY_SUCCESS if a boundary was reached.
+ *         GHOSTTY_NO_VALUE if all input was consumed without reaching a
+ *         boundary. In that case `out->consumed` is `len` and
+ *         `out->reached` is 0.
+ *         GHOSTTY_INVALID_VALUE if an argument is invalid. No input is
+ *         consumed.
  *
  * @ingroup terminal
  */
-GHOSTTY_API GhosttyResult ghostty_terminal_vt_write_until_ground(
+GHOSTTY_API GhosttyResult ghostty_terminal_vt_write_until(
     GhosttyTerminal terminal,
     const uint8_t* data,
     size_t len,
-    size_t* out_consumed);
+    uint32_t boundaries,
+    GhosttyTerminalWriteStop* out);
 
 /**
  * Write the terminal's replay-safe VT continuation to a callback writer.

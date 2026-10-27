@@ -194,7 +194,7 @@ fn ghosttyInitWide(cmdline: [*]const u16, len: usize) callconv(.c) c_int {
 comptime {
     // Windows-only: everywhere else the args vector is a POSIX argv and
     // `ghostty_init` already expresses it exactly.
-    if (builtin.os.tag == .windows) @export(&ghosttyInitWide, .{
+    if (builtin.target.os.tag == .windows) @export(&ghosttyInitWide, .{
         .name = "ghostty_init_wide",
         .linkage = .strong,
     });
@@ -282,10 +282,10 @@ pub export fn ghostty_cli_set_theme_callback(
 pub export fn ghostty_info() Info {
     return .{
         .mode = switch (builtin.mode) {
-            .Debug => .debug,
-            .ReleaseSafe => .release_safe,
-            .ReleaseFast => .release_fast,
-            .ReleaseSmall => .release_small,
+            .debug => .debug,
+            .safe => .release_safe,
+            .fast => .release_fast,
+            .small => .release_small,
         },
         .version = build_config.version_string.ptr,
         .version_len = build_config.version_string.len,
@@ -322,7 +322,7 @@ pub export fn ghostty_string_free(str: String) void {
 // but not MSVC. No upstream issue tracks this exact gap as of 2026-03-26.
 // Closest: Codeberg ziglang/zig #30936 (reimplement crt0 code).
 // Remove this DllMain when Zig handles MSVC DLL CRT init natively.
-pub const DllMain = if (builtin.os.tag == .windows) struct {
+pub const DllMain = if (builtin.target.os.tag == .windows) struct {
     const BOOL = windows.BOOL;
     const HINSTANCE = windows.HINSTANCE;
     const DWORD = windows.DWORD;
@@ -374,7 +374,7 @@ pub const DllMain = if (builtin.os.tag == .windows) struct {
 
     pub fn handler(_: HINSTANCE, fdwReason: DWORD, _: LPVOID) callconv(.winapi) BOOL {
         // Only MSVC needs to bootstrap the CRT; MinGW handles it via dllcrt2.obj.
-        if (builtin.abi != .msvc) return TRUE;
+        if (builtin.target.abi != .msvc) return TRUE;
         switch (fdwReason) {
             DLL_PROCESS_ATTACH => {
                 // Both return 1 on success and 0 on failure, never a
@@ -421,7 +421,7 @@ test "ghostty_string_s c string" {
     const testing = std.testing;
 
     const slice: [:0]const u8 = "hello";
-    const allocated_slice = try testing.allocator.dupeZ(u8, slice);
+    const allocated_slice = try testing.allocator.dupeSentinel(u8, slice, 0);
     const c_null_string = String.fromSlice(allocated_slice);
     defer c_null_string.deinit();
 

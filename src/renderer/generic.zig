@@ -33,7 +33,7 @@ const getConstraint = @import("../font/nerd_font_attributes.zig").getConstraint;
 
 const FileType = @import("../file_type.zig").FileType;
 
-const macos = switch (builtin.os.tag) {
+const macos = switch (builtin.target.os.tag) {
     .macos => @import("macos"),
     else => void,
 };
@@ -41,7 +41,7 @@ const macos = switch (builtin.os.tag) {
 /// The display link used to pace drawing to the display's refresh
 /// rate. Only macOS has one. Everywhere else this is void and the
 /// display link code paths compile away.
-const DisplayLink = switch (builtin.os.tag) {
+const DisplayLink = switch (builtin.target.os.tag) {
     .macos => @import("DisplayLink.zig"),
     else => void,
 };
@@ -219,6 +219,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// wherever `reinitialize_shaders` is set; `initShaders` reads it to
         /// decide whether a failure should reach the user.
         shader_init_cause: ShaderInitCause = .startup,
+
+        /// Set to true after the Kitty image placements are rebuilt. Like
+        /// `cells_rebuilt`, this means the next frame must be drawn. This
+        /// matters when the images change but no cell does, for example
+        /// when a program places an image.
+        images_rebuilt: bool = false,
 
         /// The current GPU uniform values.
         ///
@@ -1718,8 +1724,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const should_run =
                 // Non-visible windows never vsync
                 self.visible and
-                // Only vsync if we have cell changes or animation
-                (self.cells_rebuilt or self.animationWake() != null);
+                // Only vsync if we have cell or image changes or animation
+                (self.cells_rebuilt or
+                    self.images_rebuilt or
+                    self.animationWake() != null);
 
             display_link.setRunning(should_run);
         }
@@ -1900,6 +1908,36 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     state.terminal.scrollViewport(.bottom);
                 }
 
+                // Advance any running Kitty graphics animations to the
+                // frame due now, and remember when the next frame is
+                // due (as an absolute deadline, see animationWake) so
+                // the renderer thread can schedule a wakeup for it.
+                //
+                // This runs before the render state update. Advancing
+                // a frame gives the image a new generation, so the
+                // update then reports placements with the new frame,
+                // and the frame is uploaded and drawn right away.
+                self.kitty_animation_next_ms = next: {
+                    // Likely case: we have no kitty images, so do nothing.
+                    const storage = &state.terminal.screens.active.kitty_images;
+                    if (storage.images.count() == 0) break :next null;
+
+                    const now: std.Io.Timestamp = .now(global.io(), .awake);
+                    const base = self.kitty_animation_clock orelse base: {
+                        self.kitty_animation_clock = now;
+                        break :base now;
+                    };
+                    const now_ms: u64 = @intCast(@divTrunc(
+                        base.durationTo(now).nanoseconds,
+                        std.time.ns_per_ms,
+                    ));
+                    const delay = storage.animationTick(
+                        global.io(),
+                        now_ms,
+                    ) orelse break :next null;
+                    break :next now_ms + delay;
+                };
+
                 // Begin the update of our terminal state. Work that
                 // doesn't require terminal access (e.g. style
                 // denormalization) is deferred to the endUpdate call
@@ -1929,60 +1967,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     break :preedit try p.clone(arena_alloc);
                 };
 
-                // Advance any running Kitty graphics animations to the
-                // frame due now, and remember when the next frame is
-                // due (as an absolute deadline, see animationWake) so
-                // the renderer thread can schedule a wakeup for it.
-                // This must happen before the dirty check below:
-                // advancing a frame marks the image state dirty.
-                self.kitty_animation_next_ms = next: {
-                    // Likely case: we have no kitty images, so do nothing.
-                    const storage = &state.terminal.screens.active.kitty_images;
-                    if (storage.images.count() == 0) break :next null;
-
-                    const now: std.Io.Timestamp = .now(global.io(), .awake);
-                    const base = self.kitty_animation_clock orelse base: {
-                        self.kitty_animation_clock = now;
-                        break :base now;
-                    };
-                    const now_ms: u64 = @intCast(@divTrunc(
-                        base.durationTo(now).nanoseconds,
-                        std.time.ns_per_ms,
-                    ));
-                    const delay = storage.animationTick(
-                        global.io(),
-                        now_ms,
-                    ) orelse break :next null;
-                    break :next now_ms + delay;
-                };
-
-                // If we have Kitty graphics data, we enter a SLOW SLOW SLOW path.
-                // We only do this if the Kitty image state is dirty meaning only if
-                // it changes.
+                // Rebuild our Kitty image placements when the placements
+                // or the images changed. The render state update above
+                // has already positioned every placement, so this is
+                // cheap. Most frames that only change text skip it.
                 //
-                // If we have any virtual references, we must also rebuild our
-                // kitty state on every frame because any cell change can move
-                // an image.
-                if (self.images_lost or self.images.kittyRequiresUpdate(state.terminal)) {
-                    // The image state is a channel to the renderer of its
-                    // own: it is not part of grid or screen dirtiness, and
-                    // the placements are only drawn on a frame we decide to
-                    // draw. A client that replaces an image in place with
-                    // the cursor hidden dirties no row and moves no uniform,
-                    // so if we don't ask for the frame here nobody will and
-                    // the new image never appears. `kittyUpdate` clears the
-                    // flag, so read it first.
-                    //
-                    // A lost device counts as a change for the same reason:
-                    // the rebuild below is the only thing that puts the
-                    // images back, and nothing else dirties a row to say so.
-                    //
-                    // Virtual references alone are not a change: they only
-                    // move when a cell moves, and that dirties the rows that
-                    // carry them.
-                    const changed = self.images_lost or
-                        state.terminal.screens.active.kitty_images.dirty;
-
+                // A lost device counts as a change too: the rebuild below
+                // is the only thing that puts the images back, and nothing
+                // else dirties a row to say so.
+                if (self.images_lost or self.images.kittyRequiresUpdate(
+                    state.terminal,
+                    &self.terminal_state,
+                )) {
                     // We need to grab the draw mutex since this updates
                     // our image state that drawFrame uses.
                     self.draw_mutex.lockUncancelable(global.io());
@@ -1991,12 +1987,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.images.kittyUpdate(
                         self.alloc,
                         state.terminal,
-                        .{
-                            .width = self.grid_metrics.cell_width,
-                            .height = self.grid_metrics.cell_height,
-                        },
+                        &self.terminal_state,
                     );
-                    if (changed) self.cells_rebuilt = true;
+                    self.images_rebuilt = true;
                 }
 
                 // Determine which OSC 8 hyperlink cells should be
@@ -2101,7 +2094,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (self.search_selected_match) |m| {
                     self.terminal_state.updateHighlightsFlattened(
                         self.alloc,
-                        @intFromEnum(HighlightTag.search_match_selected),
+                        @backingInt(HighlightTag.search_match_selected),
                         &.{m.match},
                     ) catch |err| {
                         // Not a critical error, we just won't show highlights.
@@ -2112,7 +2105,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (self.search_matches) |m| {
                     self.terminal_state.updateHighlightsFlattened(
                         self.alloc,
-                        @intFromEnum(HighlightTag.search_match),
+                        @backingInt(HighlightTag.search_match),
                         m.matches,
                     ) catch |err| {
                         // Not a critical error, we just won't show highlights.
@@ -2425,6 +2418,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .swap_chain_rebuilt = swap_chain_rebuilt,
                 .swap_chain_resize_pending = swap_chain_resize_pending,
                 .cells_rebuilt = self.cells_rebuilt,
+                .images_rebuilt = self.images_rebuilt,
                 .animation = self.animationWake() != null,
                 .themed_background_owed = self.themed_background.frameOwed(),
                 .sync = sync,
@@ -2437,6 +2431,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return true;
             }
             self.cells_rebuilt = false;
+            self.images_rebuilt = false;
 
             // Wait for a frame to be available.
             const frame = swap_chain.nextFrame();
@@ -3391,12 +3386,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             ).add(self.size.padding);
 
             // Setup our uniforms
-            self.uniforms.projection_matrix = math.ortho2d(
+            self.uniforms.projection_matrix = @bitCast(math.ortho2d(
                 -1 * @as(f32, @floatFromInt(self.size.padding.left)),
                 @floatFromInt(terminal_size.width + self.size.padding.right),
                 @floatFromInt(terminal_size.height + self.size.padding.bottom),
                 -1 * @as(f32, @floatFromInt(self.size.padding.top)),
-            );
+            ));
             self.uniforms.grid_padding = .{
                 @floatFromInt(blank.top),
                 @floatFromInt(blank.right),
@@ -3538,7 +3533,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Cursor style
             const cursor_style: renderer.CursorStyle = .fromTerminal(self.terminal_state.cursor.visual_style);
             uniforms.previous_cursor_style = uniforms.current_cursor_style;
-            uniforms.current_cursor_style = @as(i32, @intFromEnum(cursor_style));
+            uniforms.current_cursor_style = @as(i32, @backingInt(cursor_style));
 
             return !std.meta.eql(before, uniforms.*);
         }
@@ -4226,7 +4221,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         if (x_compare >= hl.range[0] and
                             x_compare <= hl.range[1])
                         {
-                            const tag: HighlightTag = @enumFromInt(hl.tag);
+                            const tag: HighlightTag = @fromBackingInt(hl.tag);
                             break :selected switch (tag) {
                                 .search_match => .search,
                                 .search_match_selected => .search_selected,
@@ -4528,7 +4523,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const render = try self.font_grid.renderGlyph(
                 self.alloc,
                 font.sprite_index,
-                @intFromEnum(sprite),
+                @backingInt(sprite),
                 .{
                     .cell_width = 1,
                     .grid_metrics = self.grid_metrics,
@@ -4559,7 +4554,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const render = try self.font_grid.renderGlyph(
                 self.alloc,
                 font.sprite_index,
-                @intFromEnum(font.Sprite.overline),
+                @backingInt(font.Sprite.overline),
                 .{
                     .cell_width = 1,
                     .grid_metrics = self.grid_metrics,
@@ -4590,7 +4585,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const render = try self.font_grid.renderGlyph(
                 self.alloc,
                 font.sprite_index,
-                @intFromEnum(font.Sprite.strikethrough),
+                @backingInt(font.Sprite.strikethrough),
                 .{
                     .cell_width = 1,
                     .grid_metrics = self.grid_metrics,
@@ -4717,7 +4712,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     break :render self.font_grid.renderGlyph(
                         self.alloc,
                         font.sprite_index,
-                        @intFromEnum(sprite),
+                        @backingInt(sprite),
                         .{
                             .cell_width = if (wide) 2 else 1,
                             .grid_metrics = self.grid_metrics,
@@ -4998,7 +4993,7 @@ const ThemedBackground = struct {
                 self.rgb.b,
                 @intFromFloat(@round(self.opacity * 255.0)),
             };
-            if (comptime builtin.os.tag == .macos) switch (blur) {
+            if (comptime builtin.target.os.tag == .macos) switch (blur) {
                 .@"macos-glass-regular",
                 .@"macos-glass-clear",
                 => out[3] = 0,
@@ -5098,6 +5093,9 @@ const RedrawTerms = struct {
     swap_chain_resize_pending: bool = false,
     /// The last update produced frame state the drawn frame does not show.
     cells_rebuilt: bool = false,
+    /// The last update rebuilt the Kitty image placements, which can
+    /// change what is drawn without any cell changing.
+    images_rebuilt: bool = false,
     /// An animation is mid-flight, so every draw must render.
     animation: bool = false,
     /// A config swap renamed the background and no frame has carried it
@@ -5112,6 +5110,7 @@ fn needsRedraw(terms: RedrawTerms) bool {
         terms.swap_chain_rebuilt or
         terms.swap_chain_resize_pending or
         terms.cells_rebuilt or
+        terms.images_rebuilt or
         terms.animation or
         terms.themed_background_owed or
         terms.sync;
@@ -6051,6 +6050,7 @@ test "ThemedBackground matrix: the other terms still redraw on their own" {
     try std.testing.expect(needsRedraw(.{ .swap_chain_rebuilt = true }));
     try std.testing.expect(needsRedraw(.{ .swap_chain_resize_pending = true }));
     try std.testing.expect(needsRedraw(.{ .cells_rebuilt = true }));
+    try std.testing.expect(needsRedraw(.{ .images_rebuilt = true }));
     try std.testing.expect(needsRedraw(.{ .animation = true }));
     try std.testing.expect(needsRedraw(.{ .sync = true }));
 }

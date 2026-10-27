@@ -1883,7 +1883,7 @@ pub fn dxcPathWInDir(
     buf_out: *[std.Io.Dir.max_path_bytes]u16,
 ) ?[:0]const u16 {
     var utf8_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(
+    const path = std.mem.print(
         &utf8_buf,
         "{s}\\{s}",
         .{ dir, dxc_dll_name },
@@ -2072,8 +2072,8 @@ test "DxcBuffer is extern struct with expected field order" {
 }
 
 test "DXC_OUT_KIND has OBJECT and ERRORS variants" {
-    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(DXC_OUT_KIND.OBJECT));
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(DXC_OUT_KIND.ERRORS));
+    try std.testing.expectEqual(@as(u32, 1), @backingInt(DXC_OUT_KIND.OBJECT));
+    try std.testing.expectEqual(@as(u32, 2), @backingInt(DXC_OUT_KIND.ERRORS));
 }
 
 test "ID3D12Device5 RemoveDevice sits at slot 58 of 65" {
@@ -2356,7 +2356,7 @@ test "dxcompiler.dll: path resolution keeps an app dir longer than MAX_PATH inta
     // Long enough that MAX_PATH (260) would truncate it, which for a
     // bare name would be invisible and for a built path would be a
     // wrong path rather than a missing one.
-    const long_dir = "C:\\" ++ "d" ** 400;
+    const long_dir = "C:\\" ++ @as([400]u8, @splat('d'));
 
     var buf: [std.Io.Dir.max_path_bytes]u16 = undefined;
     const path = dxcPathWInDir(long_dir, &buf) orelse
@@ -2385,7 +2385,7 @@ test "dxcompiler.dll: load() resolves next to the executable" {
     const dir = exeDir(&dir_buf) orelse return error.SkipZigTest;
 
     var want_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const want = try std.fmt.bufPrint(&want_buf, "{s}\\{s}", .{ dir, dxc_dll_name });
+    const want = try std.mem.print(&want_buf, "{s}\\{s}", .{ dir, dxc_dll_name });
 
     var path_buf: [std.Io.Dir.max_path_bytes]u16 = undefined;
     const path = dxcPathWInDir(dir, &path_buf) orelse return error.TestExpectedEqual;

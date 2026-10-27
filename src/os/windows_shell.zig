@@ -209,8 +209,8 @@ pub fn winptyCandidatePaths(
     const dir = std.fs.path.dirnameWindows(trimmed) orelse ".";
     const parent = std.fs.path.dirnameWindows(dir) orelse dir;
     return .{
-        try std.fmt.allocPrint(alloc, "{s}\\winpty.exe", .{dir}),
-        try std.fmt.allocPrint(alloc, "{s}\\usr\\bin\\winpty.exe", .{parent}),
+        try alloc.print("{s}\\winpty.exe", .{dir}),
+        try alloc.print("{s}\\usr\\bin\\winpty.exe", .{parent}),
     };
 }
 
@@ -262,7 +262,7 @@ pub fn installRootFromExe(alloc: std.mem.Allocator, arg0: []const u8) ?[]u8 {
 /// (VS Code, WSL, Beta-UTF-8 toggle); they can opt back in via
 /// `utf8-console = always`.
 pub fn isCjkAnsiCodePage() bool {
-    if (comptime builtin.os.tag != .windows) return false;
+    if (comptime builtin.target.os.tag != .windows) return false;
     return isCjkAnsiCodePageFor(windows.exp.kernel32.GetACP());
 }
 
@@ -450,7 +450,7 @@ test "winptyCandidatePaths: strips surrounding quotes" {
 }
 
 test "isCjkAnsiCodePage: links GetACP and agrees with the pure-logic helper" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     // Smoke test: catches a broken `GetACP` extern decl on Windows
     // and verifies the wrapper agrees with the testable inner helper
     // for whatever ACP the test host actually has. Per-codepage
@@ -677,7 +677,7 @@ fn regGetSzW(
 /// conversion error) — best-effort, matching the OSC 7 no-op fallback.
 /// Windows-only; returns null elsewhere.
 pub fn defaultDistroName(alloc: Allocator) ?[]u8 {
-    if (comptime builtin.os.tag != .windows) return null;
+    if (comptime builtin.target.os.tag != .windows) return null;
 
     const lxss = std.unicode.utf8ToUtf16LeStringLiteral(
         "Software\\Microsoft\\Windows\\CurrentVersion\\Lxss",
@@ -719,7 +719,7 @@ pub const WslContext = struct {
         alloc: std.mem.Allocator,
         args: []const [:0]const u8,
     ) ?WslContext {
-        if (comptime builtin.os.tag != .windows) return null;
+        if (comptime builtin.target.os.tag != .windows) return null;
         if (args.len == 0 or !isWslExe(args[0])) return null;
 
         // wslDistro takes []const []const u8; build a thin non-sentinel view.
@@ -755,7 +755,7 @@ pub fn osc7ContextFromArgs(
     alloc: std.mem.Allocator,
     args: []const [:0]const u8,
 ) ?Osc7Context {
-    if (comptime builtin.os.tag != .windows) return null;
+    if (comptime builtin.target.os.tag != .windows) return null;
     if (args.len == 0) return null;
     // wsl.exe is handled here and is not a rooted kind, so it can never reach
     // the rooted gate below (keep that true if isRootedPosixShell changes).
@@ -808,7 +808,7 @@ test "wslDistro: detects distro and default, ignores non-WSL" {
 }
 
 test "WslContext.fromArgs: explicit distro" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     const args = [_][:0]const u8{ "wsl.exe", "-d", "Ubuntu-24.04" };
     const ctx = WslContext.fromArgs(alloc, &args).?;
@@ -817,7 +817,7 @@ test "WslContext.fromArgs: explicit distro" {
 }
 
 test "WslContext.fromArgs: =-joined distro" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     const args = [_][:0]const u8{ "wsl.exe", "-d=Ubuntu" };
     const ctx = WslContext.fromArgs(alloc, &args).?;
@@ -826,7 +826,7 @@ test "WslContext.fromArgs: =-joined distro" {
 }
 
 test "WslContext.fromArgs: bare wsl is WSL with unknown distro" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     const args = [_][:0]const u8{"wsl.exe"};
     const ctx = WslContext.fromArgs(alloc, &args).?;
@@ -834,7 +834,7 @@ test "WslContext.fromArgs: bare wsl is WSL with unknown distro" {
 }
 
 test "WslContext.fromArgs: non-WSL and empty are null" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     const pwsh = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
     try std.testing.expect(WslContext.fromArgs(alloc, &pwsh) == null);
@@ -892,7 +892,7 @@ test "lxssSubkeyFor: builds base\\{guid}, NUL-terminated, bounds-checked" {
 }
 
 test "defaultDistroName: links, never crashes, returns null-or-nonempty" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = testing.allocator;
     // Host-dependent: a name on a machine with a default distro, null otherwise.
     // We only assert it links, runs, and frees cleanly.
@@ -903,7 +903,7 @@ test "defaultDistroName: links, never crashes, returns null-or-nonempty" {
 }
 
 test "integration: resolved default distro feeds OSC 7 UNC translation" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = testing.allocator;
     const posix_path = @import("posix_path.zig");
 
@@ -969,7 +969,7 @@ test "isRootedPosixShell: bash/zsh/fish only" {
 }
 
 test "osc7ContextFromArgs: wsl arm" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = testing.allocator;
     const args = [_][:0]const u8{ "wsl.exe", "-d", "Ubuntu" };
     const ctx = osc7ContextFromArgs(alloc, &args).?;
@@ -982,7 +982,7 @@ test "osc7ContextFromArgs: wsl arm" {
 }
 
 test "osc7ContextFromArgs: rooted arm (MSYS2 bash)" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = testing.allocator;
     const args = [_][:0]const u8{ "C:\\msys64\\usr\\bin\\bash.exe", "-i" };
     const ctx = osc7ContextFromArgs(alloc, &args).?;
@@ -995,7 +995,7 @@ test "osc7ContextFromArgs: rooted arm (MSYS2 bash)" {
 }
 
 test "osc7ContextFromArgs: non-posix shells -> null" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = testing.allocator;
     const pwsh = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
     try testing.expect(osc7ContextFromArgs(alloc, &pwsh) == null);

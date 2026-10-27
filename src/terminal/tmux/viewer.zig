@@ -225,10 +225,10 @@ pub const Viewer = struct {
                 try writer.writeAll(@tagName(@as(TagType, self)));
                 try writer.writeAll(" = ");
 
-                inline for (info.fields) |u_field| {
-                    if (self == @field(TagType, u_field.name)) {
-                        const value = @field(self, u_field.name);
-                        switch (u_field.type) {
+                inline for (info.field_names, info.field_types) |field_name, field_type| {
+                    if (self == @field(TagType, field_name)) {
+                        const value = @field(self, field_name);
+                        switch (field_type) {
                             []const u8 => try writer.print("\"{s}\"", .{std.mem.trim(u8, value, " \t\r\n")}),
                             // Window embeds ArenaAllocator.State; dumping
                             // `{any}` walks freed/poisoned arena nodes.
@@ -1152,6 +1152,16 @@ pub const Viewer = struct {
         stream.nextSlice(data);
     }
 
+    /// Walk `layout` and make sure every pane in it has an entry in
+    /// `panes_new`.
+    ///
+    /// Panes that already exist in `panes_old` are copied over as is.
+    /// New panes get a fresh terminal sized to match the layout.
+    ///
+    /// The layout comes from the control mode stream, which any program
+    /// running in the terminal can write to. Returns `error.InvalidLayout`
+    /// if a new pane's size is zero or too large for a terminal. Callers
+    /// treat any error as fatal and move the viewer to the defunct state.
     fn initLayout(
         io: std.Io,
         gpa_alloc: Allocator,
@@ -1186,12 +1196,21 @@ pub const Viewer = struct {
                     break :pane;
                 }
 
-                // Layout parsing rejects any node whose width or height
-                // a terminal could not represent, so this cast can't
-                // overflow on anything that got this far.
+                // The size comes from untrusted input. Make sure it fits
+                // in a terminal before we create one.
+                const cols = std.math.cast(
+                    size.CellCountInt,
+                    layout.width,
+                ) orelse return error.InvalidLayout;
+                const rows = std.math.cast(
+                    size.CellCountInt,
+                    layout.height,
+                ) orelse return error.InvalidLayout;
+                if (cols == 0 or rows == 0) return error.InvalidLayout;
+
                 var t: Terminal = try .init(io, gpa_alloc, .{
-                    .cols = @intCast(layout.width),
-                    .rows = @intCast(layout.height),
+                    .cols = cols,
+                    .rows = rows,
                 });
                 errdefer t.deinit(gpa_alloc);
 
@@ -1908,6 +1927,129 @@ test "layout change" {
     });
 }
 
+test "layout change with zero width pane becomes defunct" {
+    var viewer = try Viewer.init(testing.io, testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        // Initial startup
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 1,
+                .name = "test",
+            } } },
+            .contains_command = "display-message",
+        },
+        // Receive version response, which triggers list-windows
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        // Receive initial window layout with one pane
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\$0 @0 83 44 b7dd,83x44,0,0,0
+                ,
+            } },
+            .contains_tags = &.{ .windows, .command },
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    try testing.expectEqual(1, v.windows.items.len);
+                    try testing.expectEqual(1, v.panes.count());
+                    try testing.expect(v.panes.contains(0));
+                }
+            }).check,
+        },
+        // Complete all capture-pane commands for pane 0 (primary and alternate)
+        // plus pane_state
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        // Send a layout_change with a valid checksum but a zero-width pane.
+        .{
+            .input = .{ .tmux = .{ .layout_change = .{
+                .window_id = 0,
+                .layout = "52aa,83x44,0,0[83x22,0,0,0,0x21,0,23,2]",
+                .visible_layout = "52aa,83x44,0,0[83x22,0,0,0,0x21,0,23,2]",
+                .raw_flags = "*",
+            } } },
+            .contains_tags = &.{.exit},
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    try testing.expectEqual(.defunct, v.state);
+                    try testing.expect(!v.panes.contains(2));
+                }
+            }).check,
+        },
+    });
+}
+
+test "layout change with oversized pane becomes defunct" {
+    var viewer = try Viewer.init(testing.io, testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        // Initial startup
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 1,
+                .name = "test",
+            } } },
+            .contains_command = "display-message",
+        },
+        // Receive version response, which triggers list-windows
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        // Receive initial window layout with one pane
+        .{
+            .input = .{ .tmux = .{
+                .block_end =
+                \\$0 @0 83 44 b7dd,83x44,0,0,0
+                ,
+            } },
+            .contains_tags = &.{ .windows, .command },
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    try testing.expectEqual(1, v.windows.items.len);
+                    try testing.expectEqual(1, v.panes.count());
+                    try testing.expect(v.panes.contains(0));
+                }
+            }).check,
+        },
+        // Complete all capture-pane commands for pane 0 (primary and alternate)
+        // plus pane_state
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        // Send a layout_change with a valid checksum but a pane wider than
+        // our max column count.
+        .{
+            .input = .{ .tmux = .{ .layout_change = .{
+                .window_id = 0,
+                .layout = "3afd,83x44,0,0[83x22,0,0,0,70000x21,0,23,2]",
+                .visible_layout = "3afd,83x44,0,0[83x22,0,0,0,70000x21,0,23,2]",
+                .raw_flags = "*",
+            } } },
+            .contains_tags = &.{.exit},
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    try testing.expectEqual(.defunct, v.state);
+                    try testing.expect(!v.panes.contains(2));
+                }
+            }).check,
+        },
+    });
+}
+
 test "layout_change does not return command when queue not empty" {
     var viewer = try Viewer.init(testing.io, testing.allocator);
     defer viewer.deinit();
@@ -2436,7 +2578,7 @@ test "pane state ignores out of bounds scroll region" {
         .{
             .input = .{ .tmux = .{ .output = .{
                 .pane_id = 0,
-                .data = "\x0b" ** 30,
+                .data = &@as([30]u8, @splat('\x0b')),
             } } },
             .check = (struct {
                 fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {

@@ -22,7 +22,7 @@ pub fn expand(
     // as `C:\Windows\System32\cmd.exe` would miss the fast path and
     // get joined onto every PATH dir, always producing null.
     const already_path = std.mem.indexOfScalar(u8, cmd, '/') != null or
-        (builtin.os.tag == .windows and
+        (builtin.target.os.tag == .windows and
             (std.mem.indexOfScalar(u8, cmd, '\\') != null or
                 (cmd.len >= 2 and std.ascii.isAlphabetic(cmd[0]) and cmd[1] == ':')));
     if (already_path) {
@@ -37,7 +37,7 @@ pub fn expand(
     const has_extension = std.mem.indexOfScalar(u8, cmd, '.') != null;
     defer if (pathext_list) |pl| alloc.free(pl);
 
-    if (builtin.os.tag == .windows and !has_extension) {
+    if (builtin.target.os.tag == .windows and !has_extension) {
         // Fall back to the documented default set when PATHEXT is unset.
         const pathext_str = environ_map.get("PATHEXT") orelse ".COM;.EXE;.BAT;.CMD";
 
@@ -65,7 +65,7 @@ pub fn expand(
         }
 
         // On Windows, if no extension, try with PATHEXT extensions.
-        if (builtin.os.tag == .windows and !has_extension and pathext_list != null) {
+        if (builtin.target.os.tag == .windows and !has_extension and pathext_list != null) {
             for (pathext_list.?) |ext| {
                 const combined_len = cmd.len + ext.len;
                 if (combined_len > std.Io.Dir.max_path_bytes) return error.PathTooLong;
@@ -132,7 +132,7 @@ fn tryPathImpl(
 }
 
 fn isExecutable(perms: std.Io.File.Permissions) bool {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .windows => true,
         else => posix: {
             break :posix switch (std.posix.mode_t) {
@@ -147,7 +147,7 @@ fn isExecutable(perms: std.Io.File.Permissions) bool {
 test "expand: hostname" {
     var environ_map = try testing.environ.createMap(testing.allocator);
     defer environ_map.deinit();
-    const executable = if (builtin.os.tag == .windows) "hostname.exe" else "uname";
+    const executable = if (builtin.target.os.tag == .windows) "hostname.exe" else "uname";
     const path = (try expand(testing.io, testing.allocator, &environ_map, executable)).?;
     defer testing.allocator.free(path);
     try testing.expect(path.len > executable.len);
@@ -169,7 +169,7 @@ test "expand: slash" {
 }
 
 test "expand: windows backslash passes through" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     var environ_map = try testing.environ.createMap(testing.allocator);
     defer environ_map.deinit();
     const input = "C:\\Windows\\System32\\cmd.exe";
@@ -179,7 +179,7 @@ test "expand: windows backslash passes through" {
 }
 
 test "expand: windows drive-letter only passes through" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     var environ_map = try testing.environ.createMap(testing.allocator);
     defer environ_map.deinit();
     // No separator, but the drive prefix means this is already a
@@ -192,7 +192,7 @@ test "expand: windows drive-letter only passes through" {
 }
 
 test "expand: windows bare cmd.exe resolves on PATH" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     var environ_map = try testing.environ.createMap(testing.allocator);
     defer environ_map.deinit();
     const path = (try expand(testing.io, testing.allocator, &environ_map, "cmd.exe")).?;
@@ -203,7 +203,7 @@ test "expand: windows bare cmd.exe resolves on PATH" {
 }
 
 test "expand: windows bare pwsh resolves via PATHEXT" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     var environ_map = try testing.environ.createMap(testing.allocator);
     defer environ_map.deinit();
     // This test requires pwsh.exe to be on the system PATH.
@@ -217,7 +217,7 @@ test "expand: windows bare pwsh resolves via PATHEXT" {
 }
 
 test "expand: windows name with extension does not PATHEXT hunt" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     var environ_map = try testing.environ.createMap(testing.allocator);
     defer environ_map.deinit();
     // If we provide a name with an extension (even unknown), it should
@@ -227,7 +227,7 @@ test "expand: windows name with extension does not PATHEXT hunt" {
 }
 
 test "expand: windows extension present bypasses PATHEXT" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     var environ_map = try testing.environ.createMap(testing.allocator);
     defer environ_map.deinit();
     // cmd.exe should resolve literally via the literal-first attempt,

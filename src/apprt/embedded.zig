@@ -25,11 +25,11 @@ const CoreSurface = @import("../Surface.zig");
 
 /// DirectX12 imgui backend for the inspector (Windows only). On other
 /// platforms this is an empty namespace so the Inspector still compiles.
-const dx12_imgui = if (builtin.os.tag == .windows)
+const dx12_imgui = if (builtin.target.os.tag == .windows)
     @import("../renderer/directx12/imgui.zig")
 else
     struct {};
-const dx12_inspector_surface = if (builtin.os.tag == .windows)
+const dx12_inspector_surface = if (builtin.target.os.tag == .windows)
     @import("../renderer/directx12/inspector_surface.zig")
 else
     struct {};
@@ -256,7 +256,7 @@ pub const App = struct {
     /// to run on every keypress.
     pub fn keyboardLayout(self: *App) input.KeyboardLayout {
         // We only support keyboard layout detection on macOS.
-        if (comptime builtin.os.tag != .macos) return .unknown;
+        if (comptime builtin.target.os.tag != .macos) return .unknown;
 
         // Lazily initialize the keymap.
         const keymap: *input.Keymap = keymap: {
@@ -351,7 +351,7 @@ pub const App = struct {
                     // error we just ignore it, since this only breaks a few minor things.
                     const alloc = self.core_app.alloc;
                     if (surface.rt_surface.title) |v| alloc.free(v);
-                    surface.rt_surface.title = alloc.dupeZ(u8, value.title) catch null;
+                    surface.rt_surface.title = alloc.dupeSentinel(u8, value.title, 0) catch null;
                 },
             },
 
@@ -405,26 +405,26 @@ fn assertHeaderLayout(
     comptime header_struct: []const u8,
 ) void {
     @setEvalBranchQuota(100000);
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = @typeInfo(T).@"struct".field_names;
     // Walk the struct's fields, not the table's rows: a row count alone
     // would let a duplicated row stand in for a field the table dropped.
     inline for (fields) |field| {
         var rows: usize = 0;
         inline for (expected) |row| {
-            if (comptime std.mem.eql(u8, row.name, field.name)) rows += 1;
+            if (comptime std.mem.eql(u8, row.name, field)) rows += 1;
         }
         if (rows != 1) @compileError(std.fmt.comptimePrint(
             "{s}.{s} appears in {d} rows of its layout table; every " ++
                 "field of {s} needs exactly one row",
-            .{ @typeName(T), field.name, rows, header_struct },
+            .{ @typeName(T), field, rows, header_struct },
         ));
-        const actual = @offsetOf(T, field.name);
+        const actual = @offsetOf(T, field);
         inline for (expected) |row| {
-            if (comptime std.mem.eql(u8, row.name, field.name)) {
+            if (comptime std.mem.eql(u8, row.name, field)) {
                 if (actual != row.offset) @compileError(std.fmt.comptimePrint(
                     "{s}.{s} is at offset {d} but {s} has it at {d}; the two " ++
                         "layouts must agree",
-                    .{ @typeName(T), field.name, actual, header_struct, row.offset },
+                    .{ @typeName(T), field, actual, header_struct, row.offset },
                 ));
             }
         }
@@ -610,34 +610,34 @@ pub const Surface = struct {
 
     /// Windows buffers WM_KEYDOWN here so a following WM_CHAR can
     /// attach text before dispatching through key encoding.
-    pending_key: if (builtin.os.tag == .windows)
+    pending_key: if (builtin.target.os.tag == .windows)
         ?PendingKey
     else
-        void = if (builtin.os.tag == .windows) null else {},
+        void = if (builtin.target.os.tag == .windows) null else {},
 
     /// Text buffer for the pending key. Lives outside the optional so
     /// it isn't poisoned when the optional is cleared in debug builds.
     /// Sized to match GTK's im_buf so IME compositions aren't truncated.
-    pending_key_text: if (builtin.os.tag == .windows)
+    pending_key_text: if (builtin.target.os.tag == .windows)
         [128]u8
     else
-        void = if (builtin.os.tag == .windows) .{0} ** 128 else {},
+        void = if (builtin.target.os.tag == .windows) @splat(0) else {},
 
     /// Input redirect for in-process features (e.g., theme picker).
-    input_redirect: if (builtin.os.tag == .windows)
+    input_redirect: if (builtin.target.os.tag == .windows)
         ?InputRedirect
     else
-        void = if (builtin.os.tag == .windows) null else {},
+        void = if (builtin.target.os.tag == .windows) null else {},
 
-    scroll_redirect: if (builtin.os.tag == .windows)
+    scroll_redirect: if (builtin.target.os.tag == .windows)
         ?ScrollRedirect
     else
-        void = if (builtin.os.tag == .windows) null else {},
+        void = if (builtin.target.os.tag == .windows) null else {},
 
-    resize_redirect: if (builtin.os.tag == .windows)
+    resize_redirect: if (builtin.target.os.tag == .windows)
         ?ResizeRedirect
     else
-        void = if (builtin.os.tag == .windows) null else {},
+        void = if (builtin.target.os.tag == .windows) null else {},
 
     const PendingKey = struct {
         event: App.KeyEvent,
@@ -877,7 +877,7 @@ pub const Surface = struct {
         // `initial-command` in Config.zig): forced integration is unlikely to
         // suit a command that is probably not a shell. On Windows the config
         // no longer applies it globally, so it lands on this pane alone.
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             if (opts.close_on_clean_exit and config.@"shell-integration" != .none) {
                 config.@"shell-integration" = .detect;
             }
@@ -903,7 +903,7 @@ pub const Surface = struct {
         // or without a host command on this surface. Otherwise whichever
         // surface happened to initialize first (the hidden quick terminal,
         // with no profile to give it a command) would run `-e` as well.
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             config.@"initial-command" = null;
         }
 
@@ -917,8 +917,8 @@ pub const Surface = struct {
                 const value = std.mem.sliceTo(env_var.value, 0);
                 try config.env.map.put(
                     alloc,
-                    try alloc.dupeZ(u8, key),
-                    try alloc.dupeZ(u8, value),
+                    try alloc.dupeSentinel(u8, key, 0),
+                    try alloc.dupeSentinel(u8, value, 0),
                 );
             }
         }
@@ -1137,7 +1137,7 @@ pub const Surface = struct {
 
         const result = self.app.opts.read_clipboard(
             self.userdata,
-            @intCast(@intFromEnum(clipboard_type)),
+            @intCast(@backingInt(clipboard_type)),
             state_ptr,
             mimes.ptr,
             mimes.len,
@@ -1168,8 +1168,9 @@ pub const Surface = struct {
             error.UnauthorizedPaste => {
                 // Convert the would-be contents so the permission
                 // prompt can display exactly what would be written.
-                var stack = std.heap.stackFallback(1024, alloc);
-                const conv_alloc = stack.get();
+                var stack_buf: [1024]u8 = undefined;
+                var stack: std.heap.BufferFirstAllocator = .init(&stack_buf, alloc);
+                const conv_alloc = stack.allocator();
                 const contents = conv_alloc.alloc(
                     CAPI.ClipboardContent,
                     kitty.contents.len,
@@ -1220,8 +1221,9 @@ pub const Surface = struct {
 
         // Convert the C representations to the core types. Everything
         // remains borrowed from the caller for the duration of the call.
-        var stack = std.heap.stackFallback(1024, alloc);
-        const conv_alloc = stack.get();
+        var stack_buf: [1024]u8 = undefined;
+        var stack: std.heap.BufferFirstAllocator = .init(&stack_buf, alloc);
+        const conv_alloc = stack.allocator();
 
         const raw_contents: []const CAPI.ClipboardContent =
             if (complete.contents) |v| v[0..complete.contents_len] else &.{};
@@ -1327,7 +1329,7 @@ pub const Surface = struct {
 
         self.app.opts.write_clipboard(
             self.userdata,
-            @intCast(@intFromEnum(clipboard_type)),
+            @intCast(@backingInt(clipboard_type)),
             array.ptr,
             array.len,
             confirm,
@@ -1402,7 +1404,7 @@ pub const Surface = struct {
         // after the feature has redrawn, yielding a single clean present.
         // ?2026l is emitted on every exit path of this (non-re-entrant)
         // call so the hold is always released. (#219)
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             if (self.resize_redirect) |redirect| {
                 self.core_surface.writeVt("\x1b[?2026h");
                 self.core_surface.sizeCallback(self.size) catch |err| {
@@ -1460,7 +1462,7 @@ pub const Surface = struct {
         yoff: f64,
         mods: input.ScrollMods,
     ) void {
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             if (self.scroll_redirect) |redirect| {
                 if (redirect.callback(redirect.userdata, yoff))
                     return;
@@ -1537,7 +1539,7 @@ pub const Surface = struct {
 
     /// Flush a buffered Windows key event. No-op on non-Windows.
     fn flushPendingKey(self: *Surface) void {
-        if (comptime builtin.os.tag != .windows) return;
+        if (comptime builtin.target.os.tag != .windows) return;
         if (self.pending_key) |pending| {
             self.pending_key = null;
             _ = self.dispatchKey(pending.event);
@@ -1716,12 +1718,12 @@ pub const Inspector = struct {
     /// SRV descriptor heap backing the imgui font atlas for the DirectX12
     /// backend (Windows only). Owned here so its address stays stable for
     /// imgui's descriptor callbacks.
-    dx12_heap: if (builtin.os.tag == .windows) ?dx12_imgui.SrvHeap else void =
-        if (builtin.os.tag == .windows) null else {},
+    dx12_heap: if (builtin.target.os.tag == .windows) ?dx12_imgui.SrvHeap else void =
+        if (builtin.target.os.tag == .windows) null else {},
 
     /// Owned DX12 swap chain + present loop for the inspector window.
-    dx12_surface: if (builtin.os.tag == .windows) ?*dx12_inspector_surface.State else void =
-        if (builtin.os.tag == .windows) null else {},
+    dx12_surface: if (builtin.target.os.tag == .windows) ?*dx12_inspector_surface.State else void =
+        if (builtin.target.os.tag == .windows) null else {},
 
     const Backend = enum {
         metal,
@@ -1730,7 +1732,7 @@ pub const Inspector = struct {
         pub fn deinit(self: Backend) void {
             switch (self) {
                 .metal => if (builtin.target.os.tag.isDarwin()) cimgui.ImGui_ImplMetal_Shutdown(),
-                .directx12 => if (builtin.os.tag == .windows) dx12_imgui.shutdown(),
+                .directx12 => if (builtin.target.os.tag == .windows) dx12_imgui.shutdown(),
             }
         }
     };
@@ -1835,7 +1837,7 @@ pub const Inspector = struct {
 
     /// Release the DirectX12 SRV heap if one is allocated. No-op off Windows.
     fn deinitDx12Heap(self: *Inspector) void {
-        if (comptime builtin.os.tag != .windows) return;
+        if (comptime builtin.target.os.tag != .windows) return;
         if (self.dx12_heap) |*h| {
             h.deinit();
             self.dx12_heap = null;
@@ -1853,7 +1855,7 @@ pub const Inspector = struct {
         num_frames: u32,
         rtv_format: u32,
     ) bool {
-        if (comptime builtin.os.tag != .windows) return false;
+        if (comptime builtin.target.os.tag != .windows) return false;
 
         cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
 
@@ -1883,7 +1885,7 @@ pub const Inspector = struct {
     }
 
     pub fn renderDirectX12(self: *Inspector, command_list: *anyopaque) !void {
-        if (comptime builtin.os.tag != .windows) return;
+        if (comptime builtin.target.os.tag != .windows) return;
         // The host should only call this after a successful init; bail
         // cleanly rather than unwrap a null heap if that invariant breaks.
         if (self.backend != .directx12) return;
@@ -1922,7 +1924,7 @@ pub const Inspector = struct {
         width: u32,
         height: u32,
     ) bool {
-        if (comptime builtin.os.tag != .windows) return false;
+        if (comptime builtin.target.os.tag != .windows) return false;
 
         self.shutdownDirectX12Surface();
 
@@ -1947,7 +1949,7 @@ pub const Inspector = struct {
         self.dx12_surface = ptr;
 
         const dev = &ptr.dev;
-        const rtv_format: u32 = @intFromEnum(dxgi.DXGI_FORMAT.B8G8R8A8_UNORM);
+        const rtv_format: u32 = @backingInt(dxgi.DXGI_FORMAT.B8G8R8A8_UNORM);
         if (!self.initDirectX12(
             @ptrCast(dev.device),
             @ptrCast(dev.command_queue),
@@ -1963,7 +1965,7 @@ pub const Inspector = struct {
     }
 
     pub fn presentDirectX12Surface(self: *Inspector) void {
-        if (comptime builtin.os.tag != .windows) return;
+        if (comptime builtin.target.os.tag != .windows) return;
         const surface = self.dx12_surface orelse return;
         if (self.backend != .directx12) return;
 
@@ -1984,7 +1986,7 @@ pub const Inspector = struct {
     }
 
     pub fn resizeDirectX12Surface(self: *Inspector, width: u32, height: u32) void {
-        if (comptime builtin.os.tag != .windows) return;
+        if (comptime builtin.target.os.tag != .windows) return;
         const surface = self.dx12_surface orelse return;
         surface.resize(width, height) catch |err| {
             log.err("inspector dx12 surface resize failed: {}", .{err});
@@ -1992,7 +1994,7 @@ pub const Inspector = struct {
     }
 
     pub fn shutdownDirectX12Surface(self: *Inspector) void {
-        if (comptime builtin.os.tag != .windows) return;
+        if (comptime builtin.target.os.tag != .windows) return;
         const surface = self.dx12_surface orelse return;
 
         if (self.backend) |v| {
@@ -2202,7 +2204,7 @@ pub const CAPI = struct {
         /// MapVirtualKeyW (scancode -> VK -> base character). Returns
         /// 0 on non-Windows.
         fn unshiftedCodepointFromKeycode(keycode: u32) u32 {
-            if (comptime builtin.os.tag != .windows) return 0;
+            if (comptime builtin.target.os.tag != .windows) return 0;
 
             const win32 = struct {
                 const MAPVK_VSC_TO_VK_EX = 3;
@@ -2453,7 +2455,7 @@ pub const CAPI = struct {
         if (builtin.target.os.tag.isDarwin()) {
             _ = Darwin;
         }
-        if (builtin.os.tag == .windows) {
+        if (builtin.target.os.tag == .windows) {
             _ = Windows;
         }
     }
@@ -2971,7 +2973,7 @@ pub const CAPI = struct {
         theme_cb: ?*const fn ([*:0]const u8, bool) callconv(.c) void,
     ) ?*anyopaque {
         // Windows only: drives Surface.{input,scroll,resize}_redirect.
-        if (comptime builtin.os.tag != .windows) return null;
+        if (comptime builtin.target.os.tag != .windows) return null;
 
         const picker_mod = @import("../cli/inline_theme_picker.zig");
         const alloc = global.alloc();
@@ -3070,7 +3072,7 @@ pub const CAPI = struct {
         picker_ptr: ?*anyopaque,
     ) void {
         // Windows only: drives Surface.{input,scroll,resize}_redirect.
-        if (comptime builtin.os.tag != .windows) return;
+        if (comptime builtin.target.os.tag != .windows) return;
 
         const picker_mod = @import("../cli/inline_theme_picker.zig");
         const picker: *picker_mod.InlineThemePicker = @ptrCast(@alignCast(picker_ptr orelse return));
@@ -3095,7 +3097,7 @@ pub const CAPI = struct {
     /// device to avoid cross-device synchronization issues. Returns
     /// null on non-DX12 builds or before the device finishes init.
     export fn ghostty_surface_get_d3d12_device(surface: *Surface) ?*anyopaque {
-        if (comptime builtin.os.tag != .windows) return null;
+        if (comptime builtin.target.os.tag != .windows) return null;
         const r = &surface.core_surface.renderer;
         // Only the DX12 renderer has a `dev` field holding an ID3D12Device.
         if (comptime !@hasField(@TypeOf(r.api), "dev")) return null;
@@ -3112,7 +3114,7 @@ pub const CAPI = struct {
     /// ICompositorInterop.CreateCompositionSurfaceForSwapChain.
     /// Returns null on non-DX12 or before the swap chain is created.
     export fn ghostty_surface_get_swap_chain(surface: *Surface) ?*anyopaque {
-        if (comptime builtin.os.tag != .windows) return null;
+        if (comptime builtin.target.os.tag != .windows) return null;
         const r = &surface.core_surface.renderer;
         if (comptime !@hasField(@TypeOf(r.api), "dev")) return null;
         // See ghostty_surface_get_d3d12_device for why the lock.
@@ -3129,7 +3131,7 @@ pub const CAPI = struct {
     /// Returns null on non-DX12 builds or when the surface is not in
     /// SwapChainPanel mode.
     export fn ghostty_surface_get_swap_chain_handle(surface: *Surface) ?*anyopaque {
-        if (comptime builtin.os.tag != .windows) return null;
+        if (comptime builtin.target.os.tag != .windows) return null;
         const r = &surface.core_surface.renderer;
         if (comptime !@hasField(@TypeOf(r.api), "dev")) return null;
         // See ghostty_surface_get_d3d12_device for why the lock.
@@ -3156,7 +3158,7 @@ pub const CAPI = struct {
         surface: *Surface,
         out: *SharedTextureSnapshotC,
     ) bool {
-        if (comptime builtin.os.tag != .windows) return false;
+        if (comptime builtin.target.os.tag != .windows) return false;
         const r = &surface.core_surface.renderer;
         if (comptime @TypeOf(r.api) != renderer.DirectX12) return false;
         // See ghostty_surface_get_d3d12_device for why the lock. It also
@@ -3204,7 +3206,7 @@ pub const CAPI = struct {
         surface: *Surface,
         out: *LastFrameTextureC,
     ) bool {
-        if (comptime builtin.os.tag != .windows) return false;
+        if (comptime builtin.target.os.tag != .windows) return false;
         const r = &surface.core_surface.renderer;
         if (comptime @TypeOf(r.api) != renderer.DirectX12) return false;
         // The snapshot submits GPU work, so it runs under the same lock
@@ -3264,7 +3266,7 @@ pub const CAPI = struct {
     /// freed by the caller via ghostty_string_free.
     export fn ghostty_surface_tty_name(surface: *Surface) String {
         const tty_name = surface.core_surface.getProcessInfo(.tty_name) orelse return .empty;
-        const copy = surface.app.core_app.alloc.dupeZ(u8, tty_name) catch |err| {
+        const copy = surface.app.core_app.alloc.dupeSentinel(u8, tty_name, 0) catch |err| {
             log.err("error allocating tty name err={}", .{err});
             return .empty;
         };
@@ -3414,7 +3416,7 @@ pub const CAPI = struct {
         // stays dormant for the next input to retry.
         if (!surface.core_surface.io.wakeIfDormant()) return false;
 
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             // Theme picker etc. intercepts before keybinding resolution.
             if (surface.input_redirect) |redirect| {
                 const core_event = key_event.core() orelse return false;
@@ -3507,7 +3509,7 @@ pub const CAPI = struct {
         // callbacks below would walk undefined memory, and the surface
         // stays dormant for the next input to retry.
         if (!surface.core_surface.io.wakeIfDormant()) return;
-        if (comptime builtin.os.tag == .windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             if (surface.pending_key) |*pending| {
                 const text = ptr[0..len];
 

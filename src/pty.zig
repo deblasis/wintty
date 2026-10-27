@@ -17,7 +17,7 @@ pub const winsize = extern struct {
     ws_ypixel: u16 = 600,
 };
 
-pub const Pty = switch (builtin.os.tag) {
+pub const Pty = switch (builtin.target.os.tag) {
     .windows => WindowsPty,
     .ios => NullPty,
     else => PosixPty,
@@ -291,7 +291,7 @@ const PosixPty = struct {
     pub fn getProcessInfo(self: *PosixPty, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
         return switch (info) {
             .foreground_pid => {
-                switch (builtin.os.tag) {
+                switch (builtin.target.os.tag) {
                     .linux => {
                         const linux = std.os.linux;
                         var pgrp: i32 = undefined;
@@ -311,7 +311,7 @@ const PosixPty = struct {
             .tty_name => {
                 if (self.tty_name) |tty_name| return tty_name;
 
-                switch (builtin.os.tag) {
+                switch (builtin.target.os.tag) {
                     .macos => {
                         // The macOS TIOCPTYGNAME ioctl does not allow us to
                         // specify the length of the buffer passed to it, but
@@ -374,25 +374,25 @@ const WindowsPty = struct {
     /// published `pseudo_console_api`.
     const OnceState = enum(u8) { uninitialized, in_progress, done };
     var pseudo_console_api_state: std.atomic.Value(u8) = .init(
-        @intFromEnum(OnceState.uninitialized),
+        @backingInt(OnceState.uninitialized),
     );
 
     fn pseudoConsoleApiOnce() void {
         // Fast path: the result is already published.
         if (pseudo_console_api_state.load(.acquire) ==
-            @intFromEnum(OnceState.done)) return;
+            @backingInt(OnceState.done)) return;
 
         // Try to claim the initialization slot.
         if (pseudo_console_api_state.cmpxchgStrong(
-            @intFromEnum(OnceState.uninitialized),
-            @intFromEnum(OnceState.in_progress),
+            @backingInt(OnceState.uninitialized),
+            @backingInt(OnceState.in_progress),
             .acq_rel,
             .acquire,
         )) |_| {
             // Someone else claimed it. Resolution is a handful of syscalls
             // done once per process, so spinning here is bounded and rare.
             while (pseudo_console_api_state.load(.acquire) !=
-                @intFromEnum(OnceState.done))
+                @backingInt(OnceState.done))
             {
                 std.atomic.spinLoopHint();
             }
@@ -400,7 +400,7 @@ const WindowsPty = struct {
         }
 
         resolvePseudoConsoleApi();
-        pseudo_console_api_state.store(@intFromEnum(OnceState.done), .release);
+        pseudo_console_api_state.store(@backingInt(OnceState.done), .release);
     }
 
     out_pipe: windows.HANDLE,
@@ -429,7 +429,7 @@ const WindowsPty = struct {
         const exe_dir = std.fs.path.dirname(exe_path) orelse return null;
 
         var dll_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const dll_path = std.fmt.bufPrint(
+        const dll_path = std.mem.print(
             &dll_path_buf,
             "{s}\\conpty.dll",
             .{exe_dir},
@@ -513,13 +513,14 @@ const WindowsPty = struct {
 
         var pipe_path_buf: [128]u8 = undefined;
         var pipe_path_buf_w: [128]u16 = undefined;
-        const pipe_path = std.fmt.bufPrintZ(
+        const pipe_path = std.mem.printSentinel(
             &pipe_path_buf,
             "\\\\.\\pipe\\LOCAL\\ghostty-pty-{d}-{d}",
             .{
                 windows.GetCurrentProcessId(),
                 pipe_name_counter.fetchAdd(1, .monotonic),
             },
+            0,
         ) catch unreachable;
 
         const pipe_path_w_len = std.unicode.utf8ToUtf16Le(
@@ -699,7 +700,7 @@ test {
     try pty.setSize(ws);
     try testing.expectEqual(ws, try pty.getSize());
 
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .freebsd => try testing.expect(std.mem.startsWith(u8, pty.getProcessInfo(.tty_name).?, "/dev/")),
         .linux => try testing.expect(std.mem.startsWith(u8, pty.getProcessInfo(.tty_name).?, "/dev/pts/")),
         .macos => try testing.expect(std.mem.startsWith(u8, pty.getProcessInfo(.tty_name).?, "/dev/")),
@@ -708,7 +709,7 @@ test {
 }
 
 test "WindowsPty.adjacentConptyPathW: returns path ending in conpty.dll" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     var buf: [std.Io.Dir.max_path_bytes]u16 = undefined;
     const path = WindowsPty.adjacentConptyPathW(&buf) orelse {
@@ -725,7 +726,7 @@ test "WindowsPty.adjacentConptyPathW: returns path ending in conpty.dll" {
 }
 
 test "WindowsPty.adjacentConptyPathW: null-terminated slice" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     var buf: [std.Io.Dir.max_path_bytes]u16 = undefined;
     const path = WindowsPty.adjacentConptyPathW(&buf) orelse return error.SkipZigTest;
@@ -738,7 +739,7 @@ test "WindowsPty.adjacentConptyPathW: null-terminated slice" {
 }
 
 test "WindowsPty: conpty mode populates pseudo_console" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     var pty = try Pty.open(.{
         .size = .{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 },
         .mode = .conpty,

@@ -77,11 +77,11 @@ pub fn warmup() void {
     // the first device is created in the process, so if warmup creates
     // that first device it has to turn the layer on itself, or the real
     // device created later would silently inherit a layer-less singleton.
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         enableDebugLayer();
     }
 
-    const factory_flags: u32 = if (comptime builtin.mode == .Debug)
+    const factory_flags: u32 = if (comptime builtin.mode == .debug)
         dxgi.DXGI_CREATE_FACTORY_DEBUG
     else
         0;
@@ -316,17 +316,17 @@ pub const SharedTextureState = struct {
             .Format = .B8G8R8A8_UNORM,
             .SampleDesc = .{ .Count = 1, .Quality = 0 },
             .Layout = .UNKNOWN,
-            .Flags = @enumFromInt(
-                @intFromEnum(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_RENDER_TARGET) |
-                    @intFromEnum(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_SIMULTANEOUS_ACCESS),
-            ),
+            .Flags = @fromBackingInt(@intCast(
+                @backingInt(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_RENDER_TARGET) |
+                    @backingInt(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_SIMULTANEOUS_ACCESS),
+            )),
         };
 
         var resource: ?*d3d12.ID3D12Resource = null;
         {
             const hr = device.CreateCommittedResource(
                 &heap_props,
-                @intFromEnum(d3d12.D3D12_HEAP_FLAGS.SHARED),
+                @backingInt(d3d12.D3D12_HEAP_FLAGS.SHARED),
                 &desc,
                 .COMMON,
                 null,
@@ -396,12 +396,12 @@ pub const InitOptions = struct {
 
 pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device {
     // -- Debug layer (debug builds only) --
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         enableDebugLayer();
     }
 
     // -- DXGI factory --
-    const factory_flags: u32 = if (comptime builtin.mode == .Debug)
+    const factory_flags: u32 = if (comptime builtin.mode == .debug)
         dxgi.DXGI_CREATE_FACTORY_DEBUG
     else
         0;
@@ -993,16 +993,16 @@ pub fn snapshotLastFrame(
         .Format = .B8G8R8A8_UNORM,
         .SampleDesc = .{ .Count = 1, .Quality = 0 },
         .Layout = .UNKNOWN,
-        .Flags = @enumFromInt(
-            @intFromEnum(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_RENDER_TARGET) |
-                @intFromEnum(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_SIMULTANEOUS_ACCESS),
-        ),
+        .Flags = @fromBackingInt(@intCast(
+            @backingInt(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_RENDER_TARGET) |
+                @backingInt(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_SIMULTANEOUS_ACCESS),
+        )),
     };
     var dst: ?*d3d12.ID3D12Resource = null;
     {
         const hr = self.device.CreateCommittedResource(
             &heap_props,
-            @intFromEnum(d3d12.D3D12_HEAP_FLAGS.SHARED),
+            @backingInt(d3d12.D3D12_HEAP_FLAGS.SHARED),
             &desc,
             .COMMON,
             null,

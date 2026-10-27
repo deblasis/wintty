@@ -249,7 +249,7 @@ fn initTarget(
 pub fn add(
     self: *const SharedDeps,
     step: *std.Build.Step.Compile,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.OptimizeMode,
 ) !LazyPathList {
     const b = step.step.owner;
 
@@ -1021,7 +1021,7 @@ fn addGtk(
 pub fn addSimd(
     b: *std.Build,
     m: *std.Build.Module,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.OptimizeMode,
     static_libs: ?*LazyPathList,
 ) !void {
     const target = m.resolved_target.?;
@@ -1209,7 +1209,7 @@ fn gtkDistResourcesUncached(b: *std.Build) GtkResources {
         translate_c.addImportToModule(b, "adw_c", check_exe.root_module, .{
             .source = .{ .includes = .{ .files = &.{.{ .path = "adwaita.h" }} } },
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
             .link_system_libs = &.{"libadwaita-1"},
         }) catch unreachable;
 

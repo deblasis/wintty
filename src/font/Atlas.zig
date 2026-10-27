@@ -567,7 +567,7 @@ pub const Wasm = struct {
         const atlas = init(
             alloc,
             size,
-            @enumFromInt(format),
+            @fromBackingInt(format),
         ) catch return null;
         const result = alloc.create(Atlas) catch return null;
         result.* = atlas;
@@ -630,7 +630,7 @@ pub const Wasm = struct {
             try canvas.set("width", self.size);
             try canvas.set("height", self.size);
 
-            const width_str = try std.fmt.allocPrint(alloc, "{d}px", .{self.size});
+            const width_str = try alloc.print("{d}px", .{self.size});
             defer alloc.free(width_str);
 
             const style = try canvas.get(js.Object, "style");
@@ -707,12 +707,12 @@ pub const Wasm = struct {
         // Draw it
         try ctx.call(void, "putImageData", .{ image_data, 0, 0 });
 
-        const id = @as(js.Ref, @bitCast(@intFromEnum(canvas.value))).id;
+        const id = @as(js.Ref, @bitCast(@backingInt(canvas.value))).id;
         return id;
     }
 
     test "happy path" {
-        const atlas = atlas_new(512, @intFromEnum(Format.grayscale)).?;
+        const atlas = atlas_new(512, @backingInt(Format.grayscale)).?;
         defer atlas_free(atlas);
 
         const reg = atlas_reserve(atlas, 2, 2).?;
@@ -1105,7 +1105,7 @@ test "dirtySince covers the regions that were written" {
 
     // A single write is exactly the region that was written.
     const first = try atlas.reserve(alloc, 2, 3);
-    atlas.set(first, &[_]u8{0} ** 6);
+    atlas.set(first, &@as([6]u8, @splat(0)));
     {
         const dirty = atlas.dirtySince(synced).?;
         try testing.expectEqual(first.x, dirty.x);
@@ -1116,7 +1116,7 @@ test "dirtySince covers the regions that were written" {
 
     // A second write extends the box to just cover both.
     const second = try atlas.reserve(alloc, 4, 2);
-    atlas.set(second, &[_]u8{0} ** 8);
+    atlas.set(second, &@as([8]u8, @splat(0)));
     {
         const dirty = atlas.dirtySince(synced).?;
         try testing.expectEqual(@min(first.x, second.x), dirty.x);
@@ -1146,13 +1146,13 @@ test "dirtySince gives the whole atlas to a consumer that fell behind" {
     const behind = atlas.modified.load(.monotonic);
 
     const small = try atlas.reserve(alloc, 4, 2);
-    atlas.set(small, &[_]u8{0} ** 8);
+    atlas.set(small, &@as([8]u8, @splat(0)));
     try testing.expectEqual(@as(u32, 2), atlas.dirtySince(behind).?.height);
 
     // A write that would stretch the box across a quarter of the atlas
     // makes it start over, which puts `behind` out of its reach.
     const tall = try atlas.reserve(alloc, 4, 40);
-    atlas.set(tall, &[_]u8{0} ** (4 * 40));
+    atlas.set(tall, &@as([4 * 40]u8, @splat(0)));
     {
         const dirty = atlas.dirtySince(behind).?;
         try testing.expectEqual(@as(u32, 64), dirty.width);

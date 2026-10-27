@@ -19,7 +19,7 @@ pub fn init(
     // src/simd/*.cpp are the VT hot path, and recompiling them in a second
     // mode would put a C++ codegen change inside the number the option exists
     // to report.
-    const pinned: std.builtin.OptimizeMode = .ReleaseFast;
+    const pinned: std.lang.OptimizeMode = .fast;
 
     // Our synthetic data generator
     {
@@ -51,7 +51,7 @@ pub fn init(
                 // runtime safety costs the VT hot path is the reason that
                 // option exists.
                 .optimize = if (deps.config.vt_safe)
-                    .ReleaseSafe
+                    .safe
                 else
                     pinned,
                 .link_libc = true,

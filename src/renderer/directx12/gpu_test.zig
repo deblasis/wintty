@@ -5,6 +5,7 @@
 //! create/use/destroy cycles. They only run on Windows -- on other
 //! platforms they're skipped.
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 const builtin = @import("builtin");
 const global = @import("../../global.zig");
 
@@ -42,7 +43,7 @@ const Buffer = buffer_mod.Buffer;
 /// is called keeps the suite green on headless hosts and unchanged on
 /// interactive ones.
 fn hasInteractiveDesktop() bool {
-    if (comptime builtin.os.tag != .windows) return false;
+    if (comptime builtin.target.os.tag != .windows) return false;
 
     const USEROBJECTFLAGS = extern struct {
         fInherit: i32,
@@ -138,7 +139,7 @@ const Factory4 = extern struct {
 /// silently runs on hardware would report a green run for a path it never
 /// exercised, which is the whole point of the knob.
 fn warpAdapterIfRequested() !?*anyopaque {
-    if (comptime builtin.os.tag != .windows) return null;
+    if (comptime builtin.target.os.tag != .windows) return null;
 
     const kernel32 = struct {
         extern "kernel32" fn GetEnvironmentVariableA(
@@ -284,7 +285,7 @@ const TestDevice = struct {
 /// Create a D3D12 device for testing. Returns null on non-Windows or if
 /// device creation fails (e.g. no GPU in CI).
 fn createTestDevice() !TestDevice {
-    if (comptime builtin.os.tag != .windows) return error.TestSkipped;
+    if (comptime builtin.target.os.tag != .windows) return error.TestSkipped;
 
     // Device. Null adapter selects the system GPU; the WARP software
     // adapter replaces it when WINTTY_GPU_TEST_WARP=1 (see
@@ -581,7 +582,7 @@ test "Buffer: constant buffer (Uniforms)" {
 // changes; a literal here would keep passing whether or not production
 // buffers are wired to the retirement queue.
 test "Buffer: a grow does not final-release a resource the GPU still reads" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
 
     const DirectX12 = @import("../DirectX12.zig");
 
@@ -857,7 +858,7 @@ test "Texture: replaceRegion updates sub-region" {
     defer tex.deinit();
 
     // Replace a 2x2 sub-region (16 bytes = 2*2*4 bpp).
-    const region_data = [_]u8{0xFF} ** (2 * 2 * 4);
+    const region_data: [2 * 2 * 4]u8 = @splat(0xFF);
     tex.replaceRegion(1, 1, 2, 2, &region_data) catch return;
 
     // Execute the copy commands and wait for GPU to finish.
@@ -932,7 +933,7 @@ test "Pipeline: root signature creation" {
 }
 
 test "Pipeline: all PSOs created from DXIL bytecode via Shaders.init" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
 
     var dev = createTestDevice() catch return;
     defer dev.deinit();
@@ -975,7 +976,7 @@ test "Frame: create, reset, deinit" {
 // ---- HWND swap chain + DirectComposition tests ----
 
 test "Device: HWND surface uses DirectComposition with PREMULTIPLIED alpha" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
     if (!hasInteractiveDesktop()) return error.SkipZigTest;
 
     const HWND = dxgi.HWND;
@@ -1068,7 +1069,7 @@ test "Device: HWND surface uses DirectComposition with PREMULTIPLIED alpha" {
 }
 
 test "Device: shared texture mode has no swap chain or dcomp" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
 
     var device = Device.init(.{ .shared_texture = .{
         .width = 640,
@@ -1096,7 +1097,7 @@ test "Device: shared texture mode has no swap chain or dcomp" {
 // ---- Device.init edge case tests ----
 
 test "Device: shared texture 0x0 dimensions does not crash" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
 
     // SharedTexture mode has no swap chain, so 0x0 should not hit DXGI.
     // SharedTextureState.init clamps both dimensions to 1.
@@ -1115,7 +1116,7 @@ test "Device: shared texture 0x0 dimensions does not crash" {
 }
 
 test "Device: recreateSharedTexture bumps version and changes handle" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
 
     var device = Device.init(.{ .shared_texture = .{
         .width = 320,
@@ -1140,7 +1141,7 @@ test "Device: recreateSharedTexture bumps version and changes handle" {
 }
 
 test "Device: shared texture deinit does not leak" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
 
     // Create + destroy several times; if handles leak, the OS will
     // eventually refuse new allocations. This is a weak guarantee but
@@ -1156,7 +1157,7 @@ test "Device: shared texture deinit does not leak" {
 }
 
 test "Device: HWND surface with 0x0 dimensions clamps to 1x1" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
     if (!hasInteractiveDesktop()) return error.SkipZigTest;
 
     const HWND = dxgi.HWND;
@@ -1250,7 +1251,7 @@ test "Fence: execute empty command list and wait" {
 // ---- Device removed reason test ----
 
 test "Device: GetDeviceRemovedReason returns S_OK on healthy device" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
     var dev = createTestDevice() catch return;
     defer dev.deinit();
     _ = dev.command_list.Close();
@@ -1277,7 +1278,7 @@ test "Device: GetDeviceRemovedReason returns S_OK on healthy device" {
 // that vertex stage fails the assertions below rather than being masked
 // by a hand-written replacement stage.
 test "post pipeline: scanline shader leaves row periodicity" {
-    if (comptime builtin.os.tag != .windows) return;
+    if (comptime builtin.target.os.tag != .windows) return;
 
     const W: u32 = 256;
     const H: u32 = 256;
@@ -1309,7 +1310,7 @@ test "post pipeline: scanline shader leaves row periodicity" {
     });
     const real = try tmp.dir.realPathFileAlloc(global.io(), ".", alloc);
     defer alloc.free(real);
-    const path = try std.fmt.allocPrintSentinel(alloc, "{s}\\scan.glsl", .{real}, 0);
+    const path = try alloc.printSentinel("{s}\\scan.glsl", .{real}, 0);
     defer alloc.free(path);
 
     const hlsl = shadertoy.loadFromFile(alloc, path, .hlsl) catch |err| {
@@ -1501,7 +1502,7 @@ test "post pipeline: scanline shader leaves row periodicity" {
             .Format = .UNKNOWN,
             .SampleDesc = .{ .Count = 1, .Quality = 0 },
             .Layout = .ROW_MAJOR,
-            .Flags = @enumFromInt(@as(u32, 0)),
+            .Flags = @fromBackingInt(@intCast(@as(u32, 0))),
         };
         _ = dev.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COPY_DEST, null, &d3d12.ID3D12Resource.IID, @ptrCast(&readback));
     }
@@ -1664,7 +1665,7 @@ test "buffer.Options.retire has no default" {
     // The found flag keeps the loop from passing vacuously if the field is
     // ever renamed.
     var found = false;
-    inline for (@typeInfo(buffer_mod.Options).@"struct".fields) |field| {
+    inline for (comptime meta_compat.structFields(buffer_mod.Options)) |field| {
         if (comptime std.mem.eql(u8, field.name, "retire")) {
             found = true;
             try std.testing.expect(field.default_value_ptr == null);
@@ -1722,7 +1723,7 @@ fn removeDevice(dev: *d3d12.ID3D12Device) !void {
 }
 
 test "DirectX12: poll and release a removed device without rebuilding" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const DirectX12 = @import("../DirectX12.zig");
 
     var api: DirectX12 = .{ .allocator = std.testing.allocator };
@@ -1755,7 +1756,7 @@ test "DirectX12: poll and release a removed device without rebuilding" {
 }
 
 test "Renderer: pollDeviceRecovery releases a hidden surface's removed device" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     const DirectX12 = @import("../DirectX12.zig");
     const R = @import("../generic.zig").Renderer(DirectX12);
@@ -2019,7 +2020,7 @@ test "DXGI: measured swap chain flag/scaling legality matrix (2026-09-26)" {
 }
 
 test "DirectX12: rebuilds every device-bound object after the device is removed" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const DirectX12 = @import("../DirectX12.zig");
 
@@ -2281,7 +2282,7 @@ const snapshot_test = struct {
 };
 
 test "Device: last-frame snapshot copies the presented frame" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     if (!hasInteractiveDesktop()) return error.SkipZigTest;
 
     var dev = Device.init(.swap_chain_panel, .{
@@ -2328,7 +2329,7 @@ test "Device: last-frame snapshot copies the presented frame" {
 }
 
 test "DirectX12: last-frame snapshot tracks the presented slot" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     if (!hasInteractiveDesktop()) return error.SkipZigTest;
 
     const DirectX12 = @import("../DirectX12.zig");
@@ -2542,9 +2543,9 @@ const CoverageRig = struct {
     };
 
     fn init(self: *CoverageRig) !void {
-        if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+        if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
         // The debug layer is the oracle, and only Debug builds enable it.
-        if (comptime builtin.mode != .Debug) return error.SkipZigTest;
+        if (comptime builtin.mode != .debug) return error.SkipZigTest;
         const alloc = std.testing.allocator;
 
         self.api = .{ .allocator = alloc };
@@ -3277,7 +3278,7 @@ fn debugLayerQueue(device: *d3d12.ID3D12Device, comptime test_name: []const u8) 
     }
     releaseCom(debug);
     std.debug.print("debug layer installed but not enabled on the device: \"{s}\"\n", .{test_name});
-    return error.DebugLayerNotEnabled;
+    return error.debugLayerNotEnabled;
 }
 
 /// How many stored messages are CORRUPTION or ERROR severity, printing
@@ -3338,8 +3339,8 @@ const msg_command_list_closed: u32 = 547;
 // terminal with no color glyphs is never uploaded, so nothing else ever
 // moves its texture out of the state it was created in.
 test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.mode != .debug) return error.SkipZigTest; // the debug layer is the oracle
     const alloc = std.testing.allocator;
     const DirectX12 = @import("../DirectX12.zig");
 
@@ -3422,8 +3423,8 @@ test "DirectX12: atlas textures rebuilt between frames are shader-readable" {
 // whose before-state disagrees with the resource, is an error the layer
 // reports at submission.
 test "DirectX12: textures written after creation keep the debug layer quiet" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.mode != .debug) return error.SkipZigTest; // the debug layer is the oracle
     const alloc = std.testing.allocator;
     const DirectX12 = @import("../DirectX12.zig");
 
@@ -3477,12 +3478,12 @@ test "DirectX12: textures written after creation keep the debug layer quiet" {
         grown.deinit();
         grown = g;
         api.updateTextureCommandList(&grown);
-        const big = [_]u8{7} ** (8 * 8);
+        const big: [8 * 8]u8 = @splat(7);
         try grown.replaceRegion(0, 0, 8, 8, &big);
         try std.testing.expect(!grown.takeUploadDropped());
 
         // An image created with its data inside the frame.
-        const img_px = [_]u8{9} ** (4 * 4 * 4);
+        const img_px: [4 * 4 * 4]u8 = @splat(9);
         const im = try Texture.init(api.imageTextureOptions(.rgba, false), 4, 4, &img_px);
         image.deinit();
         image = im;
@@ -3522,8 +3523,8 @@ test "DirectX12: textures written after creation keep the debug layer quiet" {
 // it, so a frame whose last draw used shaders that threadExit has already
 // freed reports each of them as deleted while in use.
 test "Frame: teardown after a completed frame leaves the debug layer quiet" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    if (comptime builtin.mode != .Debug) return error.SkipZigTest; // the debug layer is the oracle
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.mode != .debug) return error.SkipZigTest; // the debug layer is the oracle
     const alloc = std.testing.allocator;
     const DirectX12 = @import("../DirectX12.zig");
     const R = @import("../generic.zig").Renderer(DirectX12);
@@ -3599,8 +3600,8 @@ test "Frame: teardown after a completed frame leaves the debug layer quiet" {
 // Teardown releases it without closing it, and that has to be as quiet as
 // tearing down a closed one: nothing at all in the info queue.
 test "Frame: teardown of a list that is still recording is quiet" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    if (comptime builtin.mode != .Debug) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.mode != .debug) return error.SkipZigTest;
     var dev = Device.init(.{ .shared_texture = .{ .width = 16, .height = 16 } }, .{}) catch
         return error.SkipZigTest;
     defer dev.deinit();
@@ -3650,7 +3651,7 @@ fn iqPrintAll(iq: *InfoQueue) void {
 // CORRUPTION raise, if any, is counted and resumed, so a regression fails
 // this test instead of ending the test binary.
 test "Renderer: releaseGpuResources idles the GPU before freeing unrealized shaders" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     const DirectX12 = @import("../DirectX12.zig");
     const R = @import("../generic.zig").Renderer(DirectX12);
@@ -3795,7 +3796,7 @@ const GateOpener = struct {
 // uploads, so nothing created there may keep a list the backend does not
 // own for the rest of its life.
 test "DirectX12: textures built during init keep no command list past it" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     const DirectX12 = @import("../DirectX12.zig");
 
@@ -3828,7 +3829,7 @@ test "DirectX12: textures built during init keep no command list past it" {
 /// before overwriting (true) or overwrites immediately (false, the negative
 /// control). The readback returns the value the GPU copied.
 fn frameUploadReadback(acquire: bool) !u32 {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const DirectX12 = @import("../DirectX12.zig");
     var api: DirectX12 = .{ .allocator = std.testing.allocator };
@@ -3993,7 +3994,7 @@ test "DirectX12: only prepareFrame selects the frame-data slot" {
 }
 
 test "DirectX12: prepareFrame bounds an unreachable data fence" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const DirectX12 = @import("../DirectX12.zig");
 
     var api: DirectX12 = .{ .allocator = std.testing.allocator };
@@ -4016,7 +4017,7 @@ test "DirectX12: prepareFrame bounds an unreachable data fence" {
 }
 
 test "DirectX12: a stale fence-event signal does not satisfy waitForGpu" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const DirectX12 = @import("../DirectX12.zig");
 
     var api: DirectX12 = .{ .allocator = std.testing.allocator };
@@ -4083,7 +4084,7 @@ test "DirectX12: a stale fence-event signal does not satisfy waitForGpu" {
 }
 
 test "DirectX12: a prepareFrame timeout cannot arm the shared fence-event" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const DirectX12 = @import("../DirectX12.zig");
 
     var api: DirectX12 = .{ .allocator = std.testing.allocator };
@@ -4166,7 +4167,7 @@ test "DirectX12: a prepareFrame timeout cannot arm the shared fence-event" {
 }
 
 test "DirectX12: drawFrameEnd records the selected data slot" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const DirectX12 = @import("../DirectX12.zig");
 
     var api: DirectX12 = .{ .allocator = std.testing.allocator };
@@ -4219,7 +4220,7 @@ test "Renderer: release the backend device before spending the loss budget" {
 }
 
 test "Renderer: acquire the frame-data slot before overwriting mapped uploads" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     // The negative control proves the GPU really reads the changed memory
     // when the producer does not wait, independent of normal GPU speed.
