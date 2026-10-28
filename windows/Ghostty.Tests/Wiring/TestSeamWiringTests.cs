@@ -299,13 +299,19 @@ public class TestSeamWiringTests
         // The IME commit group (ime-ended / ime-commit / ime-char) is the
         // fifth gated read: committed text and the finalizer reach a shell
         // through the same character path.
+        // The settle-interval op is the sixth gated read: it does not type
+        // anything itself, but changing the deadline changes when text is
+        // delivered, so it belongs behind the same opt-in.
+        // The settle-final-grace and settle-fallback ops are the seventh and
+        // eighth for the same reason: they move when text is sent, not what.
+        //
         // And nothing else in the seam consults it, so the gate is exactly
-        // those five reads wide and cannot have quietly become the gate for
+        // those eight reads wide and cannot have quietly become the gate for
         // everything.
         var mentions = source.Root.DescendantNodes()
             .OfType<IdentifierNameSyntax>()
             .Count(i => i.Identifier.ValueText == "_inputAllowed");
-        Assert.Equal(6, mentions); // the one write, the five reads
+        Assert.Equal(9, mentions); // the one write, the eight reads
     }
 
     /// <summary>
@@ -818,8 +824,17 @@ public class TestSeamWiringTests
             terminal.Method("BeginRightClickMenu").ToString());
         var raise = terminal.Method("CompleteRightClickMenu").Call("ContextMenuRequested?.Invoke");
         Assert.Equal("position", raise.Arg(1));
-        // Nothing but the release half raises the pointer menu.
-        Assert.Equal(2, terminal.Root.Calls("ContextMenuRequested?.Invoke").Count);
+        // Three sites raise the pane menu: the pointer release carries a
+        // position; the keyboard invocation and the IME sink's own context
+        // request do not, so the flyout anchors to the control. A count is not
+        // enough any more — assert which site carries what.
+        Assert.Equal("null", terminal.Method("OnContextRequested")
+            .Call("ContextMenuRequested?.Invoke").Arg(1));
+        Assert.Equal("null", terminal.Method("OnImeSinkContextRequested")
+            .Call("ContextMenuRequested?.Invoke").Arg(1));
+        // ... and nothing else raises it, which is what the count protected
+        // before the per-site arguments replaced it.
+        Assert.Equal(3, terminal.Root.Calls("ContextMenuRequested?.Invoke").Count);
 
         var tabs = ShellSource.Load("Tabs.TabHost.xaml.cs");
         var openTab = tabs.Method("TestSeamOpenTabMenu");
