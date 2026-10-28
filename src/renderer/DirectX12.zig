@@ -1402,10 +1402,11 @@ pub fn prepareFrame(self: *DirectX12, data_index: usize) !void {
     if (dev.fence.GetCompletedValue() < value) {
         // The bounded wait below can expire while its registration is still
         // live, so it owns its own event: a timeout leaves no registration
-        // on the shared fence event. The waits in waitForGpu and beginFrame
-        // revalidate GetCompletedValue in a loop, so a stale signal there
-        // does not return them early; it would only make them wake for a
-        // value they did not ask about, then register again for their own.
+        // on the shared fence event. The shared-event waits run through
+        // device.waitFenceValue, which revalidates GetCompletedValue in a
+        // loop, so a stale signal there does not return them early; it
+        // would only make them wake for a value they did not ask about,
+        // then register again for their own.
         if (com.FAILED(dev.fence.SetEventOnCompletion(value, dev.data_fence_event)))
             return error.FrameSyncFailed;
 
@@ -1579,15 +1580,12 @@ pub inline fn beginFrame(
     const wait_value = frame.fence_value;
     if (dev_ptr.fence.GetCompletedValue() < wait_value) {
         const wait_start: std.Io.Timestamp = .now(global.io(), .awake);
-        // A signal on the shared event is not proof the fence value
-        // completed: a registration abandoned by a bounded wait arms the
-        // event when its value completes. Revalidate and register again
-        // rather than reuse a back buffer the GPU may still be reading.
-        while (dev_ptr.fence.GetCompletedValue() < wait_value) {
-            const hr = dev_ptr.fence.SetEventOnCompletion(wait_value, dev_ptr.fence_event);
-            if (com.FAILED(hr)) return error.FrameSyncFailed;
-            _ = d3d12.WaitForSingleObject(dev_ptr.fence_event, d3d12.INFINITE);
-        }
+        // device.waitFenceValue revalidates the fence value after every
+        // wake: the shared auto-reset event can hold a signal left by an
+        // abandoned registration, and a reuse of the back buffer on such
+        // a signal would race the GPU still reading it.
+        device.waitFenceValue(dev_ptr.fence, dev_ptr.fence_event, wait_value) catch
+            return error.FrameSyncFailed;
         if (api.init_started) |started| {
             api.frame_wait_count += 1;
             const dur_ms = wait_start.durationTo(.now(global.io(), .awake)).toMilliseconds();

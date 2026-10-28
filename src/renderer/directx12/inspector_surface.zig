@@ -217,9 +217,12 @@ pub fn beginPresentFrame(self: *State) !struct {
 
     const wait_value = frame.fence_value;
     if (self.dev.fence.GetCompletedValue() < wait_value) {
-        const hr = self.dev.fence.SetEventOnCompletion(wait_value, self.dev.fence_event);
-        if (FAILED(hr)) return error.FrameSyncFailed;
-        _ = d3d12.WaitForSingleObject(self.dev.fence_event, d3d12.INFINITE);
+        // device.waitFenceValue revalidates the fence value after every
+        // wake: the shared auto-reset event can hold a signal left by an
+        // abandoned registration, and presenting on such a signal would
+        // race the GPU still reading this back buffer.
+        device.waitFenceValue(self.dev.fence, self.dev.fence_event, wait_value) catch
+            return error.FrameSyncFailed;
     }
 
     try frame.reset();
