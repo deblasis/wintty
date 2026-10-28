@@ -1662,6 +1662,67 @@ internal static class TestSeam
                 });
             }
 
+            case "ime-settle-interval":
+            {
+                // Test-build only: the settle's poll is shorter than an IPC
+                // round trip, so a harness cannot land a write between polls
+                // without stretching it. Gated with the other IME ops: changing
+                // it changes delivery behaviour.
+                if (!_inputAllowed)
+                    return Error(op, $"the IME input ops are off; set {InputEnvVar}=1 to arm them");
+                var ms = ArgInt(args, "ms", 20);
+                if (ms < 1 || ms > 5000) return Error(op, "ms must be 1..5000");
+                Ghostty.Controls.TerminalControl.ImeSettlePollMs = ms;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("ms", ms);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "ime-settle-fallback":
+            {
+                // Test-build only: the fallback a nothing-was-written settle
+                // waits is the settle's other deadline, and a replay needs to
+                // move it the same way it moves the grace.
+                if (!_inputAllowed)
+                    return Error(op, $"the IME input ops are off; set {InputEnvVar}=1 to arm them");
+                var ms = ArgInt(args, "ms", 1000);
+                if (ms < 1 || ms > 5000) return Error(op, "ms must be 1..5000");
+                Ghostty.Controls.TerminalControl.ImeSettleFallbackMs = ms;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("ms", ms);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "ime-settle-final-grace":
+            {
+                // Test-build only: the guard between "a non-ASCII result" and
+                // "a write that still replaces it" is short by design, so a
+                // replay needs to move it rather than sleep through it.
+                if (!_inputAllowed)
+                    return Error(op, $"the IME input ops are off; set {InputEnvVar}=1 to arm them");
+                var ms = ArgInt(args, "ms", 50);
+                if (ms < 0 || ms > 5000) return Error(op, "ms must be 0..5000");
+                Ghostty.Controls.TerminalControl.ImeSettleFinalGraceMs = ms;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("ms", ms);
+                    json.WriteEndObject();
+                });
+            }
+
             case "ime-set-text":
             case "ime-started":
             case "ime-changed":
@@ -1669,11 +1730,14 @@ internal static class TestSeam
             case "ime-commit":
             case "ime-cancel":
             case "ime-char":
+            case "ime-key":
             case "ime-state":
             {
                 if (LeafTerminal(manager, args) is not { } imeTerminal)
                     return Error(op, "no such tab or leaf");
-                if ((op is "ime-ended" or "ime-commit" or "ime-char") && !_inputAllowed)
+                if ((op is "ime-ended" or "ime-commit" or "ime-char" or "ime-key" or "ime-started"
+                        or "ime-set-text")
+                    && !_inputAllowed)
                     return Error(op, $"the IME input ops are off; set {InputEnvVar}=1 to arm them");
                 switch (op)
                 {
@@ -1701,6 +1765,18 @@ internal static class TestSeam
                         if (string.IsNullOrEmpty(text))
                             return Error(op, "ime-char needs char");
                         imeTerminal.TestSeamImeChar(text[0]);
+                        break;
+                    }
+                    case "ime-key":
+                    {
+                        // The key the harness presses, by virtual-key name:
+                        // the same prelude a real KeyDown runs (sync, commit,
+                        // spend the key when the box already applied it).
+                        var name = ArgString(args, "key");
+                        if (string.IsNullOrEmpty(name) ||
+                            !Enum.TryParse<Windows.System.VirtualKey>(name, ignoreCase: true, out var key))
+                            return Error(op, "ime-key needs key");
+                        imeTerminal.TestSeamImeKey(key);
                         break;
                     }
                 }
@@ -2896,6 +2972,8 @@ internal static class TestSeam
         json.WriteBoolean("ok", true);
         json.WriteString("op", op);
         json.WriteBoolean("composing", terminal.TestSeamImeComposing);
+        json.WriteBoolean("untracked", terminal.TestSeamImeUntracked);
+        json.WriteBoolean("keyConsumed", terminal.TestSeamImeKeyConsumed);
         json.WriteString("sink", terminal.TestSeamImeSink);
         if (terminal.TestSeamImePreedit is { } preedit) json.WriteString("preedit", preedit);
         else json.WriteNull("preedit");

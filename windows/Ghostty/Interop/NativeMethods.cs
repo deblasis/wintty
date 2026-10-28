@@ -879,6 +879,12 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void SurfaceText(GhosttySurface surface, IntPtr utf8, UIntPtr len);
 
+    // ghostty_surface_paste_text takes a NUL-terminated buffer and applies the
+    // product's paste policy (isSafe / confirmation), unlike SurfaceText.
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_paste_text")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfacePasteText(GhosttySurface surface, IntPtr utf8, UIntPtr len);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_preedit")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void SurfacePreedit(GhosttySurface surface, IntPtr utf8, UIntPtr len);

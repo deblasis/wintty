@@ -98,8 +98,9 @@ public struct ConsumedCloseArm
         // Both are asked before either answers. A chord on a close key
         // (Ctrl+Shift+Space) whose action raises the signal stands both drops
         // on its one character; returning on the arm first would leave the
-        // chord suppress standing, and it would eat the user's next
-        // character, since nothing but a character ever spends it.
+        // chord suppress standing for that character. The terminal also
+        // retires it on the next KeyDown (RetireStaleCharacterSuppress), so a
+        // key whose character never arrives cannot eat the next one.
         var eaten = arm.Consume(ch);
         if (suppressNext)
         {

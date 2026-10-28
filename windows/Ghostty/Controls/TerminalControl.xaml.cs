@@ -69,7 +69,23 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// an arm still standing when the keyboard touches this surface again is
     /// stale. Returns whether one was standing.
     /// </summary>
-    internal bool RetireStaleCharacterSuppress() => _consumedCloseArm.Retire();
+    internal bool RetireStaleCharacterSuppress()
+    {
+        var retired = _consumedCloseArm.Retire();
+        // The chord suppress is the same kind of one-shot order: a key's own
+        // character follows its KeyDown on the element that receives it, so an
+        // arm still standing when the keyboard touches this surface again
+        // belongs to a keystroke that went elsewhere. Retiring it here is what
+        // bounds it to one key; without this, a spent Backspace whose trailing
+        // WM_CHAR never arrives (an enabled IME suppresses CharacterReceived)
+        // would eat the user's next character.
+        if (_suppressNextCharacter)
+        {
+            _suppressNextCharacter = false;
+            retired = true;
+        }
+        return retired;
+    }
 
     /// <summary>
     /// Raised when the user requests the pane context menu over this surface.
@@ -189,6 +205,34 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // One deferred commit for text TSF/UIA inserted outside a composition.
     private bool _imeTextChangedCommitQueued;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _imeUntrackedTimer;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _imeSettledTimer;
+    private string _imeSettledText = string.Empty;
+    private string _imeSettleHeldInput = string.Empty;
+    private int _imeSettledQuietTicks;
+    private bool _imeSettledPending;
+    private bool _imeSettledSawWrite;
+    private bool _imeSettledFinal;
+    private int _imeSettledElapsedMs;
+
+    // How often the settle looks for TSF's write, and how long it waits for one
+    // before committing what the composition ended with. Detection is fast on
+    // purpose: the candidate usually lands well inside the first poll, and the
+    // fallback only matters for an IME that writes nothing.
+    internal static int ImeSettlePollMs { get; set; } = 16;
+    internal static int ImeSettleFallbackMs { get; set; } = 1000;
+    // A non-ASCII ended text is the result, but give a late write one grace
+    // before sending it: an IME that writes after Ended can still replace it.
+    internal static int ImeSettleFinalGraceMs { get; set; } = 50;
+    private const int ImeSettleQuietPolls = 3;
+
+    // True while the forwarder is handing over text the sink admitted outside
+    // a composition, so ForwardImeText sends it through the paste path.
+    private bool _imeTextIsPaste;
+
+    // A chord the sink refused in PreviewKeyDown, waiting for the bubbling
+    // KeyDown to forward it. Cleared by that KeyDown, or by the release when
+    // no KeyDown followed.
+    private Windows.System.VirtualKey? _imeSinkChordBlocked;
 
     // Modifiers pressed mid-composition, withheld from libghostty along
     // with their releases.
@@ -741,14 +785,55 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     internal void TestSeamImeChanged()
     {
+        // Mirrors OnImeCompositionChanged: only the quiet guess is disarmed by
+        // a composition event; a user cancel keeps its guard.
+        if (_imeForwarder.DiscardWasQuiet) _imeForwarder.ClearDiscard();
         SyncImeSinkIn();
         _imeForwarder.OnCompositionChanged();
         SyncImeSinkOut();
     }
 
-    internal void TestSeamImeEnded() => EndImeComposition();
+    internal void TestSeamImeEnded()
+    {
+        if (_imeForwarder.DiscardWasQuiet) _imeForwarder.ClearDiscard();
+        EndImeComposition();
+    }
 
     internal void TestSeamImeCommit() => CommitImeText();
+
+    /// <summary>
+    /// Runs the IME half of a key press and then the press itself, so a
+    /// harness sees both the decision and its consequence. It models a pane
+    /// with no palette, no search focus and no residual chord: the gates that
+    /// sit between the IME half and SendKey are not part of this call, so a
+    /// key production would drop here still reaches the surface.
+    /// </summary>
+    internal bool TestSeamImeKey(Windows.System.VirtualKey key)
+    {
+        RetireStaleCharacterSuppress();
+        if (CancelImeOnEscape(key)) return true;
+        if (IsImeKey(key)) return true;
+        if (IsModifierKey(key))
+        {
+            if (_imeForwarder.Composing) _imeHeldModifiers.Add(key);
+            return false;
+        }
+        if (HandleImeKey(key)) return true;
+        if (_imeForwarder.Composing)
+        {
+            // Mirrors OnKeyDown's withhold: the key's own character must be
+            // suppressed with it, except Space/Enter, which confirm the
+            // candidate through the character path.
+            if (key is not (Windows.System.VirtualKey.Space or Windows.System.VirtualKey.Enter))
+            {
+                _imeHeldModifiers.Add(key);
+                _suppressNextCharacter = true;
+            }
+            return false;
+        }
+        TestSeamKeyDown(key, CurrentMods(), GhosttyInputAction.Press);
+        return false;
+    }
 
     internal void TestSeamImeCancel() => ClearImeComposition();
 
@@ -759,6 +844,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     }
 
     internal bool TestSeamImeComposing => _imeForwarder.Composing;
+    internal bool TestSeamImeUntracked => _imeForwarder.Untracked;
+    internal bool TestSeamImeKeyConsumed => _imeForwarder.KeyConsumed;
     internal string TestSeamImeSink => _imeForwarder.SinkText;
     internal string? TestSeamImePreedit => _imeForwarder.Preedit;
     internal int TestSeamImeForwarded => _imeForwarder.Forwarded;
@@ -1845,6 +1932,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (_surface.Handle != IntPtr.Zero)
         {
             _imeUntrackedTimer?.Stop();
+            // The surface is freed below: held input has nowhere to go.
+            StopImeSettledCommit(deliverHeld: false);
             _imeForwarder.Cancel();
             if (ImeSink.Text.Length > 0) ImeSink.Text = string.Empty;
             _imeHeldModifiers.Clear();
@@ -2139,11 +2228,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // Route IME to the hidden TextBox sink (see TerminalControl.xaml).
         // Not when GotFocus bubbles up from the sink itself: focusing again
         // from there steals keyboard focus from other windows (the hidden
-        // quick terminal), and two panes doing that loop forever.
-        if (ReferenceEquals(e.OriginalSource, this) && !SearchBar.ContainsFocus)
+        // quick terminal), and two panes doing that loop forever. Every other
+        // child that can take focus (the scroll bar) leaves the pane with no
+        // TSF composition at all, so the handoff has to cover it too.
+        if (!SearchBar.ContainsFocus && !ReferenceEquals(e.OriginalSource, ImeSink))
         {
             UpdateImeSinkPosition();
-            ImeSink.Focus(FocusState.Programmatic);
+            if (!ImeSink.Focus(FocusState.Programmatic)) TraceIme("sink-focus-refused");
         }
     }
 
@@ -2156,18 +2247,37 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             && XamlRoot is { } root
             && ReferenceEquals(FocusManager.GetFocusedElement(root), ImeSink))
             return;
+        StopImeSettledCommit(deliverHeld: false);
         SyncImeSinkIn();
-        if (_imeForwarder.Composing && !_imeForwarder.Untracked) _imeForwarder.Cancel();
-        else _imeForwarder.Commit();
+        if (_imeForwarder.Composing && !_imeForwarder.Untracked)
+        {
+            var dropped = _imeForwarder.SinkText;
+            _imeForwarder.Cancel();
+            _imeForwarder.DiscardNextText(dropped);
+        }
+        else
+        {
+            _imeForwarder.Commit();
+        }
         SyncImeSinkOut();
+        // Input held for a settle the focus loss just ended is the user's.
+        DeliverHeldImeInput();
         _imeHeldModifiers.Clear();
         SetFocusState(false);
     }
 
-    /// <summary>IME mode keys and VK_PROCESSKEY; none is terminal input.</summary>
-    private static bool IsImeKey(VirtualKey key)
+    /// <summary>
+    /// IME mode, conversion and process keys; none is terminal input. The
+    /// conversion pair is the 変換/無変換 gesture on a Japanese keyboard, and
+    /// VK_PROCESSKEY is what a key an IMM-level IME consumed arrives as.
+    /// </summary>
+    internal static bool IsImeKey(VirtualKey key)
         => (int)key is 0x15 /* VK_KANA */ or 0x16 /* VK_IME_ON */
-            or 0x19 /* VK_KANJI */ or 0x1A /* VK_IME_OFF */ or 0xE5 /* VK_PROCESSKEY */;
+            or 0x17 /* VK_JUNJA */ or 0x18 /* VK_FINAL */
+            or 0x19 /* VK_KANJI */ or 0x1A /* VK_IME_OFF */
+            or 0x1C /* VK_CONVERT */ or 0x1D /* VK_NONCONVERT */
+            or 0x1E /* VK_ACCEPT */ or 0x1F /* VK_MODECHANGE */
+            or 0xE5 /* VK_PROCESSKEY */;
 
     private static bool IsModifierKey(VirtualKey key) => key is
         VirtualKey.Shift or VirtualKey.LeftShift or VirtualKey.RightShift or
@@ -2593,45 +2703,54 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // an arm left over from a consumed close elsewhere must not be the
         // thing that decides that character's fate.
         RetireStaleCharacterSuppress();
+        if (_imeSinkChordBlocked == e.Key)
+        {
+            // PreviewKeyDown refused this chord for the box; the bubbling
+            // event still carries the real KeyStatus, so it is forwarded
+            // here like any other key.
+            TraceIme($"sink-chord-keydown {e.Key}");
+            _imeSinkChordBlocked = null;
+        }
         TraceIme($"key {e.Key} composing={_imeForwarder.Composing}");
 
         // TSF cancels a composition on Escape without raising Ended (live
         // trace): the IME drops its own composition and the box text, but no
         // TextCompositionEnded arrives. Left alone, the forwarder stays
-        // composing forever and every later key is withheld. Reset here;
-        // Escape is never shell input while a composition is live.
-        if (_imeForwarder.Composing && !_imeForwarder.Untracked
-            && e.Key == Windows.System.VirtualKey.Escape)
-        {
-            TraceIme("escape-cancel");
-            ClearImeComposition();
-            return;
-        }
+        // composing forever and every later key is withheld. Reset here, for
+        // an untracked composition too: Escape is the one gesture whose
+        // meaning is "discard what I have not sent", and committing first
+        // would type the reading and then hand the shell an escape.
+        if (CancelImeOnEscape(e.Key)) return;
 
         if (IsImeKey(e.Key)) return;
 
         // A key that is not a modifier asks the forwarder to commit only
-        // final text. A live preedit is the IME's and is not sent.
+        // final text. A tracked preedit is the IME's and is not sent; an
+        // untracked one is committed, and a key the box already spent on
+        // unsent text is swallowed with it.
         if (!IsModifierKey(e.Key))
         {
-            SyncImeSinkIn();
-            _imeForwarder.OnKeyDown();
-            SyncImeSinkOut();
-
-            // The box already deleted unsent text for this key; the surface
-            // must not delete again. Its trailing character goes too.
-            if (_imeForwarder.KeyConsumed)
+            if (HandleImeKey(e.Key))
             {
-                _suppressNextCharacter = true;
                 e.Handled = true;
                 return;
             }
 
-            // Never hand libghostty a text-less key while a composition is
-            // live: the apprt buffers it and the next SurfaceText attaches to
-            // it, so the commit would be swallowed. Space/Enter are delivered
-            // by the character path, which commits first.
-            if (_imeForwarder.Composing) return;
+            // Never hand libghostty a text-less key while a tracked
+            // composition is live: the apprt buffers it and the next
+            // SurfaceText attaches that text to it, so the user's commit would
+            // be paired with a key they did not type it for. Space/Enter are
+            // delivered by the character path, which commits first; every other
+            // key's character must be suppressed with it.
+            if (_imeForwarder.Composing)
+            {
+                if (e.Key is not (Windows.System.VirtualKey.Space or Windows.System.VirtualKey.Enter))
+                {
+                    _imeHeldModifiers.Add(e.Key);
+                    _suppressNextCharacter = true;
+                }
+                return;
+            }
         }
         else if (_imeForwarder.Composing)
         {
@@ -2723,6 +2842,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnKeyUp(object sender, KeyRoutedEventArgs e)
     {
+        if (_imeSinkChordBlocked == e.Key)
+        {
+            // No KeyDown followed the refused chord, so nothing was forwarded
+            // and the release has no press to pair with.
+            TraceIme($"sink-chord-nokeydown {e.Key}");
+            _imeSinkChordBlocked = null;
+        }
         // Releases of presses OnKeyDown did not forward. This bookkeeping runs
         // before any gate: a modifier held across a palette open must still
         // consume its release, or the next real release is swallowed.
@@ -2927,10 +3053,17 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (ch >= (char)0x80)
         {
             if (!_imeForwarder.Composing)
+            {
+                // The box's TextChanged fires for this character too and would
+                // queue a second commit through the insertion policy. One
+                // typed character has one parent.
+                _imeTextChangedCommitQueued = true;
                 DispatcherQueue.TryEnqueue(() =>
                 {
+                    _imeTextChangedCommitQueued = false;
                     if (!_imeForwarder.Composing) CommitImeText();
                 });
+            }
             return;
         }
 
@@ -2944,8 +3077,20 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
         // The focused TextBox has already inserted this character into the
         // sink. Credit it before the commit, or the commit forwards it and
-        // HandleCharacter sends it again.
-        _imeForwarder.NoteAsciiDelivered();
+        // HandleCharacter sends it again. Text the composition ended with goes
+        // first: this character must not be credited against it.
+        FlushPendingImeSettle(ch);
+        // A settle that is still pending owns the box: the text the
+        // composition ended with must reach the surface before this
+        // character, so the character is held and delivered behind it, in the
+        // order the user typed.
+        var settleHoldsBox = _imeSettledPending && !_imeForwarder.Composing;
+        _imeForwarder.NoteAsciiDelivered(ch);
+        if (settleHoldsBox)
+        {
+            _imeSettleHeldInput += ch;
+            return;
+        }
         CommitImeText();
         HandleCharacter(ch);
     }
@@ -3032,6 +3177,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         TraceIme($"started {startIndex} sink='{ImeSink.Text}'");
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
 
+        // Only the quiet guess is disarmed here. A cancel the user asked for
+        // keeps its guard: the text it armed for can be written back by the
+        // next sync, and the guard is what stands between it and the prompt.
+        if (_imeForwarder.DiscardWasQuiet) _imeForwarder.ClearDiscard();
         UpdateImeSinkPosition();
         SyncImeSinkIn();
         _imeForwarder.OnCompositionStarted(startIndex);
@@ -3063,6 +3212,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         TraceIme($"changed sink='{ImeSink.Text}' composing={_imeForwarder.Composing}");
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
+        // Clear before the sync, but only for the quiet guess: a Changed from a
+        // live composition is proof the composition is alive, while a cancel
+        // the user asked for keeps its guard through this event too.
+        if (_imeForwarder.DiscardWasQuiet) _imeForwarder.ClearDiscard();
         SyncImeSinkIn();
         _imeForwarder.OnCompositionChanged();
         SyncImeSinkOut();
@@ -3072,33 +3225,125 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         TraceIme($"ended sink='{ImeSink.Text}' composing={_imeForwarder.Composing}");
         if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
+        // Ended is the composition's own result, not a redraw to discard -- but
+        // only when the discard on record was the quiet guess. A cancel the user
+        // asked for keeps its guard.
+        if (_imeForwarder.DiscardWasQuiet) _imeForwarder.ClearDiscard();
         EndImeComposition();
     }
 
     /// <summary>
     /// The one composition-end path, shared with the test seam. TSF raises
-    /// Ended before it writes the selected text into the box (live trace:
-    /// Ended arrives with the reading, the candidate lands ~5 ms later and
-    /// raises no change event). Closing synchronously here forwards the
-    /// reading and clearing the box discards the candidate, so close now and
-    /// commit whatever TSF left on the next turn.
+    /// Ended before it writes the selected text into the box, so closing
+    /// synchronously here would forward the reading and clearing the box would
+    /// discard the candidate: close now and commit the text TSF leaves once the
+    /// box has stopped changing.
     /// </summary>
     private void EndImeComposition()
     {
         SyncImeSinkIn();
         var wasComposing = _imeForwarder.Composing;
+        // A composition that went quiet and then ended is still a composition:
+        // its result is the user's and must be delivered like any other.
+        var revived = _imeForwarder.DiscardWasQuiet;
+        var landed = _imeForwarder.SinkText;
         _imeForwarder.OnCompositionEnded();
-        if (wasComposing)
+        if (wasComposing || revived) StartImeSettledCommit(landed);
+        else if (_imeSettledPending)
         {
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                if (_imeForwarder.Composing) return;
-                TraceIme($"ended-next sink='{ImeSink.Text}'");
-                CommitImeText();
-            });
+            // A re-Ended over a pending settle changes nothing the settle does
+            // not already own: its text stays provisional until TSF writes or
+            // the fallback fires, and the hold is delivered behind it when
+            // the tick commits. Stopping here would either strand the hold or
+            // commit provisional text a write was still going to replace.
         }
+        else StopImeSettledCommit();
         if (!_imeForwarder.Composing) _imeHeldModifiers.Clear();
         if (_imeForwarder.Untracked) StartImeUntrackedTimer();
+    }
+
+    /// <summary>
+    /// Commits the text TSF leaves in the sink after <c>TextCompositionEnded</c>.
+    /// TSF raises Ended with the reading still in the box and writes the chosen
+    /// candidate afterwards, so committing at Ended would send the reading. The
+    /// timer polls for that write and commits it after three quiet polls. A
+    /// non-ASCII ended text is the result (this family's IME leaves it final
+    /// in the box), so it commits after <see cref="ImeSettleFinalGraceMs"/> —
+    /// a short guard that a late write can still replace it — while an ASCII
+    /// ended text is a reading the settle itself commits only at the
+    /// <see cref="ImeSettleFallbackMs"/> fallback. A write after either
+    /// deadline is past it: the ended text has been sent and the late text
+    /// arrives as an insertion. A live composition or a dead surface stops
+    /// the timer.
+    ///
+    /// While the settle owns the box its text is provisional. A character
+    /// typed in that window is held and delivered behind the text when the
+    /// settle ends — by its tick, or behind the text a committing exit
+    /// sends. A key or a focus change cannot wait: both commit the ended
+    /// text first — what the fallback would have sent — and a TSF write that
+    /// would have replaced it lands as an insertion after it.
+    /// </summary>
+    private void StartImeSettledCommit(string landed)
+    {
+        _imeSettledPending = true;
+        _imeSettledText = landed;
+        _imeSettledQuietTicks = 0;
+        _imeSettledSawWrite = false;
+        _imeSettledFinal = landed.Any(c => c >= (char)0x80);
+        _imeSettledElapsedMs = 0;
+        if (_imeSettledTimer is null)
+        {
+            _imeSettledTimer = DispatcherQueue.CreateTimer();
+            _imeSettledTimer.Interval = TimeSpan.FromMilliseconds(ImeSettlePollMs);
+            _imeSettledTimer.Tick += (t, _) =>
+            {
+                if (_imeForwarder.Composing)
+                {
+                    StopImeSettledCommit();
+                    return;
+                }
+                if (_surface.Handle == IntPtr.Zero)
+                {
+                    // No surface to type held input into.
+                    StopImeSettledCommit(deliverHeld: false);
+                    return;
+                }
+                _imeSettledElapsedMs += ImeSettlePollMs;
+                SyncImeSinkIn();
+                var now = _imeForwarder.SinkText;
+                if (!string.Equals(now, _imeSettledText, StringComparison.Ordinal))
+                {
+                    // TSF is still writing; start the quiet count again. The
+                    // trace is how a harness tells this write from the commit
+                    // below, which is the timer's own.
+                    TraceIme($"settle-change sink='{now}'");
+                    _imeSettledText = now;
+                    _imeSettledSawWrite = true;
+                    _imeSettledQuietTicks = 0;
+                    return;
+                }
+                if (_imeSettledSawWrite)
+                {
+                    // A write landed; three quiet polls confirm it is complete.
+                    if (++_imeSettledQuietTicks < ImeSettleQuietPolls) return;
+                }
+                else if (!_imeSettledFinal && _imeSettledElapsedMs < ImeSettleFallbackMs)
+                {
+                    // Nothing written yet: wait for the fallback, not for a poll.
+                    return;
+                }
+                else if (_imeSettledFinal && _imeSettledElapsedMs < ImeSettleFinalGraceMs)
+                {
+                    // A result, but a late write may still replace it.
+                    return;
+                }
+                t.Stop();
+                TraceIme($"ended-next sink='{now}'");
+                CommitImeText();
+            };
+        }
+        _imeSettledTimer.Interval = TimeSpan.FromMilliseconds(ImeSettlePollMs);
+        _imeSettledTimer.Start();
     }
 
     /// <summary>
@@ -3113,7 +3358,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             _imeUntrackedTimer.Interval = TimeSpan.FromMilliseconds(33);
             _imeUntrackedTimer.Tick += (t, _) =>
             {
-                if (!_imeForwarder.Untracked || _surface.Handle == IntPtr.Zero)
+                // Stop when nothing is composing: that is the state that ends
+                // the need to poll. The mark that started the timer is not it.
+                if (!_imeForwarder.Composing || _surface.Handle == IntPtr.Zero)
                 {
                     t.Stop();
                     return;
@@ -3128,20 +3375,230 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// <summary>Forwards the rest of ImeSink, then empties it.</summary>
     private void CommitImeText()
     {
+        StopImeSettledCommit(deliverHeld: false);
         SyncImeSinkIn();
         TraceIme($"commit '{_imeForwarder.SinkText}'");
         _imeForwarder.Commit();
         SyncImeSinkOut();
-        _imeHeldModifiers.Clear();
+        // Held input follows the text it was held for, not the other way.
+        DeliverHeldImeInput();
+        // Held modifiers are released by the composition-end paths, not here:
+        // this also runs for a character that follows a spent key, and
+        // clearing the set would let that key's release through unpaired.
     }
 
     /// <summary>Drops WinUI IME state without sending the live preedit.</summary>
     private void ClearImeComposition()
     {
+        StopImeSettledCommit();
         SyncImeSinkIn();
+        var dropped = _imeForwarder.SinkText;
         _imeForwarder.Cancel();
+        // TSF owns the box while its composition is live and reverts a
+        // managed clear, so the text can come back on the next sync. It was
+        // discarded deliberately; do not commit it then.
+        _imeForwarder.DiscardNextText(dropped);
         SyncImeSinkOut();
         _imeHeldModifiers.Clear();
+    }
+
+    /// <summary>
+    /// Types the characters a pending settle held back, in the order they were
+    /// typed. The settle's own delivery paths call this after the ended text
+    /// has been sent, so a character typed inside the settle window follows
+    /// the text it must follow instead of overtaking it.
+    /// </summary>
+    private void DeliverHeldImeInput()
+    {
+        if (_imeSettleHeldInput.Length == 0) return;
+        var held = _imeSettleHeldInput;
+        _imeSettleHeldInput = string.Empty;
+        foreach (var ch in held) HandleCharacter(ch);
+    }
+
+    /// <summary>
+    /// Ends a pending composition for a path that keeps the pane alive: an
+    /// untracked composition's text is the user's (the IME stopped reporting
+    /// it), so it is committed; a tracked one is still the IME's and is
+    /// dropped, and the drop is protected against TSF writing it back.
+    /// </summary>
+    private void FlushImeComposition()
+    {
+        // Read before stopping: the stop clears the flag, and the branch below
+        // needs to know whether a settle was pending.
+        var settling = _imeSettledPending;
+        StopImeSettledCommit(deliverHeld: false);
+        SyncImeSinkIn();
+        // Untracked text and text whose settle is pending are both the user's
+        // (the IME stopped reporting, or it already ended): deliver them. Only
+        // a composition the IME is still watching is dropped.
+        if (_imeForwarder.Untracked || (settling && !_imeForwarder.Composing))
+        {
+            _imeForwarder.Commit();
+        }
+        else
+        {
+            var dropped = _imeForwarder.SinkText;
+            _imeForwarder.Cancel();
+            _imeForwarder.DiscardNextText(dropped);
+        }
+        SyncImeSinkOut();
+        _imeHeldModifiers.Clear();
+        // Whatever the search bar's focus does with the composition's text,
+        // input the user typed is theirs.
+        DeliverHeldImeInput();
+    }
+
+    /// <summary>
+    /// Hands over text a composition ended with before a key can overtake it.
+    /// TSF raises Ended while the box still holds the composition's text and
+    /// writes the selected text afterwards, so a key that arrives in that
+    /// window must not reach the surface before the text it finalized. The
+    /// optional character is one the box has already inserted for this key and
+    /// is therefore not part of what is being finalized.
+    /// </summary>
+    private void FlushPendingImeSettle(char? character = null)
+    {
+        // Only text a finished composition left pending is handed over; a live
+        // composition owns the box, and clearing it would end the composition.
+        if (!_imeSettledPending || _imeForwarder.Composing) return;
+
+        SyncImeSinkIn();
+        var text = _imeForwarder.SinkText;
+        if (character is { } ch && text.Length > 0 && text[^1] == ch)
+        {
+            text = text[..^1];
+        }
+
+        // Only text TSF has actually written is handed over; the reading a
+        // composition ended with is still provisional and belongs to the settle.
+        if (string.Equals(text, _imeSettledText, StringComparison.Ordinal)) return;
+
+        StopImeSettledCommit(deliverHeld: false);
+        _imeForwarder.SetSinkText(text);
+        _imeForwarder.Commit();
+        SyncImeSinkOut();
+        DeliverHeldImeInput();
+        // The box is empty now; the seam's model must not put the text back. The
+        // field is null in every shipping run and only the seam sets it.
+        if (_imeSeamText is not null) _imeSeamText = string.Empty;
+    }
+
+    /// <summary>
+    /// Escape discards a live composition instead of committing it. Returns
+    /// true when it did, so the caller stops before anything else looks at
+    /// the key.
+    /// </summary>
+    private bool CancelImeOnEscape(Windows.System.VirtualKey key)
+    {
+        if (key != Windows.System.VirtualKey.Escape) return false;
+        // Only a live composition is cancelled. Once Ended has arrived the text
+        // is the composition's result, not a preedit: Escape then belongs to
+        // the shell like any other key.
+        if (!_imeForwarder.Composing) return false;
+        TraceIme("escape-cancel");
+        ClearImeComposition();
+        return true;
+    }
+
+    /// <summary>
+    /// The IME half of a key press: let the forwarder commit what is final
+    /// and spend the key when the box already applied it to unsent text.
+    /// Returns true when the key must not reach the surface. Split out so the
+    /// test seam drives the same sequence a real KeyDown does.
+    /// </summary>
+    private bool HandleImeKey(Windows.System.VirtualKey key)
+    {
+        // A composition that ended with its text still pending hands it over
+        // before this key can overtake it.
+        FlushPendingImeSettle();
+        SyncImeSinkIn();
+        // Only Backspace/Delete can have shrunk the box themselves; any other
+        // key that arrives after a rewrite must not be spent on it.
+        _imeForwarder.OnKeyDown(key is Windows.System.VirtualKey.Back
+            or Windows.System.VirtualKey.Delete);
+        // The forwarder's OnKeyDown has already committed what is final - its
+        // commit is untraced, which is why this door looks like it commits
+        // nothing. Stopping here only delivers the held input behind it.
+        if (!_imeForwarder.Composing) StopImeSettledCommit();
+        var spent = _imeForwarder.KeyConsumed;
+        if (spent)
+        {
+            // The press is spent here, so its release must not reach the
+            // surface either: OnKeyUp swallows what this set holds. The
+            // trailing character of the key goes with it.
+            _imeHeldModifiers.Add(key);
+            _suppressNextCharacter = true;
+        }
+        SyncImeSinkOut();
+        return spent;
+    }
+
+    /// <summary>
+    /// The sink is a real TextBox, so it applies the platform's editing
+    /// shortcuts to itself. Ctrl+V and Shift+Insert would paste the clipboard
+    /// into it, and the commit path would type that text into the shell
+    /// unframed and with paste protection bypassed; Ctrl+Z would restore
+    /// already-forwarded text for the next commit to send again. Refuse the
+    /// box's own edit commands here and let the bubbling KeyDown forward the
+    /// key: that event carries the real scan code and extended-key flag,
+    /// which this one does not.
+    /// </summary>
+    private void OnImeSinkPreviewKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (!IsImeSinkBoxShortcut(e.Key)) return;
+        TraceIme($"sink-chord {e.Key}");
+        e.Handled = true;
+        _imeSinkChordBlocked = e.Key;
+    }
+
+    /// <summary>
+    /// The sink's own context menu (Shift+F10 / Menu key) offers Paste, which
+    /// bypasses the chord guard. The pane's menu is the one with the protected
+    /// paste, so raise that instead and keep the box's menu shut.
+    /// </summary>
+    private void OnImeSinkContextRequested(UIElement sender, ContextRequestedEventArgs e)
+    {
+        TraceIme("sink-context");
+        e.Handled = true;
+        ContextMenuRequested?.Invoke(this, null);
+    }
+
+    /// <summary>
+    /// True for the editing chords a focused TextBox claims for itself. A
+    /// character typed with AltGr arrives as Ctrl+Alt on some layouts, so
+    /// those are left alone.
+    /// </summary>
+    private bool IsImeSinkBoxShortcut(Windows.System.VirtualKey key)
+    {
+        var mods = CurrentChordModifiers();
+        if (mods.HasFlag(Windows.System.VirtualKeyModifiers.Shift)
+            && key == Windows.System.VirtualKey.Insert)
+            return true;
+        if (!mods.HasFlag(Windows.System.VirtualKeyModifiers.Control)
+            || mods.HasFlag(Windows.System.VirtualKeyModifiers.Menu))
+            return false;
+        return key is Windows.System.VirtualKey.V
+            or Windows.System.VirtualKey.X
+            or Windows.System.VirtualKey.A
+            or Windows.System.VirtualKey.Y
+            or Windows.System.VirtualKey.Z;
+    }
+
+    /// <summary>
+    /// One owner for the settle commit: every path that delivers text stops
+    /// it, so a key or a focus move inside the quiet window cannot let the
+    /// timer commit the same text again.
+    /// </summary>
+    private void StopImeSettledCommit(bool deliverHeld = true)
+    {
+        _imeSettledTimer?.Stop();
+        _imeSettledPending = false;
+        // Input held for this settle is the user's, not the settle's, so
+        // wherever the settle ends the held input follows. The paths that end
+        // a settle by committing text pass false and deliver it behind their
+        // text instead, so the order stays text-then-character.
+        if (deliverHeld) DeliverHeldImeInput();
     }
 
     private void OnImeSinkTextChanged(object sender, TextChangedEventArgs e)
@@ -3166,8 +3623,51 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         DispatcherQueue.TryEnqueue(() =>
         {
             _imeTextChangedCommitQueued = false;
-            if (!_imeForwarder.Composing) CommitImeText();
+            if (_imeForwarder.Composing) return;
+            // Text that arrives while a settled commit is pending is the
+            // candidate TSF writes after Ended: that is the composition's own
+            // result, not an insertion, so it keeps the composition path.
+            if (_imeSettledPending) CommitImeText();
+            else CommitImeTextAsPaste();
         });
+    }
+
+    /// <summary>
+    /// Commits text the sink admitted outside a composition through the
+    /// product's paste path. Composition text must use SurfaceText so it pairs
+    /// with its key; this text has no key, and the paste policy is what
+    /// decides whether it is safe to deliver.
+    /// </summary>
+    private void CommitImeTextAsPaste()
+    {
+        StopImeSettledCommit();
+        SyncImeSinkIn();
+        TraceIme($"paste '{_imeForwarder.SinkText}'");
+        _imeTextIsPaste = true;
+        try
+        {
+            _imeForwarder.Commit();
+        }
+        finally
+        {
+            _imeTextIsPaste = false;
+        }
+        SyncImeSinkOut();
+    }
+
+    /// <summary>
+    /// ghostty_surface_paste_text applies paste protection and wants a
+    /// NUL-terminated buffer, unlike ghostty_surface_text.
+    /// </summary>
+    private unsafe void SendImePaste(string text)
+    {
+        var bytes = new byte[System.Text.Encoding.UTF8.GetByteCount(text) + 1];
+        System.Text.Encoding.UTF8.GetBytes(text, 0, text.Length, bytes, 0);
+        fixed (byte* p = bytes)
+        {
+            NativeMethods.SurfacePasteText(
+                _surface, (IntPtr)p, (UIntPtr)(bytes.Length - 1));
+        }
     }
 
     private static bool HasNonAscii(string text)
@@ -3206,6 +3706,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// <summary>Sends committed IME text to the surface or preview sink.</summary>
     private void ForwardImeText(string text)
     {
+        // Every delivery funnels through here, including the forwarder's own
+        // commit at a key (CommitCore), so this is the one trace a harness
+        // needs to attribute text to the exit that sent it.
+        TraceIme($"forward '{text}'");
         if (_surface.Handle == IntPtr.Zero && !_isPreviewSurface) return;
 
         // A preview surface's keyboard belongs to its fake session, so
@@ -3225,9 +3729,28 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             return;
         }
 
+        // Text the sink admitted outside a composition (dictation, the emoji
+        // panel, UIA, the text command menu) is an insertion the user did not
+        // type at the prompt, so it goes through the product's paste policy:
+        // isSafe, the confirmation dialog and the paste encoder. Composition
+        // text keeps ghostty_surface_text, which must pair with its key. An
+        // ASCII-only insertion never takes this branch -- the TextChanged arm
+        // waits for non-ASCII so ordinary typing is not committed per
+        // keystroke -- and is delivered by the next key's commit instead,
+        // sanitised by the control-character filter below.
+        if (_imeTextIsPaste)
+        {
+            SendImePaste(text);
+            return;
+        }
+
         Span<byte> buf = stackalloc byte[4];
         foreach (var ch in text)
         {
+            // A committed composition never contains a control character. One
+            // that does would become Enter (CR), or reach the pty's paste
+            // encoder as a line terminator, so drop it here.
+            if (ch < (char)0x20 || ch == (char)0x7f) continue;
             if (!WmCharUtf8.TryEncode(ch, ref _pendingWmCharHigh, buf, out var len))
                 continue;
             unsafe
@@ -3305,8 +3828,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// </summary>
     internal void OpenSearch()
     {
-        // Drop any in-flight IME preedit before the needle box takes focus.
-        ClearImeComposition();
+        // Deliver what the IME already handed us before the needle box takes
+        // focus. The pane keeps running, so dropping an untracked
+        // composition here would lose text the user typed.
+        FlushImeComposition();
         var wasOpen = SearchBar.State.IsOpen;
         SearchBar.State.IsOpen = true;
         SearchBar.Visibility = Visibility.Visible;

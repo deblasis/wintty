@@ -224,6 +224,8 @@
             IsSpellCheckEnabled="False"
             IsTextPredictionEnabled="False"
             BorderThickness="0"
+            PreviewKeyDown="OnImeSinkPreviewKeyDown"
+            ContextRequested="OnImeSinkContextRequested"
             TextCompositionStarted="OnImeCompositionStarted"
             TextCompositionChanged="OnImeCompositionChanged"
             TextCompositionEnded="OnImeCompositionEnded"
