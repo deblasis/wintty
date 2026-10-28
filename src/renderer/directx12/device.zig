@@ -186,11 +186,11 @@ fence_event: std.os.windows.HANDLE,
 
 /// Event for the bounded frame-data wait. That wait can expire while its
 /// registration is still live, and the completion then arms the auto-reset
-/// event with no waiter. The shared fence_event belongs to the waits in
-/// waitForGpu and beginFrame, which revalidate GetCompletedValue in a loop
-/// and register again after every wake; keeping a timed-out registration
-/// off it means they wake only for the value they registered for. Only a
-/// bounded wait owns this event.
+/// event with no waiter. The shared fence_event belongs to waitFenceValue,
+/// which revalidates GetCompletedValue in a loop and registers again after
+/// every wake; keeping a timed-out registration off it means the shared
+/// waiters wake only for the value they registered for. Only a bounded
+/// wait owns this event.
 data_fence_event: std.os.windows.HANDLE,
 
 /// Resources whose owners are done with them but which the GPU may still
@@ -784,6 +784,27 @@ pub fn removed(self: *const Device) bool {
     return FAILED(self.device.GetDeviceRemovedReason());
 }
 
+/// Block until `fence` reaches `value`, waiting on the shared auto-reset
+/// `fence_event`.
+///
+/// A signal on that event is not proof by itself: a registration abandoned
+/// by a bounded wait arms the event when its value completes, and a later
+/// waiter then consumes a signal for a value it did not ask about. The
+/// fence value is the only proof, so revalidate GetCompletedValue after
+/// every wake and register again while `value` is still outstanding.
+///
+/// Taking the fence and the event as parameters (rather than `*Device`)
+/// keeps the wait constructible in isolation, which is what its test
+/// needs: a wrapper around a real fence can drive it without touching
+/// the device.
+pub fn waitFenceValue(fence: *d3d12.ID3D12Fence, fence_event: std.os.windows.HANDLE, value: u64) !void {
+    while (fence.GetCompletedValue() < value) {
+        const hr = fence.SetEventOnCompletion(value, fence_event);
+        if (FAILED(hr)) return error.FenceSetEventFailed;
+        _ = d3d12.WaitForSingleObject(fence_event, d3d12.INFINITE);
+    }
+}
+
 /// Signal the fence from the command queue and block until the GPU catches up.
 ///
 /// On success this is also a full drain of the retirement queue: the signal
@@ -792,19 +813,11 @@ pub fn removed(self: *const Device) bool {
 pub fn waitForGpu(self: *Device) !void {
     const signal_value = self.fence_value.fetchAdd(1, .release) + 1;
 
-    var hr = self.command_queue.Signal(self.fence, signal_value);
+    const hr = self.command_queue.Signal(self.fence, signal_value);
     if (FAILED(hr)) return error.FenceSignalFailed;
     self.retirement.seal(signal_value);
 
-    // A signal on the shared event is not proof: a registration abandoned
-    // by a bounded wait arms the event when its value completes. Revalidate
-    // the fence value and register again rather than return early on a
-    // signal that proves nothing.
-    while (self.fence.GetCompletedValue() < signal_value) {
-        hr = self.fence.SetEventOnCompletion(signal_value, self.fence_event);
-        if (FAILED(hr)) return error.FenceSetEventFailed;
-        _ = d3d12.WaitForSingleObject(self.fence_event, d3d12.INFINITE);
-    }
+    try waitFenceValue(self.fence, self.fence_event, signal_value);
 
     self.retirement.collect(self.fence.GetCompletedValue());
 }
