@@ -4175,13 +4175,15 @@ test "DirectX12: a stale fence-event signal does not satisfy waitFenceValue" {
     try std.testing.expect(dev.fence.GetCompletedValue() >= wait_value);
 }
 
-test "DirectX12: the shared fence-event waits all go through waitFenceValue" {
-    // One revalidating loop owns the shared event. A waiter that does its
-    // own SetEventOnCompletion plus a single WaitForSingleObject trusts
-    // whatever signal the event holds, so each caller is checked on its
-    // own: each of the three shared-event waiters must delegate, and none
-    // may register on the event itself. The bounded frame-data wait keeps
-    // its own event and is exempt.
+test "DirectX12: the fence-event waits all go through waitFenceValue" {
+    // One revalidating loop owns every wait, and each waiting site passes
+    // an event of its own, so two same-device waits can never contend for
+    // one auto-reset wake. A waiter that does its own SetEventOnCompletion
+    // plus a single WaitForSingleObject trusts whatever signal the event
+    // holds, so each caller is checked on its own: each of the three
+    // fence-event waiters must delegate, and none may register on an event
+    // itself. The bounded frame-data wait keeps its own event and is
+    // exempt.
     //
     // Matching runs on code text only: line comments are skipped, so a
     // body cannot satisfy the positive half by naming waitFenceValue in a
@@ -4204,12 +4206,18 @@ test "DirectX12: the shared fence-event waits all go through waitFenceValue" {
     }
 }
 
-/// True when `needle` occurs in `src` outside any line comment. String
-/// literals are tracked so a "//" inside one does not start a comment;
-/// that matters for log strings in the searched bodies.
+/// True when `needle` occurs in `src` outside any line comment, string
+/// literal, multiline string literal or character literal. String literals
+/// are tracked escape-aware so a "//" inside one does not start a comment;
+/// that matters for log strings in the searched bodies. Multiline literal
+/// lines (a line opening with two backslashes) are literal text, so a
+/// needle inside one cannot satisfy the check, and a character literal's
+/// contents are not code, so a quote or slash inside one must neither flip
+/// the scanner into string state nor start a comment on the code around it.
 fn codeTextContains(src: []const u8, needle: []const u8) bool {
     var i: usize = 0;
     var in_string = false;
+    var in_char = false;
     while (i < src.len) {
         const c = src[i];
         if (in_string) {
@@ -4221,9 +4229,28 @@ fn codeTextContains(src: []const u8, needle: []const u8) bool {
             }
             continue;
         }
+        if (in_char) {
+            if (c == '\\' and i + 1 < src.len) {
+                i += 2;
+            } else {
+                if (c == '\'') in_char = false;
+                i += 1;
+            }
+            continue;
+        }
         if (c == '"') {
             in_string = true;
             i += 1;
+            continue;
+        }
+        if (c == '\'') {
+            in_char = true;
+            i += 1;
+            continue;
+        }
+        if (c == '\\' and i + 1 < src.len and src[i + 1] == '\\') {
+            // Multiline string literal line: the whole line is literal text.
+            while (i < src.len and src[i] != '\n') i += 1;
             continue;
         }
         if (c == '/' and i + 1 < src.len and src[i + 1] == '/') {
@@ -4236,7 +4263,68 @@ fn codeTextContains(src: []const u8, needle: []const u8) bool {
     return false;
 }
 
-test "DirectX12: a prepareFrame timeout cannot arm the shared fence-event" {
+test "DirectX12: the fence-event source-check reads multiline strings as text" {
+    // A multiline string literal line is literal text, so a needle inside
+    // one must not satisfy the check the way it would if it were code: a
+    // removed call site must not pass by hiding its name in a string. The
+    // planted body is source text, the shape the check scans in the
+    // embedded files.
+    const planted = "const msg =\n" ++
+        "    \\\\the delegation moved to waitFenceValue( and still counts as prose\n" ++
+        ";\n";
+    if (codeTextContains(planted, "waitFenceValue(")) {
+        std.debug.print(
+            "a needle inside a multiline string literal satisfied the source check\n",
+            .{},
+        );
+        return error.MultilineStringCountedAsCode;
+    }
+
+    // A multiline literal must not swallow the code around it either: the
+    // delegation on the line after the literal still matches.
+    const planted_plus_delegation = "const msg =\n" ++
+        "    \\\\prose line\n" ++
+        ";\n" ++
+        "_ = device.waitFenceValue(&f, ev, 1);\n";
+    try std.testing.expect(codeTextContains(planted_plus_delegation, "waitFenceValue("));
+
+    // Real delegation still matches, and comment and plain-string text
+    // still hides a needle.
+    try std.testing.expect(codeTextContains(
+        "device.waitFenceValue(dev.fence, dev.fence_event, value)",
+        "waitFenceValue(",
+    ));
+    try std.testing.expect(!codeTextContains(
+        "// device.waitFenceValue(dev.fence, dev.fence_event, value)",
+        "waitFenceValue(",
+    ));
+    try std.testing.expect(!codeTextContains(
+        "const label = \"waitFenceValue(\";",
+        "waitFenceValue(",
+    ));
+}
+
+test "DirectX12: the fence-event source-check reads char literals as code" {
+    // A character literal is code, but its contents are not: a quote or a
+    // slash inside one must neither flip the scanner into string state nor
+    // start a comment, or the check fails on correct delegation.
+    const quoted = "const quote = '\"';\n_ = device.waitFenceValue(&f, ev, 1);";
+    if (!codeTextContains(quoted, "waitFenceValue(")) {
+        std.debug.print(
+            "a character literal holding a quote hid a real delegation from the source check\n",
+            .{},
+        );
+        return error.CharLiteralQuoteBrokeMatching;
+    }
+
+    const slashed = "const slash = '/';\n_ = device.waitFenceValue(&f, ev, 1);";
+    try std.testing.expect(codeTextContains(slashed, "waitFenceValue("));
+
+    const escaped = "const tick = '\\'';\n_ = device.waitFenceValue(&f, ev, 1);";
+    try std.testing.expect(codeTextContains(escaped, "waitFenceValue("));
+}
+
+test "DirectX12: a prepareFrame timeout cannot arm waitForGpu's fence-event" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const DirectX12 = @import("../DirectX12.zig");
 
@@ -4317,6 +4405,211 @@ test "DirectX12: a prepareFrame timeout cannot arm the shared fence-event" {
     );
 
     try dev.waitForGpu();
+}
+
+/// A forwarding stand-in that counts waiter registrations on the real
+/// fence and delivers exactly one wake per event handle. The test below may
+/// only open its gate once both waiters have called SetEventOnCompletion,
+/// because a waiter whose value completes before it registers returns on
+/// its entry read instead of blocking, and the shape under test never
+/// forms. A second registration for an event whose registration is already
+/// live is counted but not forwarded: the OS coalesces duplicate SetEvents
+/// for one auto-reset handle into the single signaled state, so a shared
+/// handle gives two waiters exactly one wake between them, which is the
+/// state two same-device waiters on the shared event would race over.
+const RegisteredFence = struct {
+    fence: d3d12.ID3D12Fence = .{ .vtable = &vtable },
+    inner: *d3d12.ID3D12Fence,
+    registrations: std.atomic.Value(u32) = .init(0),
+    mutex: std.Io.Mutex = .init,
+    forwarded: [2]?std.os.windows.HANDLE = .{ null, null },
+
+    fn reserved() callconv(.winapi) void {}
+    fn queryInterface(
+        self: *d3d12.ID3D12Fence,
+        riid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        const probe: *RegisteredFence = @fieldParentPtr("fence", self);
+        return probe.inner.vtable.QueryInterface(probe.inner, riid, out);
+    }
+    fn addRef(self: *d3d12.ID3D12Fence) callconv(.winapi) u32 {
+        const probe: *RegisteredFence = @fieldParentPtr("fence", self);
+        return probe.inner.vtable.AddRef(probe.inner);
+    }
+    fn release(self: *d3d12.ID3D12Fence) callconv(.winapi) u32 {
+        const probe: *RegisteredFence = @fieldParentPtr("fence", self);
+        return probe.inner.vtable.Release(probe.inner);
+    }
+    fn getCompletedValue(self: *d3d12.ID3D12Fence) callconv(.winapi) u64 {
+        const probe: *RegisteredFence = @fieldParentPtr("fence", self);
+        return probe.inner.vtable.GetCompletedValue(probe.inner);
+    }
+    fn setEventOnCompletion(
+        self: *d3d12.ID3D12Fence,
+        value: u64,
+        event: std.os.windows.HANDLE,
+    ) callconv(.winapi) com.HRESULT {
+        const probe: *RegisteredFence = @fieldParentPtr("fence", self);
+        probe.mutex.lockUncancelable(global.io());
+        defer probe.mutex.unlock(global.io());
+        for (probe.forwarded) |h| {
+            if (h == event) {
+                // This event's registration is already live on the fence;
+                // the duplicate carries no second wake.
+                _ = probe.registrations.fetchAdd(1, .acq_rel);
+                return 0;
+            }
+        }
+        for (&probe.forwarded) |*slot| {
+            if (slot.* == null) {
+                slot.* = event;
+                break;
+            }
+        }
+        const hr = probe.inner.vtable.SetEventOnCompletion(probe.inner, value, event);
+        // Counted after the call lands, so the gate below opens only once
+        // both registrations are live on the real fence.
+        _ = probe.registrations.fetchAdd(1, .acq_rel);
+        return hr;
+    }
+    fn signal(self: *d3d12.ID3D12Fence, value: u64) callconv(.winapi) com.HRESULT {
+        const probe: *RegisteredFence = @fieldParentPtr("fence", self);
+        return probe.inner.vtable.Signal(probe.inner, value);
+    }
+    const vtable = d3d12.ID3D12Fence.VTable{
+        .QueryInterface = queryInterface,
+        .AddRef = addRef,
+        .Release = release,
+        .GetPrivateData = reserved,
+        .SetPrivateData = reserved,
+        .SetPrivateDataInterface = reserved,
+        .SetName = reserved,
+        .GetDevice = reserved,
+        .GetCompletedValue = getCompletedValue,
+        .SetEventOnCompletion = setEventOnCompletion,
+        .Signal = signal,
+    };
+};
+
+test "DirectX12: per-waiter fence-event wake delivery" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const DirectX12 = @import("../DirectX12.zig");
+
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    api.initGpu(.{ .shared_texture = .{ .width = 64, .height = 64 } }, 64, 64) catch
+        return error.SkipZigTest;
+    defer api.deinit();
+    const dev = &api.dev.?;
+
+    // Two waiters, one fence, one value, one completion. Each waiter holds
+    // the event its call site passes: the second holds the beginFrame
+    // back-buffer wait's event, which until the per-site events exist is
+    // the same auto-reset handle as the first waiter's, and one fence
+    // signal then has exactly one wake to give. With per-site events the
+    // same completion signals each registered event and both waiters
+    // return.
+    const second_site_field = if (comptime @hasField(Device, "back_buffer_fence_event"))
+        "back_buffer_fence_event"
+    else
+        "fence_event";
+    const waiter_events = [2]std.os.windows.HANDLE{
+        dev.fence_event,
+        @field(dev, second_site_field),
+    };
+
+    // The queue parks behind a gate fence until both waiters have
+    // registered, so the waited value cannot complete early: a waiter whose
+    // value completes before it registers returns on its entry read and the
+    // shape under test never forms.
+    var gate: ?*d3d12.ID3D12Fence = null;
+    {
+        const hr = dev.device.CreateFence(
+            0,
+            .NONE,
+            &d3d12.ID3D12Fence.IID,
+            @ptrCast(&gate),
+        );
+        if (com.FAILED(hr) or gate == null) return error.FenceCreationFailed;
+    }
+    defer _ = gate.?.Release();
+    if (com.FAILED(dev.command_queue.Wait(gate.?, 1))) return error.QueueWaitFailed;
+    const waited_value = dev.fence_value.fetchAdd(1, .release) + 1;
+    if (com.FAILED(dev.command_queue.Signal(dev.fence, waited_value))) return error.FenceSignalFailed;
+
+    var regf = RegisteredFence{ .inner = dev.fence };
+
+    var done = [2]std.atomic.Value(bool){ .init(false), .init(false) };
+    const Unblock = struct {
+        fn run(g: *d3d12.ID3D12Fence, events: [2]std.os.windows.HANDLE) void {
+            _ = g.Signal(1);
+            const kernel32 = struct {
+                extern "kernel32" fn SetEvent(hEvent: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
+            };
+            _ = kernel32.SetEvent(events[0]);
+            _ = kernel32.SetEvent(events[1]);
+        }
+    };
+    const Waiter = struct {
+        fn run(
+            fence: *d3d12.ID3D12Fence,
+            event: std.os.windows.HANDLE,
+            value: u64,
+            finished: *std.atomic.Value(bool),
+        ) void {
+            Device.waitFenceValue(fence, event, value) catch return;
+            finished.store(true, .release);
+        }
+    };
+    // On the success path this runs after both joins and opens the gate for
+    // the drain in deinit. Every error return below calls Unblock.run
+    // explicitly before returning: a deferred unblock would run after the
+    // joins in LIFO order, and joins of parked waiters are the hang this
+    // test must never produce.
+    defer Unblock.run(gate.?, waiter_events);
+    // Each spawn failure unblocks and returns before a join of the
+    // surviving waiter is even registered, so no path holds a parked waiter
+    // behind a join.
+    const waiter_a = std.Thread.spawn(.{}, Waiter.run, .{ &regf.fence, waiter_events[0], waited_value, &done[0] }) catch |err| {
+        Unblock.run(gate.?, waiter_events);
+        return err;
+    };
+    defer waiter_a.join();
+    const waiter_b = std.Thread.spawn(.{}, Waiter.run, .{ &regf.fence, waiter_events[1], waited_value, &done[1] }) catch |err| {
+        Unblock.run(gate.?, waiter_events);
+        return err;
+    };
+    defer waiter_b.join();
+
+    const reg_start: std.Io.Timestamp = .now(global.io(), .awake);
+    while (regf.registrations.load(.acquire) < 2) {
+        if (reg_start.untilNow(global.io(), .awake).toMilliseconds() >= 10_000) {
+            std.debug.print(
+                "only {d} of 2 waiters registered within 10000 ms\n",
+                .{regf.registrations.load(.acquire)},
+            );
+            Unblock.run(gate.?, waiter_events);
+            return error.WaiterRegistrationStalled;
+        }
+        std.Io.sleep(global.io(), .fromMilliseconds(2), .awake) catch {};
+    }
+
+    _ = gate.?.Signal(1);
+    const done_start: std.Io.Timestamp = .now(global.io(), .awake);
+    while (!done[0].load(.acquire) or !done[1].load(.acquire)) {
+        if (done_start.untilNow(global.io(), .awake).toMilliseconds() >= 10_000) {
+            const starved: usize = if (!done[0].load(.acquire)) 0 else 1;
+            std.debug.print(
+                "waiter {d} stayed blocked 10000 ms after the fence value completed: the one auto-reset event delivered its single wake to the other waiter\n",
+                .{starved},
+            );
+            Unblock.run(gate.?, waiter_events);
+            return error.FenceWakeLost;
+        }
+        std.Io.sleep(global.io(), .fromMilliseconds(2), .awake) catch {};
+    }
+
+    try std.testing.expect(dev.fence.GetCompletedValue() >= waited_value);
 }
 
 test "DirectX12: drawFrameEnd records the selected data slot" {

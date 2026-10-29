@@ -1581,10 +1581,11 @@ pub inline fn beginFrame(
     if (dev_ptr.fence.GetCompletedValue() < wait_value) {
         const wait_start: std.Io.Timestamp = .now(global.io(), .awake);
         // device.waitFenceValue revalidates the fence value after every
-        // wake: the shared auto-reset event can hold a signal left by an
-        // abandoned registration, and a reuse of the back buffer on such
-        // a signal would race the GPU still reading it.
-        device.waitFenceValue(dev_ptr.fence, dev_ptr.fence_event, wait_value) catch
+        // wake: a signal proves one registration fired, and only the fence
+        // value proves the GPU is done reading this back buffer. The
+        // back-buffer wait holds its own event, so a wake delivered here is
+        // never one another same-device waiter raced away.
+        device.waitFenceValue(dev_ptr.fence, dev_ptr.back_buffer_fence_event, wait_value) catch
             return error.FrameSyncFailed;
         if (api.init_started) |started| {
             api.frame_wait_count += 1;
