@@ -149,6 +149,13 @@ pub const RenderState = struct {
     /// use cases.
     row_data: std.MultiArrayList(Row),
 
+    /// wintty #1414: set during `updateAsReader` — an update that consumes
+    /// NO dirty state. The surface's own renderer stays the only consumer:
+    /// a reader (the tab-overview cell read) must leave every page, row,
+    /// terminal, and screen dirty flag exactly as it found them, or it
+    /// steals the frame the renderer was about to paint.
+    reader: bool = false,
+
     /// The dirty state of the render state. This is set by the update method.
     /// The renderer/caller should set this to false when it has handled
     /// the dirty state.
@@ -570,6 +577,25 @@ pub const RenderState = struct {
         self.endUpdate();
     }
 
+    /// wintty #1414: a read-only update. Identical to `update` except the
+    /// terminal's dirty state is NOT consumed — no page or row dirty bit is
+    /// cleared, and the terminal/screen-level flags stay set. A reader
+    /// state is throwaway, so it always takes the full-rebuild path and
+    /// never needs the dirty bits; it just must not eat them. Used by the
+    /// tab-overview cell read (`ghostty_surface_read_cells`), which runs
+    /// against surfaces whose own renderer still owes a frame.
+    pub fn updateAsReader(
+        self: *RenderState,
+        alloc: Allocator,
+        t: *Terminal,
+    ) Allocator.Error!void {
+        const prev = self.reader;
+        self.reader = true;
+        defer self.reader = prev;
+        try self.beginUpdate(alloc, t);
+        self.endUpdate();
+    }
+
     /// True if the terminal holds state the next `update` would consume:
     /// a full-rebuild flag, screen-level dirtiness, a dimension or
     /// viewport change, a cursor move, or any dirty row.
@@ -706,6 +732,10 @@ pub const RenderState = struct {
         const first: usize = above_req - top.above;
 
         const redraw = redraw: {
+            // A reader always rebuilds fully: it is a throwaway state with
+            // no prior frame to be incremental against (wintty #1414).
+            if (self.reader) break :redraw true;
+
             // If our screen key changed, we need to do a full rebuild
             // because our render state is viewport-specific.
             if (t.screens.active_key != self.screen) break :redraw true;
@@ -933,8 +963,9 @@ pub const RenderState = struct {
             // The page-level dirty flag applies to every row in the chunk.
             // We consume (clear) it now; each node appears at most once in
             // this iteration and we're the only consumer of dirty state.
+            // (A reader update is not a consumer — wintty #1414.)
             const page_dirty = p.dirty;
-            if (page_dirty) p.dirty = false;
+            if (page_dirty and !self.reader) p.dirty = false;
 
             // Get our contiguous rows for this chunk.
             const page_rows: []page.Row = p.rows.ptr(p.memory)[chunk.start..][0..take];
@@ -984,7 +1015,7 @@ pub const RenderState = struct {
 
                     for (page_rows[i..][0..RowDirtyMask.group_len], i..) |*page_row, j| {
                         if (!page_row.dirty) continue;
-                        page_row.dirty = false;
+                        if (!self.reader) page_row.dirty = false;
                         any_dirty = true;
                         try builder.row(p, page_row, y + j);
                     }
@@ -1000,7 +1031,7 @@ pub const RenderState = struct {
                 // Rebuild every row in the chunk.
                 any_dirty = true;
                 for (page_rows, 0..) |*page_row, i| {
-                    page_row.dirty = false;
+                    if (!self.reader) page_row.dirty = false;
                     try builder.row(p, page_row, y + i);
                 }
             }
@@ -1124,9 +1155,12 @@ pub const RenderState = struct {
             self.dirty = .partial;
         }
 
-        // Clear our dirty flags
-        t.flags.dirty = .{};
-        s.dirty = .{};
+        // Clear our dirty flags. A reader update leaves them: the
+        // surface's renderer still owes this frame (wintty #1414).
+        if (!self.reader) {
+            t.flags.dirty = .{};
+            s.dirty = .{};
+        }
     }
 
     /// Complete a prior `beginUpdate` call by performing any deferred
@@ -4133,6 +4167,63 @@ test "resolveCell inverse video swaps resolved palette colors" {
     try testing.expectEqual('D', d.codepoint);
     try testing.expectEqual(state.colors.palette[2], d.fg);
     try testing.expectEqual(state.colors.palette[1], d.bg);
+}
+
+test "updateAsReader consumes no dirty state (wintty #1414)" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(testing.io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("A");
+
+    // The written row is dirty, and so are the terminal/screen levels.
+    const TermInt = @typeInfo(Terminal.Dirty).@"struct".backing_integer.?;
+    const ScrInt = @typeInfo(Screen.Dirty).@"struct".backing_integer.?;
+    try testing.expect((@as(TermInt, @bitCast(t.flags.dirty)) > 0));
+    try testing.expect((@as(ScrInt, @bitCast(t.screens.active.dirty)) > 0));
+
+    // The reader sees the data without eating the dirt.
+    var reader_state: RenderState = .empty;
+    defer reader_state.deinit(alloc);
+    try reader_state.updateAsReader(alloc, &t);
+    try testing.expect((@as(TermInt, @bitCast(t.flags.dirty)) > 0));
+    try testing.expect((@as(ScrInt, @bitCast(t.screens.active.dirty)) > 0));
+    var chunk_it = t.screens.active.pages.getTopLeft(.viewport).pageIterator(.right_down, null);
+    var saw_dirty_row = false;
+    while (chunk_it.next()) |chunk| {
+        const p: *page.Page = chunk.node.page();
+        try testing.expect(p.dirty);
+        const page_rows: []page.Row = p.rows.ptr(p.memory)[chunk.start..chunk.end];
+        for (page_rows) |page_row| {
+            if (page_row.dirty) saw_dirty_row = true;
+        }
+    }
+    try testing.expect(saw_dirty_row);
+    try testing.expectEqual('A', reader_state.resolveCell(0, 0).codepoint);
+
+    // The renderer's own update afterwards still consumes it all.
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+    try testing.expectEqual(@as(TermInt, 0), @as(TermInt, @bitCast(t.flags.dirty)));
+    try testing.expectEqual(@as(ScrInt, 0), @as(ScrInt, @bitCast(t.screens.active.dirty)));
+    chunk_it = t.screens.active.pages.getTopLeft(.viewport).pageIterator(.right_down, null);
+    while (chunk_it.next()) |chunk| {
+        const p: *page.Page = chunk.node.page();
+        try testing.expect(!p.dirty);
+        const page_rows: []page.Row = p.rows.ptr(p.memory)[chunk.start..chunk.end];
+        for (page_rows) |page_row| {
+            try testing.expect(!page_row.dirty);
+        }
+    }
+    try testing.expectEqual('A', state.resolveCell(0, 0).codepoint);
 }
 
 test "resolveCell out of range resolves to blank" {

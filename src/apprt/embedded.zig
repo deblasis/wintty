@@ -2875,7 +2875,13 @@ pub const CAPI = struct {
         // renderer does, so we don't reimplement color logic here.
         var state: terminal.RenderState = .empty;
         defer state.deinit(alloc);
-        try state.update(alloc, core_surface.renderer_state.terminal);
+        // wintty #1414: a READER update — it consumes no dirty state. A
+        // plain update() cleared page/row/terminal dirty flags, so a
+        // hover-read of a hidden tab stole the very dirt its re-show frame
+        // needed: the pane then painted only its cursor until each row
+        // changed again. A fresh reader state always takes the full-rebuild
+        // path, so it does not need the dirty bits at all.
+        try state.updateAsReader(alloc, core_surface.renderer_state.terminal);
 
         // Iterate the populated row_data: update() resizes it to exactly the
         // viewport height, so its length is the authoritative row count here
