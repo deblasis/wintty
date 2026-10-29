@@ -206,12 +206,13 @@ public class PinnedRowFocusWiringTests
         Assert.Single(bodyWiring);
 
         // The fill is the pane's hover resource, resolved through the
-        // strip's theme resources -- not a second colour invented for
-        // focus or for hover. Both states route through the one painter,
-        // so neither can erase the other.
+        // strip's theme resources at the strip's own theme -- not a second
+        // colour invented for focus or for hover, and not the app theme's
+        // (deblasis/wintty#1413). Both states route through the one
+        // painter, so neither can erase the other.
         var visual = strip.Method("OnPinnedRowFocusVisual");
         Assert.Single(visual.Calls("PaintShelfRow"));
-        Assert.Single(strip.Method("PaintShelfRow").Calls("ResolveThemeBrush"));
+        Assert.Single(strip.Method("PaintShelfRow").Calls("ResolveStripThemeBrush"));
     }
 
     /// <summary>
