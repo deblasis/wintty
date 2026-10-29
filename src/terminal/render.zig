@@ -1023,7 +1023,7 @@ pub const RenderState = struct {
                 while (i < take) : (i += 1) {
                     const page_row = &page_rows[i];
                     if (!page_row.dirty) continue;
-                    page_row.dirty = false;
+                    if (!self.reader) page_row.dirty = false;
                     any_dirty = true;
                     try builder.row(p, page_row, y + i);
                 }
@@ -4169,6 +4169,35 @@ test "resolveCell inverse video swaps resolved palette colors" {
     try testing.expectEqual(state.colors.palette[1], d.bg);
 }
 
+test "a reused reader state never shows a stale row (wintty #1414)" {
+    // The forced full rebuild is load-bearing: a reader state kept between
+    // reads cannot lean on the dirty bits, because the renderer (their
+    // only consumer) may have cleared them between the two reads. Without
+    // the forced rebuild the second read keeps its stale rows.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(testing.io, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+    var s = t.vtStream();
+    defer s.deinit();
+
+    var reader_state: RenderState = .empty;
+    defer reader_state.deinit(alloc);
+    try reader_state.updateAsReader(alloc, &t);
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    s.nextSlice("ABCD");
+    try state.update(alloc, &t); // the renderer consumes the dirt
+
+    try reader_state.updateAsReader(alloc, &t);
+    try testing.expectEqual('A', reader_state.resolveCell(0, 0).codepoint);
+    try testing.expectEqual('D', reader_state.resolveCell(3, 0).codepoint);
+}
+
 test "updateAsReader consumes no dirty state (wintty #1414)" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -4182,6 +4211,25 @@ test "updateAsReader consumes no dirty state (wintty #1414)" {
     var s = t.vtStream();
     defer s.deinit();
     s.nextSlice("A");
+
+    // A plain write dirties only the page and its rows. The terminal and
+    // screen levels are semantic (a palette change, a selection): set them
+    // the way those events do, so the before-states below are true because
+    // the fixture made them true, not because a write was assumed to.
+    s.nextSlice("\x1b]4;1;rgb:12/34/56\x1b\\");
+    const screen = t.screens.active;
+    try screen.select(.init(
+        screen.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?,
+        screen.pages.pin(.{ .active = .{ .x = 2, .y = 1 } }).?,
+        false,
+    ));
+
+    // A plain cell write dirties rows, not the page-level flag: that coarser
+    // mark is what scrolling and resize leave behind. Set it the way those
+    // events do, so the page walk below asserts something the fixture made
+    // true rather than something a write was assumed to.
+    const first_pin = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?;
+    first_pin.node.page().dirty = true;
 
     // The written row is dirty, and so are the terminal/screen levels.
     const TermInt = @typeInfo(Terminal.Dirty).@"struct".backing_integer.?;
@@ -4208,6 +4256,12 @@ test "updateAsReader consumes no dirty state (wintty #1414)" {
     try testing.expect(saw_dirty_row);
     try testing.expectEqual('A', reader_state.resolveCell(0, 0).codepoint);
 
+    // The renderer asks this to decide whether a frame is owed. The read
+    // must leave that answer true; consuming it is what painted the stale
+    // pane. `anyDirty` is the non-consuming peek, so asking it here cannot
+    // change the outcome.
+    try testing.expect(reader_state.anyDirty(&t));
+
     // The renderer's own update afterwards still consumes it all.
     var state: RenderState = .empty;
     defer state.deinit(alloc);
@@ -4224,6 +4278,7 @@ test "updateAsReader consumes no dirty state (wintty #1414)" {
         }
     }
     try testing.expectEqual('A', state.resolveCell(0, 0).codepoint);
+    try testing.expect(!state.anyDirty(&t));
 }
 
 test "resolveCell out of range resolves to blank" {
