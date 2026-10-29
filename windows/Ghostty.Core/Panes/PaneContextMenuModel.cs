@@ -35,6 +35,12 @@ public enum PaneMenuCommand
     /// pane, otherwise closes the whole tab (with the multi-pane confirmation).
     /// </summary>
     ClosePane,
+    /// <summary>
+    /// Download the file named under the pointer (or selected) from the
+    /// pane's ssh host. Listed only when the pane is in an ssh session and
+    /// there is a name to offer.
+    /// </summary>
+    SftpDownload,
 }
 
 /// <summary>One row of the pane context menu.</summary>
@@ -62,7 +68,28 @@ public static class PaneContextMenuModel
     private static PaneMenuItem Separator()
         => new(PaneMenuItemKind.Separator, PaneMenuCommand.None, string.Empty, false, false, null);
 
-    public static IReadOnlyList<PaneMenuItem> Build(bool hasSelection, bool isZoomed)
+    /// <param name="sftpDownloadName">
+    /// File name to offer for download from the pane's ssh host, or null
+    /// to leave the entry out (not in ssh, or nothing under the pointer).
+    /// </param>
+    public static IReadOnlyList<PaneMenuItem> Build(bool hasSelection, bool isZoomed, string? sftpDownloadName = null)
+    {
+        var items = new List<PaneMenuItem>(BuildBase(hasSelection, isZoomed));
+        if (!string.IsNullOrEmpty(sftpDownloadName))
+        {
+            // After Select All, ahead of the first separator: it acts on
+            // the text, like the clipboard entries above it.
+            items.Insert(3, Action(PaneMenuCommand.SftpDownload,
+                $"Download \"{Shorten(sftpDownloadName)}\" via SFTP...", "\uE896"));
+        }
+        return items;
+    }
+
+    // A long path would stretch the menu across the window.
+    private static string Shorten(string name)
+        => name.Length <= 40 ? name : "..." + name[^37..];
+
+    private static PaneMenuItem[] BuildBase(bool hasSelection, bool isZoomed)
         => new[]
         {
             Action(PaneMenuCommand.Copy,                "Copy",                     "\uE8C8", isEnabled: hasSelection),
