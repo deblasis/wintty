@@ -2716,10 +2716,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // TSF cancels a composition on Escape without raising Ended (live
         // trace): the IME drops its own composition and the box text, but no
         // TextCompositionEnded arrives. Left alone, the forwarder stays
-        // composing forever and every later key is withheld. Reset here, for
-        // an untracked composition too: Escape is the one gesture whose
-        // meaning is "discard what I have not sent", and committing first
-        // would type the reading and then hand the shell an escape.
+        // composing forever and every later key is withheld. Reset here. An
+        // untracked composition is not reset: its IME has stopped reporting
+        // it, so Escape commits it and reaches the shell like any other key.
         if (CancelImeOnEscape(e.Key)) return;
 
         if (IsImeKey(e.Key)) return;
@@ -3496,6 +3495,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // is the composition's result, not a preedit: Escape then belongs to
         // the shell like any other key.
         if (!_imeForwarder.Composing) return false;
+        // An untracked composition is the user's text, not a reading: the IME
+        // that leaves one (live trace) keeps the syllable on Escape itself
+        // (Notepad). Discarding it would drop typed text and swallow the key
+        // a modal editor needs, so it commits on the key path instead.
+        if (_imeForwarder.Untracked) return false;
         TraceIme("escape-cancel");
         ClearImeComposition();
         return true;

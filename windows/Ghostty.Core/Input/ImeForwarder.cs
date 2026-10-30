@@ -22,8 +22,8 @@ namespace Ghostty.Core.Input;
 ///   * Untracked implies Composing: it is a mode of a live composition and is
 ///     cleared when the last one ends, and when a new one starts.
 ///   * A *tracked* live preedit is never forwarded by a key. Untracked text is
-///     pending: a key, focus loss or opening the search bar delivers it, and
-///     Escape or closing the pane discards it.
+///     pending: a key (Escape included), focus loss or opening the search bar
+///     delivers it, and closing the pane discards it.
 ///   * An ASCII character already delivered by CharacterReceived is credited
 ///     and skipped once, so it is typed exactly once.
 /// </summary>
@@ -57,9 +57,9 @@ public sealed class ImeForwarder
     /// This is an inference from that trace, not a documented TSF rule: a key
     /// the text service declines reports <c>pfEaten = false</c> for that key
     /// and leaves its composition where it was. The consumers therefore treat
-    /// the text as *pending* — it is drawn as a preedit, Escape and closing
-    /// the pane discard it, and a key, focus loss or opening the search bar
-    /// delivers it — rather than as text known to be final.
+    /// the text as *pending* — it is drawn as a preedit, closing the pane
+    /// discards it, and a key (Escape included), focus loss or opening the
+    /// search bar delivers it — rather than as text known to be final.
     /// </summary>
     public bool Untracked { get; private set; }
 
