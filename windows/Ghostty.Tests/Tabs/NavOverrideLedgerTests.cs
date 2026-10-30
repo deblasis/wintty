@@ -127,7 +127,9 @@ public class NavOverrideLedgerTests
         var (ledger, dict) = New();
         var painted = false;
 
-        Assert.False(ledger.Clear("NavigationViewItemForeground", _ => painted = true));
+        // A key never written is a no-op success: the theme already applies,
+        // so there is nothing to retry.
+        Assert.True(ledger.Clear("NavigationViewItemForeground", _ => painted = true));
 
         Assert.False(painted);
         Assert.Empty(dict.Adds);
@@ -219,10 +221,141 @@ public class NavOverrideLedgerTests
         Assert.True(Write(ledger, key, "#FF000001"));
 
         var ex = Record.Exception(
-            () => ledger.Clear(key, _ => throw new InvalidOperationException("tearing down")));
+            () => Assert.False(ledger.Clear(key, _ => throw new InvalidOperationException("tearing down"))));
 
         Assert.Null(ex);
         Assert.True(ledger.Owns(key));
+
+        // The caller can retry the same clear; the entry is still owned.
+        Assert.True(ledger.Clear(key, b => b.Color = "#THEME"));
+    }
+
+    [Fact]
+    public void AClearAfterACommittedThenThrownAdd_PaintsTheLandedBrush()
+    {
+        var (ledger, dict) = New();
+        const string key = "NavigationViewItemForeground";
+        dict.ThrowAfterAdd = new InvalidOperationException("notification threw");
+
+        Assert.True(Write(ledger, key, "#FF000001"));
+        var landed = dict.Entries[key];
+
+        // The add committed, the throw kept it out of the ledger's map, and
+        // a clear arrives before any write can adopt it. The clear must
+        // paint the brush the rows already show, not leave the shell
+        // colour standing until the next chrome push.
+        Assert.True(ledger.Clear(key, b => b.Color = "#THEME"));
+
+        Assert.Same(landed, dict.Entries[key]);
+        Assert.Equal("#THEME", landed.Color);
+        Assert.True(ledger.Owns(key));
+        Assert.Equal(new[] { key }, dict.Adds);
+    }
+
+    [Fact]
+    public void AnEntryThisLedgerDidNotCreate_IsNotAdopted()
+    {
+        // The identity check: a dictionary entry that no add of this
+        // ledger's created is not ours to treat as owned or to paint.
+        var dict = new FakeDictionary();
+        var foreign = new Brush("#FOREIGN");
+        dict.Entries["NavigationViewItemForeground"] = foreign;
+        var ledger = new NavOverrideLedger<Brush>(
+            dict.Add,
+            ex => ex is InvalidOperationException,
+            key => dict.Entries.TryGetValue(key, out var existing) ? existing : null);
+        var painted = false;
+
+        // The clear is a no-op success for the ledger (the entry is not
+        // ours), but it must not paint or adopt the foreign brush.
+        Assert.True(ledger.Clear("NavigationViewItemForeground", _ => painted = true));
+
+        Assert.False(painted);
+        Assert.Equal("#FOREIGN", foreign.Color);
+        Assert.False(ledger.Owns("NavigationViewItemForeground"));
+        Assert.Empty(dict.Adds);
+    }
+
+    [Fact]
+    public void ATransientUpdateFailure_DoesNotEscape_AndKeepsTheOwnedBrush()
+    {
+        var (ledger, dict) = New();
+        const string key = "NavigationViewItemForeground";
+        Write(ledger, key, "#FF000001");
+        var owned = dict.Entries[key];
+
+        var ex = Record.Exception(() => ledger.Write(
+            key,
+            () => new Brush("#FF000099"),
+            _ => throw new InvalidOperationException("tearing down")));
+
+        Assert.Null(ex);
+        Assert.True(ledger.Owns(key));
+        Assert.Same(owned, dict.Entries[key]);
+        Assert.Equal("#FF000001", owned.Color);
+
+        Assert.False(Write(ledger, key, "#FF000002"));
+        Assert.Equal("#FF000002", owned.Color);
+    }
+
+    [Fact]
+    public void AnyOtherReadFailure_Propagates()
+    {
+        var dict = new FakeDictionary();
+        var ledger = new NavOverrideLedger<Brush>(
+            dict.Add,
+            ex => ex is InvalidOperationException,
+            _ => throw new ArgumentException("not transient"));
+
+        Assert.Throws<ArgumentException>(
+            () => Write(ledger, "NavigationViewItemForeground", "#FF000001"));
+    }
+
+    [Fact]
+    public void AnyOtherUpdateFailure_Propagates()
+    {
+        var (ledger, _) = New();
+        const string key = "NavigationViewItemForeground";
+        Write(ledger, key, "#FF000001");
+
+        Assert.Throws<ArgumentException>(() => ledger.Write(
+            key,
+            () => new Brush("#FF000099"),
+            _ => throw new ArgumentException("not transient")));
+    }
+
+    [Fact]
+    public void AnyOtherClearFailure_Propagates()
+    {
+        var (ledger, _) = New();
+        const string key = "NavigationViewItemForeground";
+        Write(ledger, key, "#FF000001");
+
+        Assert.Throws<ArgumentException>(
+            () => ledger.Clear(key, _ => throw new ArgumentException("not transient")));
+    }
+
+    [Fact]
+    public void AClear_WhoseReadFailsTransiently_ReturnsFalse_AndRetries()
+    {
+        var dict = new FakeDictionary();
+        var reads = 0;
+        var ledger = new NavOverrideLedger<Brush>(
+            dict.Add,
+            ex => ex is InvalidOperationException,
+            key =>
+            {
+                reads++;
+                if (reads == 1) throw new InvalidOperationException("torn down");
+                return dict.Entries.TryGetValue(key, out var existing) ? existing : null;
+            });
+        const string key = "NavigationViewItemForeground";
+
+        // The read failed, so "nothing is owned" is not an answer yet.
+        Assert.False(ledger.Clear(key, _ => { }));
+        // The retry can read, finds nothing owned, and is a no-op success.
+        Assert.True(ledger.Clear(key, _ => { }));
+        Assert.False(ledger.Owns(key));
     }
 
     [Fact]
@@ -237,14 +370,24 @@ public class NavOverrideLedgerTests
     [Fact]
     public void TheLedger_HasNoWayToRemoveOrReplaceAnEntry()
     {
-        var methods = typeof(NavOverrideLedger<Brush>)
+        var declared = typeof(NavOverrideLedger<Brush>)
             .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(m => !m.IsSpecialName)
             .Select(m => m.Name)
+            .ToList();
+
+        var publicMethods = declared
+            .Where(n => typeof(NavOverrideLedger<Brush>)
+                .GetMethod(n, BindingFlags.Public | BindingFlags.Instance) is not null)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
+        Assert.Equal(new[] { "Clear", "Owns", "Write" }, publicMethods);
 
-        Assert.Equal(new[] { "Clear", "Owns", "Write" }, methods);
+        Assert.DoesNotContain(declared, n =>
+            n.Contains("Remove", StringComparison.Ordinal)
+            || n.Contains("Replace", StringComparison.Ordinal)
+            || n.Contains("Insert", StringComparison.Ordinal)
+            || n.Contains("Add", StringComparison.Ordinal));
     }
 
     // The theme sets the strip reads its own colours from. Expected values

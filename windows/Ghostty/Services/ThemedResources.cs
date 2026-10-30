@@ -43,6 +43,18 @@ internal static class ThemedResources
         return TryFindBrushCore(resources, key, themeKey, out brush);
     }
 
+    /// <summary>
+    /// As <see cref="TryFindBrush(ResourceDictionary, string, ElementTheme, out Brush?)"/>,
+    /// with the theme key spelled by the caller. Use it for a set that
+    /// <see cref="ThemeDictionaryKey"/> does not name, such as HighContrast.
+    /// </summary>
+    public static bool TryFindBrush(
+        ResourceDictionary resources,
+        string key,
+        string themeKey,
+        [NotNullWhen(true)] out Brush? brush)
+        => TryFindBrushCore(resources, key, themeKey, out brush);
+
     private static bool TryFindBrushCore(
         ResourceDictionary rd, string key, string themeKey,
         [NotNullWhen(true)] out Brush? brush)
