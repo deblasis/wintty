@@ -186,12 +186,29 @@ fence_event: std.os.windows.HANDLE,
 
 /// Event for the bounded frame-data wait. That wait can expire while its
 /// registration is still live, and the completion then arms the auto-reset
-/// event with no waiter. The shared fence_event belongs to waitFenceValue,
-/// which revalidates GetCompletedValue in a loop and registers again after
-/// every wake; keeping a timed-out registration off it means the shared
-/// waiters wake only for the value they registered for. Only a bounded
-/// wait owns this event.
+/// event with no waiter. The fence_event belongs to waitFenceValue (as each
+/// per-site event below does for its own caller), which revalidates
+/// GetCompletedValue in a loop and registers again after every wake;
+/// keeping a timed-out registration off it means the bounded wait's
+/// abandoned completions wake only the waiter that registered for their
+/// value. Only a bounded wait owns this event.
 data_fence_event: std.os.windows.HANDLE,
+
+/// Each waiting site holds its own auto-reset event. An auto-reset event
+/// wakes exactly one waiter per signal, so two same-device waits sharing a
+/// handle would race for a single wake and the loser would stay blocked
+/// until the next fence signal, past the completion of its own value.
+/// Nothing waits concurrently today, and one handle per waiting site makes
+/// that invariant true by construction instead of by convention.
+/// waitForGpu keeps fence_event; the beginFrame back-buffer wait waits on
+/// this one.
+back_buffer_fence_event: std.os.windows.HANDLE,
+
+/// The inspector surface's present wait, same reasoning as
+/// back_buffer_fence_event. The inspector State creates a Device of its
+/// own through Device.init, so this event never contends with the
+/// renderer's events even though both structs carry the same field.
+present_fence_event: std.os.windows.HANDLE,
 
 /// Resources whose owners are done with them but which the GPU may still
 /// be reading. D3D12 does not retain what a submitted command list
@@ -507,6 +524,18 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     };
     errdefer _ = d3d12.CloseHandle(data_fence_event);
 
+    const back_buffer_fence_event = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse {
+        log.err("CreateEventW failed for back-buffer fence event", .{});
+        return error.FenceEventCreationFailed;
+    };
+    errdefer _ = d3d12.CloseHandle(back_buffer_fence_event);
+
+    const present_fence_event = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse {
+        log.err("CreateEventW failed for present fence event", .{});
+        return error.FenceEventCreationFailed;
+    };
+    errdefer _ = d3d12.CloseHandle(present_fence_event);
+
     // -- Swap chain + composition (surface-dependent) --
     var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
     var swap_chain_flags: u32 = 0;
@@ -692,6 +721,8 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
         .fence_value = std.atomic.Value(u64).init(0),
         .fence_event = fence_event,
         .data_fence_event = data_fence_event,
+        .back_buffer_fence_event = back_buffer_fence_event,
+        .present_fence_event = present_fence_event,
         .swap_chain = swap_chain,
         .swap_chain_flags = swap_chain_flags,
         .swap_chain2 = swap_chain2,
@@ -751,6 +782,8 @@ pub fn deinit(self: *Device) void {
 
     _ = d3d12.CloseHandle(self.fence_event);
     _ = d3d12.CloseHandle(self.data_fence_event);
+    _ = d3d12.CloseHandle(self.back_buffer_fence_event);
+    _ = d3d12.CloseHandle(self.present_fence_event);
     _ = self.fence.Release();
     _ = self.command_queue.Release();
 
@@ -784,8 +817,9 @@ pub fn removed(self: *const Device) bool {
     return FAILED(self.device.GetDeviceRemovedReason());
 }
 
-/// Block until `fence` reaches `value`, waiting on the shared auto-reset
-/// `fence_event`.
+/// Block until `fence` reaches `value`, waiting on the caller's auto-reset
+/// `fence_event`. Each waiting site passes an event of its own, so two
+/// same-device waits never contend for one wake; the loop below is shared.
 ///
 /// A signal on that event is not proof by itself: a registration abandoned
 /// by a bounded wait arms the event when its value completes, and a later
@@ -1381,7 +1415,7 @@ fn createDCompVisual(
 
 // --- Tests ---
 
-test "Device struct fields" {
+test "Device struct fields census" {
     // Compile-time check that the struct has the expected fields.
     try std.testing.expect(@hasField(Device, "device"));
     try std.testing.expect(@hasField(Device, "command_queue"));
@@ -1389,6 +1423,8 @@ test "Device struct fields" {
     try std.testing.expect(@hasField(Device, "fence_value"));
     try std.testing.expect(@hasField(Device, "fence_event"));
     try std.testing.expect(@hasField(Device, "data_fence_event"));
+    try std.testing.expect(@hasField(Device, "back_buffer_fence_event"));
+    try std.testing.expect(@hasField(Device, "present_fence_event"));
     try std.testing.expect(@hasField(Device, "swap_chain"));
     try std.testing.expect(@hasField(Device, "swap_chain_flags"));
     try std.testing.expect(@hasField(Device, "swap_chain2"));
