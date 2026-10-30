@@ -517,6 +517,16 @@ internal static class TestSeam
                     var tab = i == 0 ? manager.Tabs[0] : manager.NewTab(snapshot);
                     tab.UserOverrideTitle = i < titles.Count ? titles[i] : $"tab-{i + 1}";
                 }
+                // The tabs all exist now, but their strip rows are still
+                // mid-realization: the state walk below reads XAML
+                // properties of the just-created containers, and a read
+                // that lands before the layout pass settles can throw a
+                // COMException from an unrealized element - answering an
+                // op whose work succeeded with a failure, while a
+                // get-state moments later reads fine. One low-priority
+                // pass, the same settle the close loop above already
+                // grants teardown, lets realization finish first.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
                 return OkWithState(window, manager, op);
             }
 
