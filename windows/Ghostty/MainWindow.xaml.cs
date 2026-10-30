@@ -3336,28 +3336,22 @@ public sealed partial class MainWindow : Window
             return Core.Shell.BackdropGround.Estimate(
                 ((uint)tint.R << 16) | ((uint)tint.G << 8) | tint.B,
                 // The polarity of whatever actually paints behind the ink,
-                // which the frame style decides. A solid frame paints the
-                // strip with the resolver's own opaque fill -- the same
-                // desktop read ChromeFillArgb takes -- so the ink is scored
-                // against that fill's polarity, not the window's. Frosted
-                // and crystal leave the backdrop bare and the paint follows
-                // the element theme: ApplyTheme hands
-                // _themeManager.ElementTheme to the root, and under an
-                // explicit window-theme that is the override even when the
-                // OS desktop disagrees -- the caption buttons went over to
-                // the painted truth for the same reason (#235). The raw OS
-                // read here scored the chrome's ink against a light ground
-                // on a window painting dark, and the muted ladder picked the
-                // black pole for every row (#936); taken unconditionally the
-                // manager read commits the mirror image, scoring solid-frame
-                // ink for a dark ground on a light desktop. Under the
-                // default window-theme the manager does not fall back to the
-                // OS anyway -- the Palette fallback resolves from the
-                // previewed background's luminance, and OnSystemThemeChanged
-                // skips the flip when nothing tracks the system.
-                ChromeGroundStyle == BackdropStyles.Solid
-                    ? Ghostty.Services.OsTheme.IsDark(_systemUiSettings)
-                    : _themeManager.IsDarkMode,
+                // from ONE source: the window theme manager. It holds the
+                // explicit window-theme when there is one, follows the
+                // system when the config does, and resolves from the
+                // previewed background's luminance under auto. The fill and
+                // this estimate must never read different sources: a fill
+                // from the desktop scored by the manager picked the black
+                // ink pole for every row (#936), and the reverse pairing
+                // painted a solid frame in the desktop's theme around a
+                // window in the user's - a light-themed window on a dark
+                // desktop rendered a dark frame and strip beside light
+                // content. The caption buttons moved to the painted truth
+                // for the same reason (#235). The desktop read keeps the two
+                // jobs that are genuinely its own: classifying the
+                // system-flip event's own sender, and the startup scheme
+                // before the manager exists.
+                _themeManager.IsDarkMode,
                 ChromeGroundStyle,
                 tintOpacity);
         }
@@ -3413,7 +3407,9 @@ public sealed partial class MainWindow : Window
         EffectiveFrameStyle,
         _shellTheme.IsEnabled,
         ShellThemeChromeArgb,
-        Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
+        // The painted truth, not the desktop: same source as the ink
+        // estimate (EstimatedBackdropGround) - the two must never disagree.
+        _themeManager.IsDarkMode);
 
     /// <summary>
     /// True while the terminal palette is actually painting the chrome: the
