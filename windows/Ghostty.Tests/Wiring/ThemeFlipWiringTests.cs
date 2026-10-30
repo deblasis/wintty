@@ -99,33 +99,38 @@ public class ThemeFlipWiringTests
     }
 
     [Fact]
-    public void TheStrip_MarksItsNavResourcesDirtyOnEveryWrite()
+    public void TheStrip_MarksItsNavResourcesDirtyOnEveryAdd()
     {
-        // The memo is only honest if every write sets it. All NavView
-        // resource writes go through the two helpers, and the helpers are
-        // the only places allowed to touch NavView.Resources: a direct
-        // write elsewhere flips nothing and reads stale.
+        // The memo is only honest if every entry the flip has to re-read
+        // sets it. NavView overrides are added once and then only change
+        // colour in place (deblasis/wintty#1413): a Color write reaches
+        // every reader by itself, so only the add needs the re-read. The
+        // ledger's Write reports whether it took the add path
+        // (NavOverrideLedgerTests pins that it does so once per key), and the
+        // one door, WriteNavOverride, marks the strip dirty on that report
+        // alone: an unconditional mark would flip on every chrome pass, a
+        // full theme walk for nothing.
+        var door = Strip().Method("WriteNavOverride");
+        var marks = door.AssignsTo("_navResourcesDirty").ToList();
+        Assert.True(marks.Count == 1,
+            $"WriteNavOverride must mark the strip dirty exactly once, found {marks.Count}");
+        Assert.Equal("true", marks[0].Right.ToString());
+
+        var write = door.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(c => c.Expression.ToString() == "_navOverrides.Write");
+        var result = write.Ancestors().OfType<VariableDeclaratorSyntax>().FirstOrDefault()?.Identifier.Text;
+        Assert.True(result is not null, "WriteNavOverride must keep _navOverrides.Write's result");
+        var guard = marks[0].Ancestors().OfType<IfStatementSyntax>().FirstOrDefault();
+        Assert.True(guard is not null && guard.Condition.ToString() == result,
+            $"the dirty mark must sit under 'if ({result})', the ledger's add report; "
+            + $"found it under '{guard?.Condition}'");
+
         foreach (var name in new[] { "SetNavResource", "ClearNavResource" })
         {
-            var helper = Strip().Method(name);
-            var marks = helper.AssignsTo("_navResourcesDirty").ToList();
-            Assert.True(marks.Count == 1,
-                $"{name} must mark the strip dirty exactly once, found {marks.Count}");
-            Assert.Equal("true", marks[0].Right.ToString());
-        }
-
-        var writes = Strip().Root.DescendantNodes()
-            .Where(n =>
-                (n is AssignmentExpressionSyntax a && a.Left.ToString().Contains("NavView.Resources")) ||
-                (n is InvocationExpressionSyntax i && i.Expression.ToString() == "NavView.Resources.Remove"))
-            .ToList();
-        Assert.NotEmpty(writes);
-        foreach (var write in writes)
-        {
-            var enclosing = write.Ancestors().OfType<MethodDeclarationSyntax>()
-                .First().Identifier.ValueText;
-            Assert.True(enclosing is "SetNavResource" or "ClearNavResource",
-                $"a NavView.Resources write lives in {enclosing}, outside the two helpers");
+            var calls = Strip().Method(name).DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Select(c => c.Expression.ToString()).ToList();
+            Assert.True(calls.Contains("WriteNavOverride") || calls.Contains("_navOverrides.Clear"),
+                $"{name} must reach the door (WriteNavOverride or the ledger's Clear)");
         }
     }
 

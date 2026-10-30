@@ -158,6 +158,8 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     public VerticalTabStrip(TabManager manager)
     {
+        // First, before anything that could write an override.
+        _navOverrides = NewNavOverrideLedger();
         InitializeComponent();
         _manager = manager;
 
@@ -247,8 +249,8 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         ApplySelectedForegroundResources(_shellActiveTextBrush);
 
-        var hoverBg = ResolveThemeBrush("SubtleFillColorSecondaryBrush");
-        var pressedBg = ResolveThemeBrush("SubtleFillColorTertiaryBrush");
+        var hoverBg = ResolveStripThemeBrush("SubtleFillColorSecondaryBrush");
+        var pressedBg = ResolveStripThemeBrush("SubtleFillColorTertiaryBrush");
         SetNavResource("NavigationViewItemBackgroundPointerOver", hoverBg);
         SetNavResource("NavigationViewItemBackgroundPressed", pressedBg);
 
@@ -399,8 +401,8 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void ApplyDefaultSelectedTabResources()
     {
-        var hoverBg = ResolveThemeBrush("SubtleFillColorSecondaryBrush");
-        var pressedBg = ResolveThemeBrush("SubtleFillColorTertiaryBrush");
+        var hoverBg = ResolveStripThemeBrush("SubtleFillColorSecondaryBrush");
+        var pressedBg = ResolveStripThemeBrush("SubtleFillColorTertiaryBrush");
         SetNavResource("NavigationViewItemBackgroundPointerOver", hoverBg);
         SetNavResource("NavigationViewItemBackgroundPressed", pressedBg);
         SetNavResource("NavigationViewSelectionIndicatorForeground", TransparentBrush);
@@ -1891,48 +1893,214 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
-    /// A config reload can land while this strip is still being built or is
-    /// already tearing down, and the write into the NavigationView's
-    /// resource dictionary fails when it does. Swallowing it costs the
-    /// affected brush until the next reload; letting it escape costs far
-    /// more, because the caller is one step of several in
-    /// OnConfigReloadedChrome and a throw here strands every later step --
-    /// which is how the window ended up with a new backdrop over a stale
-    /// root background. Same guard PaneHost.ApplyGutterBrushes uses, for
-    /// the same reason.
+    /// Override a NavigationView resource with this brush's colour. The
+    /// brush is read, never stored: the entry holds the strip's own brush
+    /// (<see cref="WriteNavOverride"/>).
     /// </summary>
-    private void SetNavResource(string key, Brush brush)
+    private void SetNavResource(string key, SolidColorBrush brush)
+        => WriteNavOverride(key, brush.Color, brush.Opacity);
+
+    /// <summary>
+    /// Hand an override back to the theme. Not a removal: the entry keeps
+    /// the strip's own brush and takes the theme's colour for this key, for
+    /// the same reason <see cref="WriteNavOverride"/> never replaces one. A
+    /// key the strip never overrode is left alone, so the template keeps
+    /// resolving the theme's own resource. Every key cleared here is a
+    /// foreground key whose theme brush is fully opaque, so the brush's
+    /// Opacity goes back to 1.0 with the colour.
+    /// </summary>
+    private void ClearNavResource(string key)
+        => _navOverrides.Clear(key, owned =>
+        {
+            var color = ThemeDefaultColor(key);
+            if (owned.Color != color) owned.Color = color;
+            if (owned.Opacity != 1.0) owned.Opacity = 1.0;
+        });
+
+    // The strip's own brush per NavigationView override key, created on the
+    // key's first write and kept for the strip's whole life. One ledger per
+    // strip, built in the constructor and never replaced: a second ledger
+    // would own nothing and add every key again, which is the replacement
+    // this door exists to stop. The ledger's add delegate is the only place
+    // NavView.Resources is written.
+    private readonly NavOverrideLedger<SolidColorBrush> _navOverrides;
+
+    private NavOverrideLedger<SolidColorBrush> NewNavOverrideLedger()
+        => new NavOverrideLedger<SolidColorBrush>(
+            (key, brush) => NavView.Resources[key] = brush,
+            // A config reload can land while this strip is still being
+            // built or is already tearing down, and the add fails when it
+            // does. Swallowing it costs the brush until the next pass, which
+            // tries the add again; letting it escape strands every later step
+            // of OnConfigReloadedChrome, the same guard
+            // PaneHost.ApplyGutterBrushes uses for the same reason.
+            ex => ex is System.Runtime.InteropServices.COMException
+                     or InvalidOperationException
+                     or NullReferenceException,
+            // An add can commit and then throw; the next write adopts the
+            // entry that landed instead of adding over it.
+            key => NavView.Resources.TryGetValue(key, out var existing)
+                       && existing is SolidColorBrush brush
+                           ? brush
+                           : null);
+
+    /// <summary>
+    /// The one door for NavigationView resource overrides
+    /// (deblasis/wintty#1413). The rows' visual states read these keys
+    /// through <c>{ThemeResource}</c>, and the PointerOver and Pressed
+    /// states are deferred: their setters are realized on the row's first
+    /// pointer-over, from references captured when the row's template was
+    /// applied. Replacing or removing an entry after that frees the value
+    /// such a capture points at, and the row's first pointer-over then
+    /// faults in CDependencyObject::SetParent with no app frame on the
+    /// stack. That is the crash a click on a row hit after a runtime switch
+    /// to vertical tabs: every chrome pass wrote a fresh brush under
+    /// NavigationViewItemBackgroundPointerOver and Pressed.
+    ///
+    /// So an entry is added once, as a brush this strip owns, and from then
+    /// on only that brush's Color and Opacity change
+    /// (<see cref="NavOverrideLedger{TValue}"/>). A Color write is a change
+    /// MUXC's theme graph handles natively: nothing is created or freed, and
+    /// every row already showing the brush repaints. The caller's colour is
+    /// only read; shared instances (TransparentBrush, the TabColorBrush
+    /// cache) are never mutated or stored.
+    /// </summary>
+    private void WriteNavOverride(string key, Color color, double opacity)
     {
-        try
-        {
-            NavView.Resources[key] = brush;
-        }
-        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
-                                or InvalidOperationException
-                                or NullReferenceException)
-        {
-        }
-        // Marked even when the write above threw: a spurious re-read costs
-        // one flip, while the reverse -- a write this method believes
-        // landed but the memo never heard of -- is a stale brush surviving
-        // every later flip, which is the failure this flag exists to stop.
-        _navResourcesDirty = true;
+        var added = _navOverrides.Write(
+            key,
+            () => new SolidColorBrush(color) { Opacity = opacity },
+            owned =>
+            {
+                if (owned.Color != color) owned.Color = color;
+                if (owned.Opacity != opacity) owned.Opacity = opacity;
+            });
+
+        // Only an add needs MUXC to re-read the overrides; an in-place
+        // colour change reaches every reader by itself. Marked even when the
+        // add threw: a spurious re-read costs one flip, while a missed one
+        // leaves the theme's brush standing where the override belongs.
+        if (added) _navResourcesDirty = true;
     }
 
-    private void ClearNavResource(string key)
+    /// <summary>
+    /// The theme dictionary sets this strip's rows render under: the strip's
+    /// ActualTheme (which follows a non-default RequestedTheme) and the OS
+    /// High Contrast state, the inputs XAML's own lookup uses.
+    /// </summary>
+    private IReadOnlyList<string> StripThemeKeyList()
+        => StripThemeKeys.For(
+            ActualTheme == ElementTheme.Light,
+            Ghostty.Accessibility.HighContrastDetector.IsActive());
+
+    /// <summary>
+    /// The colour this key takes from the strip's theme with no override,
+    /// read from the theme dictionaries rather than through
+    /// <see cref="ResolveThemeBrush"/>, which consults NavView.Resources
+    /// first and would hand back the override being cleared.
+    /// </summary>
+    private Color ThemeDefaultColor(string key)
     {
-        try
-        {
-            NavView.Resources.Remove(key);
-        }
-        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
-                                or InvalidOperationException
-                                or NullReferenceException)
-        {
-        }
-        // Same contract as SetNavResource: the memo hears about the intent.
-        _navResourcesDirty = true;
+        if (TryFindStripThemeColor(key, out var color)) return color;
+
+        // Untyped fallback, at the app theme: the same answer ResolveThemeBrush
+        // gives a key the theme dictionaries above do not carry.
+        if (Application.Current.Resources.TryGetValue(key, out var obj) && obj is SolidColorBrush app)
+            return app.Color;
+        return ActualTheme == ElementTheme.Light ? Microsoft.UI.Colors.Black : Microsoft.UI.Colors.White;
     }
+
+    /// <summary>
+    /// The key's colour in the first theme set of <see cref="StripThemeKeyList"/>
+    /// that carries it, strip resources first, then the app's. This walks
+    /// theme sets outermost, which is XAML's own order only because every
+    /// theme dictionary these keys live in comes from XamlControlsResources,
+    /// which carries a Light, a Default and a HighContrast set; a dictionary
+    /// that defined one of them under Default alone would be missed for a
+    /// Light strip and fall through to the app-theme fallback.
+    /// </summary>
+    private bool TryFindStripThemeColor(string key, out Color color)
+    {
+        foreach (var themeKey in StripThemeKeyList())
+        {
+            if (TryFindThemeColor(Resources, themeKey, key, 0, out color)
+                || TryFindThemeColor(Application.Current.Resources, themeKey, key, 0, out color))
+            {
+                return true;
+            }
+        }
+        color = default;
+        return false;
+    }
+
+    private static bool TryFindThemeColor(
+        ResourceDictionary dict, string themeKey, string key, int depth, out Color color)
+    {
+        if (dict.ThemeDictionaries.TryGetValue(themeKey, out var themed)
+            && themed is ResourceDictionary themeDict
+            && TryFindResourceColor(themeDict, key, 0, out color))
+        {
+            return true;
+        }
+
+        // Later merged dictionaries win, as they do in XAML's own lookup.
+        if (depth < 8)
+        {
+            for (var i = dict.MergedDictionaries.Count - 1; i >= 0; i--)
+            {
+                if (TryFindThemeColor(dict.MergedDictionaries[i], themeKey, key, depth + 1, out color))
+                    return true;
+            }
+        }
+
+        color = default;
+        return false;
+    }
+
+    /// <summary>
+    /// The key's colour inside one theme dictionary, including the
+    /// dictionaries it merges. A theme set can delegate part of its palette
+    /// to a merged dictionary; stopping at the set's own entries would fall
+    /// through to the app-pinned colour for exactly those keys.
+    /// </summary>
+    private static bool TryFindResourceColor(ResourceDictionary dict, string key, int depth, out Color color)
+    {
+        if (dict.TryGetValue(key, out var value) && value is SolidColorBrush brush)
+        {
+            color = brush.Color;
+            return true;
+        }
+
+        if (depth < 8)
+        {
+            for (var i = dict.MergedDictionaries.Count - 1; i >= 0; i--)
+            {
+                if (TryFindResourceColor(dict.MergedDictionaries[i], key, depth + 1, out color))
+                    return true;
+            }
+        }
+
+        color = default;
+        return false;
+    }
+
+    /// <summary>
+    /// A theme brush at the theme this strip's rows actually render under,
+    /// for the row hover and pressed fills. <see cref="ResolveThemeBrush"/>
+    /// falls back to the app-level dictionary, which answers at the APP
+    /// theme: under a dark strip on a light app that handed the rows the
+    /// light theme's 3.5% black, close to invisible on a dark lane. The
+    /// rows' own template would have resolved the dark dictionary's value,
+    /// so that is the value written here (deblasis/wintty#1413), and the
+    /// pinned shelf row's own hover wash takes it for the same reason. High
+    /// Contrast takes the system's High Contrast dictionary, the one XAML
+    /// itself picks. The lane surface and the selected-row fallback keep
+    /// <see cref="ResolveThemeBrush"/> unchanged.
+    /// </summary>
+    private SolidColorBrush ResolveStripThemeBrush(string key)
+        => TryFindStripThemeColor(key, out var color)
+            ? new SolidColorBrush(color)
+            : ResolveThemeBrush(key);
 
     private SolidColorBrush ResolveThemeBrush(string key)
     {
@@ -3107,7 +3275,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         row.Background =
             row.FocusState != FocusState.Unfocused
             || ReferenceEquals(_hoveredShelfRow, row)
-                ? ResolveThemeBrush("SubtleFillColorSecondaryBrush")
+                ? ResolveStripThemeBrush("SubtleFillColorSecondaryBrush")
                 : TransparentBrush;
     }
 
