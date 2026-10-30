@@ -2632,6 +2632,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // combining on Windows at comptime: ghostty_surface_key buffers a
         // keydown with no text, and the next ghostty_surface_text attaches
         // the text and dispatches through the full key encoding pipeline.
+        // Keys WinUI delivers without a character (Escape, Ctrl+[) are
+        // dispatched immediately; a character that still arrives for them
+        // is dropped instead of being typed twice.
         // We just forward WM_KEYDOWN/WM_KEYUP here and forward WM_CHAR from
         // OnCharacterReceived - embedders do not implement the combining
         // themselves.

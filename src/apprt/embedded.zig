@@ -3493,7 +3493,9 @@ pub const CAPI = struct {
     /// Send raw text to the terminal. Treated as paste, unless on
     /// Windows there is a pending key event from ghostty_surface_key,
     /// in which case the text attaches to that key and dispatches
-    /// through key encoding (WM_CHAR after WM_KEYDOWN).
+    /// through key encoding (WM_CHAR after WM_KEYDOWN). A key that was
+    /// dispatched without waiting for text consumes its own character
+    /// instead; any other text takes the paste path.
     ///
     /// The shift a Windows layout consumed to translate a key into the
     /// text its WM_CHAR delivered, for the pending-key path below.
@@ -3548,9 +3550,10 @@ pub const CAPI = struct {
                 // delivered twice; any other text (an IME commit, text a
                 // harness sent) belongs on the text path below.
                 if (pending.dispatched) {
-                    const own = text.len == 1 and
-                        (text[0] == 0x1B or
-                            (text[0] == '[' and pending.event.keycode == 0x1A));
+                    const own = input.key_encode.windowsKeyOwnText(
+                        pending.event.keycode,
+                        text,
+                    );
                     surface.pending_key = null;
                     if (own) return;
                 } else {

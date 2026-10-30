@@ -37,9 +37,10 @@ pub const Options = struct {
     /// Kitty keyboard protocol flags.
     kitty_flags: KittyFlags = .disabled,
 
-    /// ConPTY's DEC private mode 9001. When set, Enter and keypad Enter are
-    /// encoded as Win32 console input records so their modifiers survive
-    /// ConPTY instead of being consumed as an xterm modified-Enter sequence.
+    /// ConPTY's DEC private mode 9001. When set, modified Enter and keypad
+    /// Enter, and Escape and Ctrl+[, are encoded as Win32 console input
+    /// records so their modifiers survive ConPTY instead of being consumed
+    /// as an xterm sequence or dropped as an unknown one.
     win32_input: bool = false,
 
     /// Determines whether the "option" key on macOS is treated
@@ -219,6 +220,17 @@ pub fn windowsKeyWithoutCharacter(event: key.KeyEvent) bool {
             event.unshifted_codepoint == '[',
         else => false,
     };
+}
+
+/// Returns true when `text` is the character a Windows host may still
+/// deliver for a key that was dispatched without waiting for one. Escape
+/// and Ctrl+[ translate to U+001B; some hosts attach the printable '[' to
+/// Ctrl+[. Anything else belongs to a different event and must take the
+/// text path. `keycode` is the native scancode (BracketLeft is 0x1A).
+pub fn windowsKeyOwnText(keycode: u32, text: []const u8) bool {
+    if (text.len != 1) return false;
+    if (text[0] == 0x1B) return true;
+    return text[0] == '[' and keycode == 0x1A;
 }
 
 /// Perform Kitty keyboard protocol encoding of the key event.
@@ -3511,4 +3523,14 @@ test "windows: keys with no character dispatch without text" {
         .key = .escape,
         .composing = true,
     }));
+}
+
+test "windows: a dispatched key drops only its own character" {
+    try testing.expect(windowsKeyOwnText(0x01, "\x1b"));
+    try testing.expect(windowsKeyOwnText(0x1A, "\x1b"));
+    try testing.expect(windowsKeyOwnText(0x1A, "["));
+    try testing.expect(!windowsKeyOwnText(0x1A, "a"));
+    try testing.expect(!windowsKeyOwnText(0x1A, "[]"));
+    try testing.expect(!windowsKeyOwnText(0x27, "["));
+    try testing.expect(!windowsKeyOwnText(0x01, "["));
 }
