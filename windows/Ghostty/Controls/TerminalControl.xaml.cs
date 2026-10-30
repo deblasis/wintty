@@ -3484,9 +3484,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     }
 
     /// <summary>
-    /// Escape discards a live composition instead of committing it. Returns
-    /// true when it did, so the caller stops before anything else looks at
-    /// the key.
+    /// Escape discards a live *tracked* composition instead of committing it.
+    /// An untracked one is the user's text and takes the key path, so
+    /// Escape commits it and still reaches the shell. Returns true when it
+    /// discarded, so the caller stops before anything else looks at the key.
     /// </summary>
     private bool CancelImeOnEscape(Windows.System.VirtualKey key)
     {
