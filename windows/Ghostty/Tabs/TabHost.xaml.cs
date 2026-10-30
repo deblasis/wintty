@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
@@ -341,6 +342,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     public TabHost(TabManager manager, PaneActionRouter router, DialogTracker dialogs)
     {
+        // First, before anything that could write a TabView override.
+        _tabViewOverrides = NewTabViewLedger();
         InitializeComponent();
         _manager = manager;
         _router = router;
@@ -2257,7 +2260,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
                     : ElementTheme.Light;
                 TabViewControl.RequestedTheme = theme;
             });
-        if (!enqueued) _tabViewRereadQueued = false;
+        if (!enqueued)
+        {
+            _tabViewRereadQueued = false;
+            // The add that asked for this re-read has already cleared the
+            // memo; a refused enqueue must leave the request owed, or the
+            // entry stays unread until some later add.
+            _tabViewResourcesDirty = true;
+        }
     }
 
     private static readonly string[] TabViewItemHeaderNormalKeys =
@@ -2364,10 +2374,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 selectedHandle.Color,
                 StripGround(),
                 TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast));
-            selectedHandle = _field.Brush;
         }
 
-        ApplyTabViewItemHeaderBrushes(viewItem, normalHandle, selectedHandle);
+        ApplyTabViewItemHeaderBrushes(viewItem, normalHandle, _field.Brush);
 
         // That writes ONE brush into all three unselected states, which is what
         // a preset tint wants and not what the field wants: a washed member
@@ -2515,21 +2524,194 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 _stripBackdropPacked, TabGroupField.WashPressedAlpha)));
     }
 
-    private static void ApplyTabViewItemHeaderBrushes(
-        TabViewItem item, SolidColorBrush? normal, SolidColorBrush? selected)
+    private void ApplyTabViewItemHeaderBrushes(
+        TabViewItem item, SolidColorBrush? normal, SolidColorBrush field)
     {
         foreach (var key in TabViewItemHeaderNormalKeys)
             SetItemHeaderBrush(item, key, normal);
         foreach (var key in TabViewItemHeaderSelectedKeys)
-            SetItemHeaderBrush(item, key, selected);
+            SetItemFieldBrush(item, key, field);
     }
 
-    private static void SetItemHeaderBrush(TabViewItem item, string key, SolidColorBrush? brush)
+    // The TabView-level overrides, one brush per key, added once through the
+    // ledger's add delegate (the only TabViewControl.Resources write in this
+    // file). Later writes change only the brush's Color.
+    private readonly NavOverrideLedger<SolidColorBrush> _tabViewOverrides;
+
+    private NavOverrideLedger<SolidColorBrush> NewTabViewLedger()
+        => new NavOverrideLedger<SolidColorBrush>(
+            (key, brush) => TabViewControl.Resources[key] = brush,
+            ex => ex is System.Runtime.InteropServices.COMException
+                     or InvalidOperationException
+                     or NullReferenceException,
+            key => TabViewControl.Resources.TryGetValue(key, out var existing)
+                       && existing is SolidColorBrush brush
+                           ? brush
+                           : null);
+
+    private bool WriteTabViewResource(string key, Windows.UI.Color color)
+    {
+        var added = _tabViewOverrides.Write(
+            key,
+            () => new SolidColorBrush(color),
+            owned => { if (owned.Color != color) owned.Color = color; });
+        // Only an add needs the TabView to re-read its overrides; a colour
+        // change reaches its readers by itself.
+        if (added) _tabViewResourcesDirty = true;
+        // "Add path taken" is not "landed": a swallowed add leaves the key
+        // unowned, and the caller must retry rather than trust the memo.
+        return _tabViewOverrides.Owns(key);
+    }
+    /// <summary>
+    /// Hand an owned TabView entry back to the theme. Not a removal: the
+    /// entry keeps the host's brush and takes the theme dictionary's value
+    /// for this key, so the entry a deferred setter holds stays parented.
+    /// Returns false when the paint was swallowed; the caller can retry.
+    /// </summary>
+    private bool ClearTabViewResource(string key)
+        => _tabViewOverrides.Clear(key, owned =>
+        {
+            var color = Microsoft.UI.Colors.Transparent;
+            var opacity = 1.0;
+            if (TryThemeBrush(key, out var theme) && theme is SolidColorBrush solid)
+            {
+                color = solid.Color;
+                opacity = solid.Opacity;
+            }
+            if (owned.Color != color) owned.Color = color;
+            if (owned.Opacity != opacity) owned.Opacity = opacity;
+        });
+
+    // One owned brush per item and key, created on the key's first non-null
+    // write. The dictionary entry keeps that instance for the item's life;
+    // later passes only change its Color/Opacity. A null desired value means
+    // the theme's own brush, so a key the item never owned is left absent and
+    // an owned one is painted back to the theme's value.
+    private static readonly ConditionalWeakTable<TabViewItem, Dictionary<string, SolidColorBrush>> ItemBrushes = new();
+
+    private SolidColorBrush OwnedItemBrush(TabViewItem item, string key, Windows.UI.Color initial)
+    {
+        var map = ItemBrushes.GetOrCreateValue(item);
+        if (map.TryGetValue(key, out var brush)) return brush;
+        brush = new SolidColorBrush(initial);
+        // Install first, record second: a transient install failure must not
+        // leave the map holding a brush the item's resources never got. If
+        // the install committed and then threw, adopt the entry by identity;
+        // anything else did not land, so fail the pass and retry next time.
+        try
+        {
+            item.Resources[key] = brush;
+        }
+        catch (Exception ex) when (IsTransientResourceFailure(ex))
+        {
+            if (!item.Resources.TryGetValue(key, out var existing)
+                || !ReferenceEquals(existing, brush))
+            {
+                throw;
+            }
+        }
+        map[key] = brush;
+        // A first insert is the one item-level write the template has to
+        // re-read; a later Color change reaches the resolved brush itself.
+        _tabViewResourcesDirty = true;
+        return brush;
+    }
+
+    private static bool IsTransientResourceFailure(Exception ex)
+        => ex is System.Runtime.InteropServices.COMException
+            or InvalidOperationException
+            or NullReferenceException;
+
+    // The selected header keys hold the field's one animating brush, not a
+    // copy: the Settle animation drives that instance, so the header fill
+    // tracks the seam cover frame by frame. The entry is inserted once and
+    // never replaced; the instance is stable for the host's life.
+    private void SetItemFieldBrush(TabViewItem item, string key, SolidColorBrush field)
+    {
+        var map = ItemBrushes.GetOrCreateValue(item);
+        if (map.TryGetValue(key, out var existing))
+        {
+            if (!ReferenceEquals(existing, field))
+            {
+                if (existing.Color != field.Color) existing.Color = field.Color;
+                if (existing.Opacity != field.Opacity) existing.Opacity = field.Opacity;
+            }
+            return;
+        }
+        // Install first, record second: a transient install failure must not
+        // leave the map holding a brush the item's resources never got. If
+        // the install committed and then threw, adopt it by identity.
+        try
+        {
+            item.Resources[key] = field;
+        }
+        catch (Exception ex) when (IsTransientResourceFailure(ex))
+        {
+            if (!item.Resources.TryGetValue(key, out var landed)
+                || !ReferenceEquals(landed, field))
+            {
+                throw;
+            }
+        }
+        map[key] = field;
+        _tabViewResourcesDirty = true;
+    }
+
+    private string ThemeKey()
+        => _highContrast
+            ? "HighContrast"
+            : ThemedResources.ThemeDictionaryKey(TabViewControl.ActualTheme);
+
+    private bool TryThemeBrush(string key, out Brush brush)
+    {
+        if (ThemedResources.TryFindBrush(Application.Current.Resources, key, ThemeKey(), out var found))
+        {
+            brush = found;
+            return true;
+        }
+        brush = TransparentHeaderSelected;
+        return false;
+    }
+
+    // The resolved theme surface, not just the dictionary name: a contrast
+    // theme swap while High Contrast stays on changes the value without
+    // changing the set name, and the bare surface is a snapshot of the value.
+    private (string Set, Windows.UI.Color Color, double Opacity) TabViewSurfaceTheme(string key)
+    {
+        var color = Microsoft.UI.Colors.Transparent;
+        var opacity = 1.0;
+        if (TryThemeBrush(key, out var brush) && brush is SolidColorBrush solid)
+        {
+            color = solid.Color;
+            opacity = solid.Opacity;
+        }
+        return (ThemeKey(), color, opacity);
+    }
+
+    private void SetItemHeaderBrush(TabViewItem item, string key, SolidColorBrush? brush)
     {
         if (brush is not null)
-            item.Resources[key] = brush;
-        else
-            item.Resources.Remove(key);
+        {
+            var owned = OwnedItemBrush(item, key, brush.Color);
+            if (owned.Color != brush.Color) owned.Color = brush.Color;
+            if (owned.Opacity != brush.Opacity) owned.Opacity = brush.Opacity;
+            return;
+        }
+
+        // Null means the theme's value. Leave a key this item never owned
+        // absent, so its setters keep the theme's own brush; paint one that
+        // was owned back to the theme so it does not keep a stale colour.
+        if (!ItemBrushes.TryGetValue(item, out var map) || !map.TryGetValue(key, out var existing))
+            return;
+        var color = Microsoft.UI.Colors.Transparent;
+        var opacity = 1.0;
+        if (TryThemeBrush(key, out var theme) && theme is SolidColorBrush solid)
+        {
+            color = solid.Color;
+            opacity = solid.Opacity;
+        }
+        if (existing.Color != color) existing.Color = color;
+        if (existing.Opacity != opacity) existing.Opacity = opacity;
     }
 
     /// <summary>
@@ -3996,8 +4178,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         //
         // Selected fill is painted on the header panel so preset tab colors
         // can replace the accent per tab.
-        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = TransparentHeaderSelected;
-        _tabViewResourcesDirty = true;
+        WriteTabViewResource("TabViewItemHeaderBackgroundSelected", TransparentHeaderSelected.Color);
 
         // The re-read this write needs is deferred a dispatcher turn by
         // RefreshTabViewTheme; nothing below reads it back synchronously.
@@ -4117,6 +4298,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // separators read, and the strip must not re-derive it.
         _highContrast = highContrast;
 
+        // The bare surface is refreshed from SetChromeFill, which the window
+        // calls after this on the same pass; this method must not become a
+        // second writer of the lane surface.
+
         // The ink passes run on EVERY push, changed ground or not. The
         // polarity behind the estimate can flip without moving the value:
         // at a tint-opacity near 1.0 the Fluent base's contribution rounds
@@ -4160,6 +4345,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // the opt-out, the one read the vertical's gate uses too). Motion
     // input, not ink input: it gates the lift and the swap fade and
     // touches no brush.
+    // The window composes the OS state with the config opt-out and pushes
+    // the answer through SetChromeGround/SetRowSeparator; that is the only
+    // source, so the strip cannot disagree with the surface it paints.
     private bool _highContrast;
 
     private SolidColorBrush? _shellActiveTextBrush;
@@ -4329,6 +4517,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // one owner, and a clear from a second place is an answer about the
         // frame's material given by code that does not know it.
         _chromeFillRgb = null;
+        _chromeFillRetry = true;
         _shellActiveTextBrush = null;
         _shellInactiveTextBrush = null;
 
@@ -4342,15 +4531,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (_accentBrush is not null)
         {
             _selectedTabFillBrush = _accentBrush;
-            TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] =
-                TransparentHeaderSelected;
+            WriteTabViewResource("TabViewItemHeaderBackgroundSelected", TransparentHeaderSelected.Color);
         }
         else
         {
             _selectedTabFillBrush = null;
-            TabViewControl.Resources.Remove("TabViewItemHeaderBackgroundSelected");
+            // No cached fill yet: paint the override back to the theme's own
+            // selected background rather than removing an entry the item
+            // setters may hold.
+            ClearTabViewResource("TabViewItemHeaderBackgroundSelected");
         }
-        _tabViewResourcesDirty = true;
 
         RefreshTabColors();
 
@@ -4390,8 +4580,17 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     internal void SetChromeFill(uint? fillRgb)
     {
-        if (_chromeFillRgb == fillRgb) return;
+        // A swallowed write or clear leaves the entry on its previous colour;
+        // the retry flag makes the next call with the same fill try again
+        // instead of returning on the memo. The theme key is part of the memo
+        // too: a bare surface is a snapshot of the theme's own background, and
+        // a High Contrast or element theme move must refresh it even when the
+        // fill itself did not change.
+        var surface = TabViewSurfaceTheme("TabViewBackground");
+        if (_chromeFillRgb == fillRgb && _chromeFillSurface == surface && !_chromeFillRetry) return;
         _chromeFillRgb = fillRgb;
+        _chromeFillSurface = surface;
+        _chromeFillRetry = false;
 
         // The surface the titles sit on just changed, and on the palette path
         // this call is where that happens: the window resolves the fill after
@@ -4400,10 +4599,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         RefreshShellInactiveInk();
 
         if (fillRgb is { } rgb)
-            TabViewControl.Resources["TabViewBackground"] = TabColorBrush.FromPackedRgb(rgb);
+            _chromeFillRetry = !WriteTabViewResource("TabViewBackground", TabColorBrush.FromPackedRgb(rgb).Color);
         else
-            TabViewControl.Resources.Remove("TabViewBackground");
-        _tabViewResourcesDirty = true;
+            _chromeFillRetry = !ClearTabViewResource("TabViewBackground");
 
         // Background resources are only re-read on a theme change; the
         // deferred toggle in RefreshTabViewTheme is that change, and the
@@ -4412,6 +4610,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
     }
 
     private uint? _chromeFillRgb;
+    private (string Set, Windows.UI.Color Color, double Opacity)? _chromeFillSurface;
+    private bool _chromeFillRetry;
 
     /// <summary>
     /// The selected tab's fill as packed RGB, for the test seam: the
@@ -4462,9 +4662,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (_shellActiveTextBrush is not null) return;
 
         _selectedTabFillBrush = _accentBrush;
-        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] =
-            TransparentHeaderSelected;
-        _tabViewResourcesDirty = true;
+        WriteTabViewResource("TabViewItemHeaderBackgroundSelected", TransparentHeaderSelected.Color);
         RefreshTabColors();
 
         // Force re-apply by toggling selection so the TabView picks

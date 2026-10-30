@@ -22,9 +22,19 @@ namespace Ghostty.Core.Logging;
 internal static class CoreStaticLoggers
 {
     private static ILogger<Ghostty.Commands.FrecencyStore>? _frecencyStore;
+    private static ILogger? _navOverrideLedger;
 
     internal static ILogger<Ghostty.Commands.FrecencyStore> FrecencyStore
         => _frecencyStore ?? NullLogger<Ghostty.Commands.FrecencyStore>.Instance;
+
+    /// <summary>
+    /// The ledger is generic, so its category is a plain string rather than
+    /// a closed generic type. Used for add/read/clear/update failures that
+    /// are swallowed by design and would otherwise be invisible in a
+    /// release build.
+    /// </summary>
+    internal static ILogger NavOverrideLedger
+        => _navOverrideLedger ?? NullLogger.Instance;
 
     /// <summary>
     /// Populate the static accessors from the process-wide factory.
@@ -34,6 +44,7 @@ internal static class CoreStaticLoggers
     internal static void Initialize(ILoggerFactory factory)
     {
         _frecencyStore = factory.CreateLogger<Ghostty.Commands.FrecencyStore>();
+        _navOverrideLedger = factory.CreateLogger("Ghostty.Core.Tabs.NavOverrideLedger");
     }
 
     /// <summary>
@@ -45,22 +56,28 @@ internal static class CoreStaticLoggers
     internal static IDisposable Install(ILoggerFactory factory)
     {
         var priorFrecencyStore = _frecencyStore;
+        var priorNavOverrideLedger = _navOverrideLedger;
         Initialize(factory);
-        return new Scope(priorFrecencyStore);
+        return new Scope(priorFrecencyStore, priorNavOverrideLedger);
     }
 
     private sealed class Scope : IDisposable
     {
         private readonly ILogger<Ghostty.Commands.FrecencyStore>? _priorFrecencyStore;
+        private readonly ILogger? _priorNavOverrideLedger;
 
-        public Scope(ILogger<Ghostty.Commands.FrecencyStore>? priorFrecencyStore)
+        public Scope(
+            ILogger<Ghostty.Commands.FrecencyStore>? priorFrecencyStore,
+            ILogger? priorNavOverrideLedger)
         {
             _priorFrecencyStore = priorFrecencyStore;
+            _priorNavOverrideLedger = priorNavOverrideLedger;
         }
 
         public void Dispose()
         {
             _frecencyStore = _priorFrecencyStore;
+            _navOverrideLedger = _priorNavOverrideLedger;
         }
     }
 }

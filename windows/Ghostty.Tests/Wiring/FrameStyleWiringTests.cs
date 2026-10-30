@@ -688,10 +688,16 @@ public sealed class FrameStyleWiringTests
         // Same rule on the horizontal side, where the selected header has its
         // own resource sitting next to the strip's.
         var host = ShellSource.Load("Tabs.TabHost.xaml.cs");
-        var keys = host.Method("SetChromeFill")
-            .DescendantNodes().OfType<ElementAccessExpressionSyntax>()
-            .Select(e => e.ToString())
-            .ToList();
-        Assert.All(keys, key => Assert.Contains("\"TabViewBackground\"", key));
+        var fill = host.Method("SetChromeFill");
+        var writes = fill.Calls("WriteTabViewResource").ToList();
+        var clears = fill.Calls("ClearTabViewResource").ToList();
+        Assert.Single(writes);
+        Assert.Single(clears);
+        foreach (var call in writes.Concat(clears))
+        {
+            Assert.Contains("\"TabViewBackground\"", call.ToString());
+            Assert.DoesNotContain("TabViewItemHeaderBackgroundSelected", call.ToString());
+        }
+        Assert.Empty(fill.DescendantNodes().OfType<ElementAccessExpressionSyntax>());
     }
 }

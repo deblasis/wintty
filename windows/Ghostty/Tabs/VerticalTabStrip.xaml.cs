@@ -487,6 +487,9 @@ internal sealed partial class VerticalTabStrip : UserControl
     // High Contrast keeps a painted surface on the strip lane; every other
     // path lets the backdrop through. Pushed in rather than detected here so
     // the strip and the window cannot disagree about which mode is live.
+    // The window composes the OS state with the config opt-out and pushes
+    // the answer through SetRowSeparator; that is the only source, so the
+    // strip cannot disagree with the surface it paints.
     private bool _highContrast;
     // The frame's own fill, or null while the strip is left to the backdrop.
     // Pushed in for the same reason the flag above is: frame-style is a
@@ -1991,7 +1994,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     private IReadOnlyList<string> StripThemeKeyList()
         => StripThemeKeys.For(
             ActualTheme == ElementTheme.Light,
-            Ghostty.Accessibility.HighContrastDetector.IsActive());
+            _highContrast);
 
     /// <summary>
     /// The colour this key takes from the strip's theme with no override,
@@ -2187,7 +2190,14 @@ internal sealed partial class VerticalTabStrip : UserControl
                 : ElementTheme.Light;
             NavView.RequestedTheme = theme;
         });
-        if (!enqueued) _navRereadQueued = false;
+        if (!enqueued)
+        {
+            _navRereadQueued = false;
+            // The add that asked for this re-read has already cleared the
+            // memo; a refused enqueue must leave the request owed, or the
+            // entry stays unread until some later add.
+            _navResourcesDirty = true;
+        }
     }
 
     private static uint PackColor(Color c)

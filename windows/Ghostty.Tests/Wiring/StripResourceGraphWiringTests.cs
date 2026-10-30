@@ -245,8 +245,11 @@ public sealed class StripResourceGraphWiringTests
     {
         // The hover resolve and the clear's theme colour pick the same
         // dictionary set, from one place: StripThemeKeys (table-tested in
-        // NavOverrideLedgerTests) fed the strip's ActualTheme and the OS High
-        // Contrast state through the window's own detector.
+        // NavOverrideLedgerTests) fed the strip's ActualTheme and the High
+        // Contrast state the window already pushed into _highContrast. The
+        // detector runs once, at construction, so a chrome pass does not
+        // P/Invoke it again per clear or hover and cannot disagree with the
+        // surface the same pass paints.
         var source = ShellSource.Load(Strip);
         foreach (var method in new[] { "ResolveStripThemeBrush", "ThemeDefaultColor" })
         {
@@ -265,7 +268,17 @@ public sealed class StripResourceGraphWiringTests
             c => c.CalleeText() == "StripThemeKeys.For");
         var args = forCall.ArgumentList.Arguments;
         Assert.Equal("ActualTheme == ElementTheme.Light", args[0].ToString());
-        Assert.EndsWith("HighContrastDetector.IsActive()", args[1].ToString(), StringComparison.Ordinal);
+        Assert.Equal("_highContrast", args[1].ToString());
+
+        // The window composes the OS state with the config opt-out and
+        // pushes it; the strip must not read the raw detector anywhere.
+        var (variable, _) = source.Field("_highContrast");
+        Assert.Null(variable.Initializer);
+        Assert.DoesNotContain("HighContrastDetector", source.Root.ToFullString(), StringComparison.Ordinal);
+        var separator = source.Method("SetRowSeparator");
+        var writes = separator.AssignsTo("_highContrast").ToList();
+        Assert.True(writes.Count == 1 && writes[0].Right.ToString() == "highContrast",
+            "SetRowSeparator must be the one writer of _highContrast");
 
         Assert.DoesNotContain("AccessibilitySettings", source.Root.ToFullString(), StringComparison.Ordinal);
     }

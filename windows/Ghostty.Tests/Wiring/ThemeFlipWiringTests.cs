@@ -156,6 +156,15 @@ public class ThemeFlipWiringTests
             guard!.Condition.ToString()
                 .Contains("enqueue", System.StringComparison.OrdinalIgnoreCase),
             "the queued flag is reset outside a branch that tests the enqueue result");
+
+        // The refusal also has to leave the re-read owed: the add that
+        // asked for it already cleared the memo.
+        var owed = method.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_navResourcesDirty"
+                && a.Right.ToString() == "true"
+                && guard.Span.Contains(a.Span))
+            .ToList();
+        Assert.Single(owed);
     }
 
     [Fact]
@@ -177,6 +186,13 @@ public class ThemeFlipWiringTests
             guard!.Condition.ToString()
                 .Contains("enqueue", System.StringComparison.OrdinalIgnoreCase),
             "the queued flag is reset outside a branch that tests the enqueue result");
+
+        var owed = method.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_tabViewResourcesDirty"
+                && a.Right.ToString() == "true"
+                && guard.Span.Contains(a.Span))
+            .ToList();
+        Assert.Single(owed);
     }
 
     [Fact]
@@ -265,26 +281,27 @@ public class ThemeFlipWiringTests
     }
 
     [Fact]
-    public void TabHost_EveryTabResourceWriteMarksItDirty()
+    public void TabHost_MarksItsTabResourcesDirtyOnEveryAdd()
     {
-        // The horizontal host writes TabView resources from several
-        // methods; every one of them owes the memo a dirty mark, or a
-        // later flip skips a re-read a caller was owed.
-        var root = Host().Root;
-        var writers = root.DescendantNodes()
-            .OfType<MethodDeclarationSyntax>()
-            .Where(m => m.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-                .Any(a => a.Left.ToString().Contains("TabViewControl.Resources")) ||
-                m.DescendantNodes().OfType<InvocationExpressionSyntax>()
-                    .Any(i => i.Expression.ToString() == "TabViewControl.Resources.Remove"))
-            .ToList();
-        Assert.NotEmpty(writers);
-        foreach (var writer in writers)
-        {
-            var marks = writer.AssignsTo("_tabViewResourcesDirty").ToList();
-            Assert.True(marks.Count >= 1,
-                $"{writer.Identifier.ValueText} writes TabView resources without marking them dirty");
-        }
+        // The memo is only honest if every entry the flip has to re-read
+        // sets it. TabView overrides are added once and then only change
+        // colour in place: a Color write reaches its readers by itself, so
+        // only the add needs the re-read. The ledger's Write reports the add
+        // path, and the one door marks the host dirty on that report alone.
+        var door = Host().Method("WriteTabViewResource");
+        var marks = door.AssignsTo("_tabViewResourcesDirty").ToList();
+        Assert.True(marks.Count == 1,
+            $"WriteTabViewResource must mark the host dirty exactly once, found {marks.Count}");
+        Assert.Equal("true", marks[0].Right.ToString());
+
+        var write = door.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(c => c.Expression.ToString() == "_tabViewOverrides.Write");
+        var result = write.Ancestors().OfType<VariableDeclaratorSyntax>().FirstOrDefault()?.Identifier.Text;
+        Assert.True(result is not null, "WriteTabViewResource must keep the ledger Write result");
+        var guard = marks[0].Ancestors().OfType<IfStatementSyntax>().FirstOrDefault();
+        Assert.True(guard is not null && guard.Condition.ToString() == result,
+            $"the dirty mark must sit under 'if ({result})', the ledger's add report; "
+            + $"found it under '{guard?.Condition}'");
     }
 
     // ------------------------------------------------------------------
