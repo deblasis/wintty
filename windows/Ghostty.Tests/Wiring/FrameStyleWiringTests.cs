@@ -232,10 +232,14 @@ public sealed class FrameStyleWiringTests
         // strips have always been painted; RootGrid keeps the other.
         Assert.Equal("ShellThemeChromeArgb", resolve.Arg(2));
 
-        // Node, not text: `!OsTheme.IsDark(...)` reads the same to a
-        // substring match and hands the light desktop the dark colour.
-        var polarity = resolve.ArgExpression(3).AssertCallTo("OsTheme.IsDark");
-        Assert.Equal("_systemUiSettings", polarity.Arg(0));
+        // The polarity source is the window theme manager, the same source
+        // the ink estimate reads: the fill and the score must never disagree
+        // (the desktop read painted a light window's frame in the desktop's
+        // theme). Node, not text: a negated or conditional read must not
+        // slip past.
+        Assert.Equal(
+            "_themeManager.IsDarkMode",
+            resolve.ArgExpression(3).ToString());
     }
 
     /// <summary>
