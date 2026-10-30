@@ -95,17 +95,58 @@ pub fn encode(
 ) std.Io.Writer.Error!void {
     //std.log.warn("KEYENCODER event={} opts={}", .{ event, opts });
 
-    // ConPTY discards xterm's modified Enter (CSI 27;2;13~). A Win32 record
-    // preserves Shift and the other modifiers for native console readers.
+    // Under ConPTY's win32 input mode the pty parses the VT byte stream
+    // into key records. Three keys cannot survive that parse as bytes:
+    // modified Enter (ConPTY consumes CSI 27;...~), a bare Escape (the
+    // parser takes 0x1B as the start of a sequence and swallows it when
+    // the next key is queued behind it), and Ctrl+[ (fixterms encodes it
+    // as CSI u, which ConPTY does not understand). A Win32 record reaches
+    // the console client as the key the user pressed, with its modifiers.
+    //
     // Mode 9001 is only settable on Windows, so a false option reproduces
     // the existing behavior everywhere else. Keep negotiated Kitty input
     // unchanged for applications using that protocol.
-    if (opts.win32_input and opts.kitty_flags.int() == 0 and
-        !event.composing and
-        (event.utf8.len == 0 or isControlUtf8(event.utf8)) and
-        (event.key == .enter or event.key == .numpad_enter))
-    {
-        return win32Enter(writer, event);
+    if (opts.win32_input and opts.kitty_flags.int() == 0 and !event.composing) {
+        const control_text = event.utf8.len == 0 or isControlUtf8(event.utf8);
+        switch (event.key) {
+            .enter, .numpad_enter => if (control_text) return win32Record(
+                writer,
+                event,
+                13,
+                28,
+                if (event.action == .release)
+                    0
+                else if (event.mods.ctrl)
+                    10
+                else
+                    13,
+            ),
+            .escape => if (control_text) return win32Record(
+                writer,
+                event,
+                27,
+                1,
+                if (event.action == .release) 0 else 27,
+            ),
+            // Ctrl+[ is U+001B. The key enum comes from the native
+            // scancode, which is the US position, so require the layout's
+            // unshifted character there to be '[': on de-DE that key types
+            // ü and on Dvorak it types /, and Ctrl on either must keep its
+            // base encoding rather than inject Escape. AltGr is Ctrl+Alt,
+            // so exclude it too: on it-IT AltGr+the same key types '['.
+            .bracket_left => if (event.mods.ctrl and
+                !event.mods.alt and
+                event.unshifted_codepoint == '[' and
+                (control_text or std.mem.eql(u8, event.utf8, "[")))
+                return win32Record(
+                    writer,
+                    event,
+                    219,
+                    26,
+                    if (event.action == .release) 0 else 27,
+                ),
+            else => {},
+        }
     }
 
     return if (opts.kitty_flags.int() != 0) try kitty(
@@ -119,17 +160,19 @@ pub fn encode(
     );
 }
 
-/// Encode Enter or keypad Enter as the Win32 console input record that
-/// ConPTY's private mode 9001 requests.
+/// Encode a key as the Win32 console input record that ConPTY's private
+/// mode 9001 requests.
 ///
 /// The record is `CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`: virtual key, scan code,
-/// UTF-16 code unit, key-down, control state, repeat count. Enter is
-/// VK_RETURN (13) with scan code 28; its code unit is LF when Ctrl is down,
-/// CR otherwise, and zero on release. Control state carries the modifier
-/// sides, lock keys and ENHANCED_KEY for keypad Enter.
-fn win32Enter(
+/// UTF-16 code unit, key-down, control state, repeat count. Control state
+/// carries the modifier sides, lock keys and ENHANCED_KEY for keypad Enter.
+/// A release carries no code unit.
+fn win32Record(
     writer: *std.Io.Writer,
     event: key.KeyEvent,
+    vk: u16,
+    sc: u16,
+    uc: u16,
 ) std.Io.Writer.Error!void {
     var control_state: u16 = if (event.mods.shift) 0x0010 else 0;
     if (event.mods.ctrl) {
@@ -144,16 +187,38 @@ fn win32Enter(
     if (event.mods.caps_lock) control_state |= 0x0080;
     if (event.key == .numpad_enter) control_state |= 0x0100;
 
-    return writer.print("\x1b[13;28;{d};{d};{d};1_", .{
-        @as(u8, if (event.action == .release)
-            0
-        else if (event.mods.ctrl)
-            10
-        else
-            13),
+    return writer.print("\x1b[{d};{d};{d};{d};{d};1_", .{
+        vk,
+        sc,
+        if (event.action == .release) @as(u16, 0) else uc,
         @as(u8, if (event.action == .release) 0 else 1),
         control_state,
     });
+}
+
+/// Windows hosts receive a key press and its character as separate events,
+/// and buffer the press until the character arrives. Returns true for keys
+/// WinUI delivers with no character at all: a host must dispatch those
+/// immediately, because the buffered press would wait for the next key
+/// press instead (#1426).
+///
+/// Escape and Ctrl+[ are the terminal keys in this set. WinUI raises no
+/// CharacterReceived for either, even though Windows itself would post
+/// U+001B. The key enum comes from the native scancode, which is the US
+/// position, so Ctrl+[ also requires the layout's unshifted character
+/// there to be '[': on de-DE that key types ü and on Dvorak it types /,
+/// where Ctrl must keep its base encoding. AltGr arrives as Ctrl+Alt and
+/// is excluded: on layouts where it types '[', that is the user's
+/// character, not Ctrl+[. Composing keys belong to the IME.
+pub fn windowsKeyWithoutCharacter(event: key.KeyEvent) bool {
+    if (event.composing) return false;
+    return switch (event.key) {
+        .escape => true,
+        .bracket_left => event.mods.ctrl and
+            !event.mods.alt and
+            event.unshifted_codepoint == '[',
+        else => false,
+    };
 }
 
 /// Perform Kitty keyboard protocol encoding of the key event.
@@ -3207,4 +3272,243 @@ test "win32 input: unnegotiated, Kitty and text keep existing encodings" {
         try encode(&writer, case.event, case.options);
         try testing.expectEqualStrings(case.expected, writer.buffered());
     }
+}
+
+test "win32 input: escape and ctrl+bracket are records" {
+    // ConPTY consumes a bare ESC as the start of a sequence and drops CSI u
+    // outright, so under 9001 both keys must travel as Win32 records. The
+    // record values match what Windows Terminal sends for the same keys:
+    // Escape is VK_ESCAPE/scan 1, Ctrl+[ is VK_OEM_4/scan 0x1A, and both
+    // carry the U+001B the layout produced.
+    const Case = struct {
+        event: key.KeyEvent,
+        expected: []const u8,
+    };
+    const cases = [_]Case{
+        .{
+            .event = .{ .key = .escape },
+            .expected = "\x1b[27;1;27;1;0;1_",
+        },
+        .{
+            .event = .{ .key = .escape, .action = .release },
+            .expected = "\x1b[27;1;0;0;0;1_",
+        },
+        .{
+            .event = .{ .key = .escape, .mods = .{ .shift = true } },
+            .expected = "\x1b[27;1;27;1;16;1_",
+        },
+        .{
+            .event = .{
+                .key = .bracket_left,
+                .mods = .{ .ctrl = true },
+                .unshifted_codepoint = '[',
+            },
+            .expected = "\x1b[219;26;27;1;8;1_",
+        },
+        // Some hosts attach the control character as text; it is still a
+        // key event, not composed input.
+        .{
+            .event = .{
+                .key = .bracket_left,
+                .mods = .{ .ctrl = true },
+                .utf8 = "\x1b",
+                .unshifted_codepoint = '[',
+            },
+            .expected = "\x1b[219;26;27;1;8;1_",
+        },
+        .{
+            .event = .{
+                .key = .bracket_left,
+                .mods = .{ .ctrl = true },
+                .action = .release,
+                .unshifted_codepoint = '[',
+            },
+            .expected = "\x1b[219;26;0;0;8;1_",
+        },
+        .{
+            .event = .{
+                .key = .bracket_left,
+                .mods = .{
+                    .ctrl = true,
+                    .shift = true,
+                    .caps_lock = true,
+                    .num_lock = true,
+                    .sides = .{ .ctrl = .right },
+                },
+                .unshifted_codepoint = '[',
+            },
+            .expected = "\x1b[219;26;27;1;180;1_",
+        },
+        // Ctrl+Alt is AltGr; even at the bracket position it keeps the base
+        // encoding.
+        .{
+            .event = .{
+                .key = .bracket_left,
+                .mods = .{ .ctrl = true, .alt = true },
+                .unshifted_codepoint = '[',
+            },
+            .expected = "",
+        },
+        // de-DE types ü at that position; Ctrl+ü keeps the base encoding.
+        .{
+            .event = .{
+                .key = .bracket_left,
+                .mods = .{ .ctrl = true },
+                .unshifted_codepoint = 0xFC,
+            },
+            .expected = "",
+        },
+        // AltGr is Ctrl+Alt; even on a layout where it types '[', that is
+        // the user's character and keeps the legacy encoding.
+        .{
+            .event = .{
+                .key = .bracket_left,
+                .mods = .{ .ctrl = true, .alt = true },
+                .utf8 = "[",
+                .unshifted_codepoint = '[',
+            },
+            .expected = "\x1b[91;7u",
+        },
+    };
+
+    for (cases) |case| {
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try encode(&writer, case.event, .{ .win32_input = true });
+        try testing.expectEqualStrings(case.expected, writer.buffered());
+    }
+}
+
+test "win32 input: escape and ctrl+bracket keep legacy and kitty encodings" {
+    const Case = struct {
+        event: key.KeyEvent,
+        options: Options,
+        expected: []const u8,
+    };
+    const cases = [_]Case{
+        // No 9001: the legacy encodings stay byte-identical.
+        .{
+            .event = .{ .key = .escape },
+            .options = .{},
+            .expected = "\x1b",
+        },
+        .{
+            .event = .{
+                .key = .bracket_left,
+                .mods = .{ .ctrl = true },
+                .utf8 = "[",
+            },
+            .options = .{},
+            .expected = "\x1b[91;5u",
+        },
+        // Kitty wins over the Win32 mode.
+        .{
+            .event = .{ .key = .escape },
+            .options = .{
+                .win32_input = true,
+                .kitty_flags = .{ .disambiguate = true },
+            },
+            .expected = "\x1b[27u",
+        },
+        // Composed text is not a console key record.
+        .{
+            .event = .{ .key = .escape, .utf8 = "A" },
+            .options = .{ .win32_input = true },
+            .expected = "A",
+        },
+        // A composing Escape emits nothing, including with control text.
+        .{
+            .event = .{
+                .key = .escape,
+                .composing = true,
+                .utf8 = "\x1b",
+            },
+            .options = .{ .win32_input = true },
+            .expected = "",
+        },
+        // A plain bracket key is text.
+        .{
+            .event = .{ .key = .bracket_left, .utf8 = "[" },
+            .options = .{ .win32_input = true },
+            .expected = "[",
+        },
+    };
+
+    for (cases) |case| {
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try encode(&writer, case.event, case.options);
+        try testing.expectEqualStrings(case.expected, writer.buffered());
+    }
+}
+
+test "win32 input: records win over modifyOtherKeys" {
+    // ConPTY cannot carry modifyOtherKeys sequences either; the record is
+    // the only shape it understands for these keys.
+    const opts = Options{
+        .win32_input = true,
+        .modify_other_keys_state_2 = true,
+    };
+
+    var buf: [128]u8 = undefined;
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try encode(&writer, .{ .key = .escape }, opts);
+        try testing.expectEqualStrings("\x1b[27;1;27;1;0;1_", writer.buffered());
+    }
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try encode(&writer, .{
+            .key = .bracket_left,
+            .mods = .{ .ctrl = true },
+            .utf8 = "[",
+            .unshifted_codepoint = '[',
+        }, opts);
+        try testing.expectEqualStrings("\x1b[219;26;27;1;8;1_", writer.buffered());
+    }
+}
+
+test "windows: keys with no character dispatch without text" {
+    try testing.expect(windowsKeyWithoutCharacter(.{ .key = .escape }));
+    try testing.expect(windowsKeyWithoutCharacter(.{
+        .key = .bracket_left,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = '[',
+    }));
+
+    // Text keys still wait for their character: that is what carries the
+    // shift a layout consumed, and Ctrl+C's C0 byte.
+    try testing.expect(!windowsKeyWithoutCharacter(.{ .key = .key_a }));
+    try testing.expect(!windowsKeyWithoutCharacter(.{ .key = .enter }));
+    try testing.expect(!windowsKeyWithoutCharacter(.{ .key = .bracket_left }));
+    // The key enum is the US position; the layout's character decides.
+    try testing.expect(!windowsKeyWithoutCharacter(.{
+        .key = .bracket_left,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = 0xFC, // de-DE ü
+    }));
+    try testing.expect(!windowsKeyWithoutCharacter(.{
+        .key = .bracket_left,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = '/', // Dvorak at scan 0x1A
+    }));
+    // AltGr arrives as Ctrl+Alt. Even where the layout puts '[' there,
+    // it is the user's character, not Ctrl+[.
+    try testing.expect(!windowsKeyWithoutCharacter(.{
+        .key = .bracket_left,
+        .mods = .{ .ctrl = true, .alt = true },
+        .unshifted_codepoint = '[',
+    }));
+    try testing.expect(!windowsKeyWithoutCharacter(.{
+        .key = .bracket_left,
+        .mods = .{ .shift = true },
+    }));
+
+    // A composing key belongs to the IME, not the terminal.
+    try testing.expect(!windowsKeyWithoutCharacter(.{
+        .key = .escape,
+        .composing = true,
+    }));
 }
