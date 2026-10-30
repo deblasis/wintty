@@ -641,6 +641,11 @@ pub const Surface = struct {
 
     const PendingKey = struct {
         event: App.KeyEvent,
+
+        /// The key was dispatched without waiting for a character. If one
+        /// still arrives it belongs to this key and is dropped rather
+        /// than sent as text, so the key cannot be delivered twice.
+        dispatched: bool = false,
     };
 
     /// Intercepts events at the apprt boundary before they reach
@@ -1540,7 +1545,7 @@ pub const Surface = struct {
         if (comptime builtin.os.tag != .windows) return;
         if (self.pending_key) |pending| {
             self.pending_key = null;
-            _ = self.dispatchKey(pending.event);
+            if (!pending.dispatched) _ = self.dispatchKey(pending.event);
         }
     }
 
@@ -3408,6 +3413,9 @@ pub const CAPI = struct {
     /// On Windows, a press/repeat with no text is buffered until the
     /// following ghostty_surface_text attaches text, handling the split
     /// WM_KEYDOWN / WM_CHAR pattern so embedders don't combine manually.
+    /// Keys WinUI delivers without a character (Escape, Ctrl+[) are
+    /// dispatched immediately instead; their text, should one arrive, is
+    /// dropped rather than delivered a second time.
     export fn ghostty_surface_key(
         surface: *Surface,
         event: KeyEvent,
@@ -3433,7 +3441,24 @@ pub const CAPI = struct {
             surface.flushPendingKey();
 
             // No text yet: buffer until ghostty_surface_text arrives.
+            // Keys WinUI delivers without a character cannot wait for one:
+            // a buffered Escape or Ctrl+[ is not dispatched until the next
+            // key press, and its bytes are then queued behind that key's,
+            // where ConPTY consumes the Escape as a sequence prefix (#1426).
             if (key_event.text == null and key_event.action != .release) {
+                const no_character = if (key_event.core()) |core_event|
+                    input.key_encode.windowsKeyWithoutCharacter(core_event)
+                else
+                    false;
+                if (no_character) {
+                    _ = surface.dispatchKey(key_event);
+                    surface.pending_key = .{
+                        .event = key_event,
+                        .dispatched = true,
+                    };
+                    return false;
+                }
+
                 surface.pending_key = .{ .event = key_event };
                 return false;
             }
@@ -3517,40 +3542,53 @@ pub const CAPI = struct {
             if (surface.pending_key) |*pending| {
                 const text = ptr[0..len];
 
-                // Don't attach C0 control characters. WM_CHAR delivers
-                // the raw byte (e.g. 0x03 for Ctrl+C) but the key
-                // encoder wants the printable character. Mirrors GTK.
-                const is_c0 = text.len == 1 and (text[0] < 0x20 or text[0] == 0x7f);
+                // A key dispatched without waiting for text can still
+                // produce a character on a host that delivers one after
+                // all. Drop exactly that key's character so it is not
+                // delivered twice; any other text (an IME commit, text a
+                // harness sent) belongs on the text path below.
+                if (pending.dispatched) {
+                    const own = text.len == 1 and
+                        (text[0] == 0x1B or
+                            (text[0] == '[' and pending.event.keycode == 0x1A));
+                    surface.pending_key = null;
+                    if (own) return;
+                } else {
+                    // Don't attach C0 control characters. WM_CHAR delivers
+                    // the raw byte (e.g. 0x03 for Ctrl+C) but the key
+                    // encoder wants the printable character. Mirrors GTK.
+                    const is_c0 = text.len == 1 and (text[0] < 0x20 or text[0] == 0x7f);
 
-                var event = pending.event;
+                    var event = pending.event;
 
-                if (!is_c0) {
-                    const copy_len: usize = @min(text.len, surface.pending_key_text.len - 1);
+                    if (!is_c0) {
+                        const copy_len: usize = @min(text.len, surface.pending_key_text.len - 1);
 
-                    // Buffer lives outside the optional so the text
-                    // survives setting pending_key to null (Zig poisons
-                    // optional payloads in debug builds).
-                    @memcpy(surface.pending_key_text[0..copy_len], text[0..copy_len]);
-                    surface.pending_key_text[copy_len] = 0;
+                        // Buffer lives outside the optional so the text
+                        // survives setting pending_key to null (Zig poisons
+                        // optional payloads in debug builds).
+                        @memcpy(surface.pending_key_text[0..copy_len], text[0..copy_len]);
+                        surface.pending_key_text[copy_len] = 0;
 
-                    event.text = surface.pending_key_text[0..copy_len :0];
+                        event.text = surface.pending_key_text[0..copy_len :0];
 
-                    // The text is the translation of this key, so the
-                    // shift the KeyDown carried was consumed producing
-                    // it rather than held as a binding modifier. Windows
-                    // reports no consumed-modifier set to read (GTK reads
-                    // xkb's, macOS derives one from the translation
-                    // modifiers), so it is derived here, where the text
-                    // proves it: see consumedShiftForText.
-                    event.consumed_mods = consumedShiftForText(
-                        event.mods,
-                        event.consumed_mods,
-                    );
+                        // The text is the translation of this key, so the
+                        // shift the KeyDown carried was consumed producing
+                        // it rather than held as a binding modifier. Windows
+                        // reports no consumed-modifier set to read (GTK reads
+                        // xkb's, macOS derives one from the translation
+                        // modifiers), so it is derived here, where the text
+                        // proves it: see consumedShiftForText.
+                        event.consumed_mods = consumedShiftForText(
+                            event.mods,
+                            event.consumed_mods,
+                        );
+                    }
+
+                    surface.pending_key = null;
+                    _ = surface.dispatchKey(event);
+                    return;
                 }
-
-                surface.pending_key = null;
-                _ = surface.dispatchKey(event);
-                return;
             }
         }
 
