@@ -243,12 +243,13 @@ public sealed class FirstPaneCommandWiringTests
     {
         var open = App.Method("OpenWindowFromLaunch");
         var call = open.Call("OpenJumpListWindow");
-        // The inherited cwd, the directory the launch asked for, then the
-        // command: the first is what the wire field carried, the second what
-        // the argv asked for (#1433).
+        // The inherited cwd, then the command and the directory the launch
+        // asked for, both by name so nothing can bind into the wrong slot:
+        // the first is what the wire field carried, the second what the argv
+        // asked for (#1433).
         Assert.Equal("req.WorkingDirectory", call.Arg(1));
-        Assert.Equal("requestedDirectory", call.Arg(2));
-        Assert.Equal("command: forwardedCommand", call.Arg(3));
+        Assert.Equal("command: forwardedCommand", call.Arg(2));
+        Assert.Equal("requestedDirectory: requestedDirectory", call.Arg(3));
         var parsed = open.DescendantNodes().OfType<VariableDeclaratorSyntax>()
             .Single(v => v.Identifier.ValueText == "forwardedCommand");
         Assert.Contains("LaunchCommand.FromArgs(req.Args)", parsed.Initializer!.Value.ToString());

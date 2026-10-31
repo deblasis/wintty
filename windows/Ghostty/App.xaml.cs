@@ -1587,8 +1587,8 @@ public partial class App : Application
             OpenJumpListWindow(
                 launch.ProfileId,
                 req.WorkingDirectory,
-                requestedDirectory,
-                command: forwardedCommand);
+                command: forwardedCommand,
+                requestedDirectory: requestedDirectory);
         }
         else
         {
@@ -1994,8 +1994,8 @@ public partial class App : Application
     private void OpenJumpListWindow(
         string? profileId,
         string workingDirectory,
-        string? requestedDirectory = null,
-        string? command = null)
+        string? command = null,
+        string? requestedDirectory = null)
     {
         // A window other than the cold -e one ends the hold (#1136).
         RestoreHeldSession();
