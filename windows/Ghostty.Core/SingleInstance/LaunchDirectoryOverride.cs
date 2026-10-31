@@ -43,10 +43,11 @@ namespace Ghostty.Core.SingleInstance;
 ///
 /// Two cells deliberately diverge from the cold parser, both in the safe
 /// direction: an occurrence whose value trims or strips to empty contributes
-/// nothing here (the cold parser diagnoses it and leaves any earlier value
-/// standing, which this preserves for the trim-empty cell), and a value that
-/// cannot resolve against its base at all is no override rather than an
-/// error.
+/// nothing here — for the trim-empty spelling the cold parser diagnoses it
+/// and leaves any earlier value standing, which this preserves; the quoted
+/// spelling the cold parser records and the receiver drops, and this treats
+/// as no value a beat earlier — and a value that cannot resolve against its
+/// base at all is no override rather than an error.
 ///
 /// Pure (no I/O beyond the profile path) so the model is unit-testable
 /// without a GUI.
@@ -66,7 +67,7 @@ public static class LaunchDirectoryOverride
     /// <see cref="LaunchCommand.ExecuteFlag"/>, because everything after it
     /// is the command, not flags; within what remains, the LAST occurrence
     /// wins, the way the config cascade applies argv in order; a value that
-    /// trims to nothing is no value.
+    /// trims or strips to nothing is no value.
     /// </summary>
     public static string? FromArgs(IReadOnlyList<string>? args)
     {
@@ -110,13 +111,14 @@ public static class LaunchDirectoryOverride
     /// them, <c>inherit</c> falls back to the directory the launch was
     /// started in, anything else is taken as given when anchored and resolved
     /// against <paramref name="inheritedDirectory"/> when not (the CLI
-    /// resolves relatives on the client, against the caller's cwd). A null or
-    /// empty <paramref name="requested"/> is null: callers apply their
-    /// inherited rules, never a guess.
+    /// resolves relatives on the client, against the caller's cwd). A null,
+    /// empty or whitespace-only <paramref name="requested"/> is null: callers
+    /// apply their inherited rules, never a guess — a whitespace-only value
+    /// would otherwise fold into the base directory.
     /// </summary>
     public static string? Resolve(string? requested, string inheritedDirectory)
     {
-        if (string.IsNullOrEmpty(requested)) return null;
+        if (string.IsNullOrWhiteSpace(requested)) return null;
 
         if (string.Equals(requested, "home", StringComparison.Ordinal))
             return HomeDirectory();

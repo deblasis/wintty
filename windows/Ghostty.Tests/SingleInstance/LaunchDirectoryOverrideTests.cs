@@ -235,6 +235,38 @@ public sealed class LaunchDirectoryOverrideTests
     }
 
     [Fact]
+    public void ACompositeWithAQuotedEmptyTailKeepsTheEarlierValue()
+    {
+        var got = Ghostty.Core.SingleInstance.LaunchDirectoryOverride.FromArgs(
+            new[] { "wintty.exe", "--working-directory=C:\\a", "--working-directory=\"\"" });
+        Assert.Equal("C:\\a", got);
+    }
+
+    [Fact]
+    public void ARemoteUncInEitherSpellingIsTakenAsGiven()
+    {
+        // Win32 folds both separators at spawn; the cold leg takes both
+        // spellings as given, and so does this one.
+        Assert.Equal(
+            "//fileserver.example.com/projects",
+            Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
+                "//fileserver.example.com/projects", "C:\\inherited"));
+        Assert.Equal(
+            "\\\\.\\C:",
+            Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
+                "\\\\.\\C:", "C:\\inherited"));
+    }
+
+    [Fact]
+    public void WhitespaceOnlyIsNoAnswerEither()
+    {
+        // GetFullPath folds a whitespace-only value into its base; the guard
+        // kills that fold even for a caller that bypasses FromArgs.
+        Assert.Null(Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
+            "   ", "C:\\inherited"));
+    }
+
+    [Fact]
     public void NoRequestYieldsNoAnswer()
     {
         Assert.Null(Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
