@@ -88,6 +88,40 @@ public sealed class FirstPaneCommandWiringTests
         restore.Call("manager.RequestPersist");
     }
 
+    // ---- forwarded working directory ---------------------------------------
+
+    // A --working-directory=<dir> the secondary carried on its own command
+    // line is an explicit choice, unlike the inherited process cwd the wire
+    // field carries: a cold start honors the flag through its own config, so
+    // the primary honors it through the pane it opens for the forward. The
+    // argv is already on the wire (LaunchRequest carries it verbatim), so the
+    // fix reads it there; no new wire field.
+    [Fact]
+    public void ForwardedLaunch_ExplicitWorkingDirectory_IsParsedFromTheRequestArgv()
+    {
+        var open = App.Method("OpenWindowFromLaunch");
+        var parse = open.Call("Ghostty.Core.SingleInstance.LaunchDirectoryOverride.FromArgs");
+        Assert.Equal("req.Args", parse.Arg(0));
+
+        var call = open.Call("OpenJumpListWindow");
+        Assert.Contains("requestedDirectory", call.ToString());
+    }
+
+    // The explicit directory wins over the -e-only rule the inherited cwd
+    // follows: the pane sits in the directory that was asked for even when
+    // the launch carries no command, which is exactly the case the rule
+    // exists to drop the INHERITED cwd for.
+    [Fact]
+    public void JumpListWindow_ExplicitDirectory_WinsOverTheCommandOnlyRule()
+    {
+        var open = App.Method("OpenJumpListWindow");
+        var policy = open.Call("Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory");
+        var coalesce = policy.Ancestors().OfType<BinaryExpressionSyntax>()
+            .FirstOrDefault(b => b.OperatorToken.ValueText == "??");
+        Assert.NotNull(coalesce);
+        Assert.Contains("requestedDirectory", coalesce.Left.ToString());
+    }
+
     // Every place the shell creates a regular window, and the jump list's
     // New Tab, ends a cold -e's hold before it opens anything: the held
     // session is restored first, then the new window opens (#1136). A census
@@ -209,7 +243,12 @@ public sealed class FirstPaneCommandWiringTests
     {
         var open = App.Method("OpenWindowFromLaunch");
         var call = open.Call("OpenJumpListWindow");
-        Assert.Equal("command: forwardedCommand", call.Arg(2));
+        // The inherited cwd, the directory the launch asked for, then the
+        // command: the first is what the wire field carried, the second what
+        // the argv asked for (#1433).
+        Assert.Equal("req.WorkingDirectory", call.Arg(1));
+        Assert.Equal("requestedDirectory", call.Arg(2));
+        Assert.Equal("command: forwardedCommand", call.Arg(3));
         var parsed = open.DescendantNodes().OfType<VariableDeclaratorSyntax>()
             .Single(v => v.Identifier.ValueText == "forwardedCommand");
         Assert.Contains("LaunchCommand.FromArgs(req.Args)", parsed.Initializer!.Value.ToString());
