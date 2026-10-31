@@ -1639,6 +1639,150 @@ internal static class TestSeam
                 return ConsumedCloseArmsJson(window, manager, op, paletteRecovered);
             }
 
+            case "ime-trace":
+            case "ime-trace-clear":
+            {
+                // Test-only ordering trace: what TSF actually did, in order,
+                // with the sink text at each step. A live run needs this to
+                // tell "the IME committed the preedit" from "we committed it
+                // before the IME's result landed".
+                if (LeafTerminal(manager, args) is not { } traceTerminal)
+                    return Error(op, "no such tab or leaf");
+                if (op == "ime-trace-clear") traceTerminal.TestSeamImeTraceReset();
+                var events = traceTerminal.TestSeamImeTraceSnapshot();
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteStartArray("events");
+                    foreach (var ev in events) json.WriteStringValue(ev);
+                    json.WriteEndArray();
+                    json.WriteEndObject();
+                });
+            }
+
+            case "ime-settle-interval":
+            {
+                // Test-build only: the settle's poll is shorter than an IPC
+                // round trip, so a harness cannot land a write between polls
+                // without stretching it. Gated with the other IME ops: changing
+                // it changes delivery behaviour.
+                if (!_inputAllowed)
+                    return Error(op, $"the IME input ops are off; set {InputEnvVar}=1 to arm them");
+                var ms = ArgInt(args, "ms", 20);
+                if (ms < 1 || ms > 5000) return Error(op, "ms must be 1..5000");
+                Ghostty.Controls.TerminalControl.ImeSettlePollMs = ms;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("ms", ms);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "ime-settle-fallback":
+            {
+                // Test-build only: the fallback a nothing-was-written settle
+                // waits is the settle's other deadline, and a replay needs to
+                // move it the same way it moves the grace.
+                if (!_inputAllowed)
+                    return Error(op, $"the IME input ops are off; set {InputEnvVar}=1 to arm them");
+                var ms = ArgInt(args, "ms", 1000);
+                if (ms < 1 || ms > 5000) return Error(op, "ms must be 1..5000");
+                Ghostty.Controls.TerminalControl.ImeSettleFallbackMs = ms;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("ms", ms);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "ime-settle-final-grace":
+            {
+                // Test-build only: the guard between "a non-ASCII result" and
+                // "a write that still replaces it" is short by design, so a
+                // replay needs to move it rather than sleep through it.
+                if (!_inputAllowed)
+                    return Error(op, $"the IME input ops are off; set {InputEnvVar}=1 to arm them");
+                var ms = ArgInt(args, "ms", 50);
+                if (ms < 0 || ms > 5000) return Error(op, "ms must be 0..5000");
+                Ghostty.Controls.TerminalControl.ImeSettleFinalGraceMs = ms;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("ms", ms);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "ime-set-text":
+            case "ime-started":
+            case "ime-changed":
+            case "ime-ended":
+            case "ime-commit":
+            case "ime-cancel":
+            case "ime-char":
+            case "ime-key":
+            case "ime-state":
+            {
+                if (LeafTerminal(manager, args) is not { } imeTerminal)
+                    return Error(op, "no such tab or leaf");
+                if ((op is "ime-ended" or "ime-commit" or "ime-char" or "ime-key" or "ime-started"
+                        or "ime-set-text")
+                    && !_inputAllowed)
+                    return Error(op, $"the IME input ops are off; set {InputEnvVar}=1 to arm them");
+                switch (op)
+                {
+                    case "ime-set-text":
+                        imeTerminal.TestSeamImeSetText(ArgString(args, "text") ?? "");
+                        break;
+                    case "ime-started":
+                        imeTerminal.TestSeamImeStarted(ArgInt(args, "start", 0));
+                        break;
+                    case "ime-changed":
+                        imeTerminal.TestSeamImeChanged();
+                        break;
+                    case "ime-ended":
+                        imeTerminal.TestSeamImeEnded();
+                        break;
+                    case "ime-commit":
+                        imeTerminal.TestSeamImeCommit();
+                        break;
+                    case "ime-cancel":
+                        imeTerminal.TestSeamImeCancel();
+                        break;
+                    case "ime-char":
+                    {
+                        var text = ArgString(args, "char");
+                        if (string.IsNullOrEmpty(text))
+                            return Error(op, "ime-char needs char");
+                        imeTerminal.TestSeamImeChar(text[0]);
+                        break;
+                    }
+                    case "ime-key":
+                    {
+                        // The key the harness presses, by virtual-key name:
+                        // the same prelude a real KeyDown runs (sync, commit,
+                        // spend the key when the box already applied it).
+                        var name = ArgString(args, "key");
+                        if (string.IsNullOrEmpty(name) ||
+                            !Enum.TryParse<Windows.System.VirtualKey>(name, ignoreCase: true, out var key))
+                            return Error(op, "ime-key needs key");
+                        imeTerminal.TestSeamImeKey(key);
+                        break;
+                    }
+                }
+                return ImeStateJson(imeTerminal, op);
+            }
+
             case "terminal-character":
             {
                 // One character through a pane's real post-guard character
@@ -2822,6 +2966,28 @@ internal static class TestSeam
         });
 
     /// <summary>The one response builder: AOT-safe, reflection-free.</summary>
+    private static string ImeStateJson(Ghostty.Controls.TerminalControl terminal, string op) => Json(json =>
+    {
+        json.WriteStartObject();
+        json.WriteBoolean("ok", true);
+        json.WriteString("op", op);
+        json.WriteBoolean("composing", terminal.TestSeamImeComposing);
+        json.WriteBoolean("untracked", terminal.TestSeamImeUntracked);
+        json.WriteBoolean("keyConsumed", terminal.TestSeamImeKeyConsumed);
+        json.WriteString("sink", terminal.TestSeamImeSink);
+        if (terminal.TestSeamImePreedit is { } preedit) json.WriteString("preedit", preedit);
+        else json.WriteNull("preedit");
+        json.WriteNumber("forwarded", terminal.TestSeamImeForwarded);
+        json.WriteNumber("sinkX", terminal.TestSeamImeSinkX);
+        json.WriteNumber("sinkY", terminal.TestSeamImeSinkY);
+        // A positioned sink is only useful if TSF has it as the focused
+        // element; expose both the element's own state and the tree's
+        // authoritative keyboard-focus answer.
+        json.WriteBoolean("sinkFocused", terminal.TestSeamImeSinkFocused);
+        json.WriteBoolean("sinkHasKeyboardFocus", terminal.TestSeamImeSinkHasKeyboardFocus);
+        json.WriteEndObject();
+    });
+
     private static string Json(Action<Utf8JsonWriter> write)
     {
         using var stream = new MemoryStream();
