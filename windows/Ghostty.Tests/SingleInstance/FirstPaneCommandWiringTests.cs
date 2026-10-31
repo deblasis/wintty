@@ -383,7 +383,7 @@ public sealed class FirstPaneCommandWiringTests
             else if (text[end] == '}' && --depth == 0) break;
         }
         Assert.DoesNotContain(drop, text[open..end]);
-        Assert.Contains("if (comptime builtin.os.tag == .windows) {\n            " + drop, text);
+        Assert.Contains("if (comptime builtin.target.os.tag == .windows) {\n            " + drop, text);
     }
 
     [Fact]

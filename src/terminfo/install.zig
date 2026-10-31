@@ -14,6 +14,13 @@ const log = std.log.scoped(.terminfo_install);
 
 pub const Error = error{InstallFailed} || Allocator.Error;
 
+/// How the launcher's own stderr is treated. `inherit` keeps SSH
+/// authentication prompts and keyboard-interactive instructions visible
+/// while the remote installer's stderr is still controlled by the remote
+/// script; `verbose_only` keeps the old behaviour for launchers with no
+/// authentication prompts (the WSL spawn path).
+pub const Stderr = enum { inherit, verbose_only };
+
 /// The remote install script, read by the target shell. The terminfo source
 /// arrives on stdin. The script bails (exit 1) when `tic` is unavailable,
 /// otherwise compiles the source into the user's terminfo database. It always
@@ -37,10 +44,16 @@ pub fn scriptFor(verbose: bool) []const u8 {
 /// e.g. `["ssh", ..., dest]` or `["wsl.exe", "-d", distro, "--", "sh", "-c"]`.
 /// The encoded terminfo source is piped to the target's stdin; the script
 /// appended after `launcher_prefix` compiles it with `tic`.
+///
+/// `stderr_mode` controls the launcher's own stderr. SSH passes `.inherit`
+/// so authentication prompts reach the user; the WSL path passes
+/// `.verbose_only` because it has no authentication prompts. The remote
+/// installer's stderr is governed by `verbose` through the script.
 pub fn install(
     alloc: Allocator,
     launcher_prefix: []const []const u8,
     verbose: bool,
+    stderr_mode: Stderr,
 ) Error!void {
     var buf: std.Io.Writer.Allocating = .init(alloc);
     defer buf.deinit();
@@ -59,7 +72,10 @@ pub fn install(
         .argv = argv,
         .stdin = .pipe,
         .stdout = .ignore,
-        .stderr = if (verbose) .inherit else .ignore,
+        .stderr = switch (stderr_mode) {
+            .inherit => .inherit,
+            .verbose_only => if (verbose) .inherit else .ignore,
+        },
     }) catch |err| {
         log.warn("terminfo install spawn failed: {}", .{err});
         return error.InstallFailed;

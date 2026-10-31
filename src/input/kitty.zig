@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const key = @import("key.zig");
 
 /// A single entry in the kitty keymap data. There are only ~100 entries
@@ -154,8 +155,8 @@ comptime {
 
     // Every key that reports itself as a modifier must be in the table with
     // modifier=true, or it would encode as a plain key.
-    for (@typeInfo(key.Key).@"enum".fields) |field| {
-        const k: key.Key = @enumFromInt(field.value);
+    for (meta_compat.enumFields(key.Key)) |field| {
+        const k: key.Key = @fromBackingInt(@intCast(field.value));
         if (!k.modifier()) continue;
 
         var found = false;

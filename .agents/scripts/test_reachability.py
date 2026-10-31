@@ -133,13 +133,8 @@ NOT_ROOTED = {
         "src/lib/allocator.zig names it with a plain pub const",
     "src/os/desktop.zig":
         "absent from src/os/main.zig's test block",
-    "src/os/passwd.zig":
-        "absent from src/os/main.zig's test block",
     "src/renderer/directx12/inspector_surface.zig":
         "apprt/embedded.zig names it with a plain const",
-    "src/termio/wsl_shell_integration.zig":
-        "src/termio.zig's test block roots shell_integration.zig and not "
-        "this one, and Exec.zig only calls into it",
 }
 
 # The stock zig test runner has no --list flag, but it speaks std.zig.Server

@@ -279,6 +279,8 @@ pub const Cursor = struct {
 };
 
 pub const Options = struct {
+    /// The size of the terminal grid in cells. Both must be at least 1,
+    /// otherwise `init` returns `error.InvalidValue`.
     cols: size.CellCountInt,
     rows: size.CellCountInt,
 
@@ -325,7 +327,20 @@ pub const Options = struct {
         void = if (build_options.kitty_graphics) .direct else {},
 };
 
-/// Initialize a new terminal.
+/// Initialize a new terminal with the given options.
+///
+/// The returned terminal owns its memory. Call `deinit` with the same
+/// allocator when you are done with it.
+///
+/// ```zig
+/// var t: Terminal = try .init(io, alloc, .{ .cols = 80, .rows = 24 });
+/// defer t.deinit(alloc);
+/// ```
+///
+/// Returns `error.InvalidValue` if `cols` or `rows` is zero. This check
+/// happens before anything is allocated. If the size comes from an
+/// untrusted source, you can rely on this check instead of validating
+/// it yourself.
 pub fn init(
     io_impl: std.Io,
     alloc: Allocator,
@@ -333,6 +348,10 @@ pub fn init(
 ) !Terminal {
     const cols = opts.cols;
     const rows = opts.rows;
+
+    // The screens and scrolling region need at least one row and column.
+    // Check this before allocating so there is nothing to clean up.
+    if (cols == 0 or rows == 0) return error.InvalidValue;
 
     var screen_set: ScreenSet = try .init(io_impl, alloc, .{
         .cols = cols,
@@ -510,6 +529,10 @@ pub fn setScrollbackMaxBytes(self: *Terminal, max: ?usize) void {
     primary.pages.setMaxBytes(max);
     primary.no_scrollback = max == 0;
 
+    // Lowering the limit can drop old history, along with any
+    // placements attached to it.
+    if (comptime build_options.kitty_graphics) primary.kitty_images.markDirty();
+
     if (primary.no_scrollback) primary.eraseHistory(null);
 }
 
@@ -520,6 +543,10 @@ pub fn setScrollbackMaxBytes(self: *Terminal, max: ?usize) void {
 pub fn setScrollbackMaxLines(self: *Terminal, max: ?usize) void {
     const primary = self.screens.get(.primary).?;
     primary.pages.setMaxLines(max);
+
+    // Lowering the limit can drop old history, along with any
+    // placements attached to it.
+    if (comptime build_options.kitty_graphics) primary.kitty_images.markDirty();
 }
 
 /// Print UTF-8 encoded string to the terminal.
@@ -924,7 +951,7 @@ fn printSliceFill(
                     const v: V = cps[idx..][0..lanes].*;
                     const in_range = (v >= lo) & (v <= hi);
                     if (!@reduce(.And, in_range)) {
-                        const bits: std.meta.Int(.unsigned, lanes) = @bitCast(in_range);
+                        const bits: @Int(.unsigned, lanes) = @bitCast(in_range);
                         idx += @ctz(~bits);
                         break;
                     }
@@ -2416,7 +2443,7 @@ pub fn index(self: *Terminal) !void {
     {
         if (comptime build_options.kitty_graphics) {
             // Scrolling dirties the images because it updates their placements pins.
-            screen.kitty_images.dirty = true;
+            screen.kitty_images.markDirty();
         }
 
         // If our scrolling region is at the top, we create scrollback,
@@ -2797,7 +2824,7 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
     {
         // Scrolling dirties the images because it updates their placements pins.
         if (comptime build_options.kitty_graphics) {
-            self.screens.active.kitty_images.dirty = true;
+            self.screens.active.kitty_images.markDirty();
         }
 
         // Clamp count to the scroll region height.
@@ -3053,7 +3080,7 @@ pub fn insertLines(self: *Terminal, count: usize) void {
 
     if (comptime build_options.kitty_graphics) {
         // Scrolling dirties the images because it updates their placements pins.
-        self.screens.active.kitty_images.dirty = true;
+        self.screens.active.kitty_images.markDirty();
     }
 
     // At the end we need to return the cursor to the row it started on.
@@ -3227,7 +3254,7 @@ pub fn deleteLines(self: *Terminal, count: usize) void {
 
     if (comptime build_options.kitty_graphics) {
         // Scrolling dirties the images because it updates their placements pins.
-        self.screens.active.kitty_images.dirty = true;
+        self.screens.active.kitty_images.markDirty();
     }
 
     // At the end we need to return the cursor to the row it started on.
@@ -3523,6 +3550,98 @@ pub fn deleteChars(self: *Terminal, count_req: usize) void {
 
     // Our row is always dirty
     self.screens.active.cursorMarkDirty();
+}
+
+/// DECIC - Insert Column. Inserts count blank columns at the cursor
+/// column in every row of the scrolling region, moving existing cell
+/// contents to the right. The contents of the count right-most columns
+/// in the scroll region are lost. The cursor position is not changed.
+///
+/// This does nothing if the cursor is outside the scrolling region.
+pub fn insertColumns(self: *Terminal, count: usize) void {
+    if (!self.cursorInScrollingRegion()) return;
+
+    const old_x = self.screens.active.cursor.x;
+    const old_y = self.screens.active.cursor.y;
+    defer self.screens.active.cursorAbsolute(old_x, old_y);
+
+    var y = self.scrolling_region.top;
+    while (y <= self.scrolling_region.bottom) : (y += 1) {
+        self.screens.active.cursorAbsolute(old_x, y);
+        self.insertBlanks(count);
+    }
+}
+
+/// DECDC - Delete Column. Deletes count columns starting at the cursor
+/// column in every row of the scrolling region, moving the remaining
+/// cell contents to the left and filling from the right margin with
+/// blanks. The cursor position is not changed.
+///
+/// This does nothing if the cursor is outside the scrolling region.
+pub fn deleteColumns(self: *Terminal, count: usize) void {
+    if (!self.cursorInScrollingRegion()) return;
+
+    const old_x = self.screens.active.cursor.x;
+    const old_y = self.screens.active.cursor.y;
+    defer self.screens.active.cursorAbsolute(old_x, old_y);
+
+    var y = self.scrolling_region.top;
+    while (y <= self.scrolling_region.bottom) : (y += 1) {
+        self.screens.active.cursorAbsolute(old_x, y);
+        self.deleteChars(count);
+    }
+}
+
+/// DECBI - Back Index. If the cursor is on the left margin, the contents
+/// of the scrolling region are shifted one column right and a blank
+/// column is inserted at the left margin. Otherwise the cursor moves one
+/// column left, unless it is already at the left edge of the screen.
+///
+/// This unsets the pending wrap state without wrapping.
+pub fn backIndex(self: *Terminal) void {
+    self.screens.active.cursor.pending_wrap = false;
+
+    if (self.screens.active.cursor.x == self.scrolling_region.left) {
+        self.insertColumns(1);
+        return;
+    }
+
+    if (self.screens.active.cursor.x > 0) self.screens.active.cursorLeft(1);
+}
+
+/// DECFI - Forward Index. If the cursor is on the right margin, the
+/// contents of the scrolling region are shifted one column left, losing
+/// the column at the left margin, and a blank column is inserted at the
+/// right margin. Otherwise the cursor
+/// moves one column right, unless it is already at the right edge of
+/// the screen.
+///
+/// This unsets the pending wrap state without wrapping.
+pub fn forwardIndex(self: *Terminal) void {
+    self.screens.active.cursor.pending_wrap = false;
+
+    if (self.screens.active.cursor.x == self.scrolling_region.right) {
+        // Scrolling the region left means deleting its left-most column,
+        // not the one under the cursor.
+        const old_x = self.screens.active.cursor.x;
+        const old_y = self.screens.active.cursor.y;
+        defer self.screens.active.cursorAbsolute(old_x, old_y);
+        self.screens.active.cursorAbsolute(self.scrolling_region.left, old_y);
+        self.deleteColumns(1);
+        return;
+    }
+
+    if (self.screens.active.cursor.x < self.cols - 1) self.screens.active.cursorRight(1);
+}
+
+/// Returns true if the cursor is inside the scrolling region, including
+/// the left and right margins.
+fn cursorInScrollingRegion(self: *const Terminal) bool {
+    const cursor = &self.screens.active.cursor;
+    return cursor.x >= self.scrolling_region.left and
+        cursor.x <= self.scrolling_region.right and
+        cursor.y >= self.scrolling_region.top and
+        cursor.y <= self.scrolling_region.bottom;
 }
 
 pub fn eraseChars(self: *Terminal, count_req: usize) void {
@@ -4001,7 +4120,7 @@ pub fn printAttributes(self: *Terminal, buf: []u8) ![]const u8 {
         // Preserve underline styles. Kind of a hack to special case 4
         // here but its easier than changing how we do all attributes.
         if (attr == 4 and pen.flags.underline != .single) {
-            try writer.print(";4:{}", .{@intFromEnum(pen.flags.underline)});
+            try writer.print(";4:{}", .{@backingInt(pen.flags.underline)});
             continue;
         }
 
@@ -4548,6 +4667,20 @@ test "Terminal: resize rejects zero dimensions before mutation" {
     try testing.expect(!t.flags.dirty.clear);
 }
 
+test "Terminal: init rejects zero dimensions" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+
+    try testing.expectError(error.InvalidValue, init(io_impl, alloc, .{
+        .cols = 0,
+        .rows = 5,
+    }));
+    try testing.expectError(error.InvalidValue, init(io_impl, alloc, .{
+        .cols = 10,
+        .rows = 0,
+    }));
+}
+
 test "Terminal: resize preserves pixel dimensions when omitted" {
     const alloc = testing.allocator;
     const io_impl = testing.io;
@@ -4833,6 +4966,9 @@ test "Terminal: setPwd preserves a sentinel on allocation failure" {
 
     try t.pwd.ensureTotalCapacityPrecise(alloc, 3);
     failing.fail_index = failing.alloc_index;
+    // ArrayList growth remaps in place, which bypasses fail_index, so arm
+    // the resize failure index too.
+    failing.resize_fail_index = failing.resize_index;
     try testing.expectError(error.OutOfMemory, t.setPwd("pwd"));
     try testing.expect(t.getPwd() == null);
 }
@@ -4878,6 +5014,9 @@ test "Terminal: setTitle preserves a sentinel on allocation failure" {
 
     try t.title.ensureTotalCapacityPrecise(alloc, 5);
     failing.fail_index = failing.alloc_index;
+    // ArrayList growth remaps in place, which bypasses fail_index, so arm
+    // the resize failure index too.
+    failing.resize_fail_index = failing.resize_index;
     try testing.expectError(error.OutOfMemory, t.setTitle("title"));
     try testing.expect(t.getTitle() == null);
 }
@@ -4953,10 +5092,17 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
     new.clearSelection();
 
     if (comptime build_options.kitty_graphics) {
-        // Mark kitty images as dirty so they redraw. Without this set
-        // the images will remain where they were (the dirty bit on
-        // the screen only tracks the terminal grid, not the images).
-        new.kitty_images.dirty = true;
+        // Mark kitty images as dirty so they redraw. Without this the
+        // images would stay where they were, because the screen's own
+        // dirty flags only cover the terminal grid.
+        //
+        // Each screen has its own counter. A consumer that last read the
+        // old screen will compare that value against this screen's, so
+        // the two must differ. Moving past both counters guarantees it.
+        new.kitty_images.dirty = @max(
+            new.kitty_images.dirty,
+            old.kitty_images.dirty,
+        ) +% 1;
     }
 
     // Mark our terminal as dirty to redraw the grid.
@@ -8967,7 +9113,7 @@ test "Terminal: insertLines hyperlink-dense row crosses page boundary" {
     t.setCursorPos(3, 1);
     for (0..10) |i| {
         var buf: [64]u8 = undefined;
-        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{i});
+        const uri = try std.mem.print(&buf, "http://example.com/{d}", .{i});
         try t.screens.active.startHyperlink(uri, null);
         try t.print(@intCast('A' + i));
         t.screens.active.endHyperlink();
@@ -9008,7 +9154,7 @@ test "Terminal: insertLines hyperlink-dense row crosses page boundary" {
         const id = page.lookupHyperlink(list_cell.cell).?;
         const link = page.hyperlink_set.get(page.memory, id);
         var buf: [64]u8 = undefined;
-        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+        const uri = try std.mem.print(&buf, "http://example.com/{d}", .{x});
         try testing.expectEqualStrings(uri, link.uri.slice(page.memory));
     }
 
@@ -12075,7 +12221,7 @@ test "Terminal: deleteLines hyperlink-dense row crosses page boundary" {
     t.setCursorPos(4, 1);
     for (0..10) |i| {
         var buf: [64]u8 = undefined;
-        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{i});
+        const uri = try std.mem.print(&buf, "http://example.com/{d}", .{i});
         try t.screens.active.startHyperlink(uri, null);
         try t.print(@intCast('A' + i));
         t.screens.active.endHyperlink();
@@ -12116,7 +12262,7 @@ test "Terminal: deleteLines hyperlink-dense row crosses page boundary" {
         const id = page.lookupHyperlink(list_cell.cell).?;
         const link = page.hyperlink_set.get(page.memory, id);
         var buf: [64]u8 = undefined;
-        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+        const uri = try std.mem.print(&buf, "http://example.com/{d}", .{x});
         try testing.expectEqualStrings(uri, link.uri.slice(page.memory));
     }
 
@@ -14034,6 +14180,211 @@ test "Terminal: deleteChars wide char across right margin" {
         const str = try t.plainString(alloc);
         defer testing.allocator.free(str);
         try testing.expectEqualStrings("13456", str);
+    }
+}
+
+test "Terminal: insertColumns" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 3, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG\nzyxwvut");
+    t.setCursorPos(2, 2);
+    t.insertColumns(2);
+
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.y);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("a  bcdef\nA  BCDEF\nz  yxwvu", str);
+    }
+}
+
+test "Terminal: insertColumns with margins" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 4, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG\nzyxwvut\nZYXWVUT");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(2, 5);
+    t.setTopAndBottomMargin(2, 3);
+    t.setCursorPos(2, 3);
+    t.insertColumns(1);
+
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("abcdefg\nAB CDFG\nzy xwut\nZYXWVUT", str);
+    }
+}
+
+test "Terminal: insertColumns outside scrolling region" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 4, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(2, 5);
+    t.setCursorPos(1, 1);
+    t.insertColumns(10);
+    t.setTopAndBottomMargin(3, 4);
+    t.setCursorPos(1, 3);
+    t.insertColumns(10);
+
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("abcdefg\nABCDEFG", str);
+    }
+}
+
+test "Terminal: deleteColumns" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 3, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG\nzyxwvut");
+    t.setCursorPos(2, 2);
+    t.deleteColumns(2);
+
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.y);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("adefg\nADEFG\nzwvut", str);
+    }
+}
+
+test "Terminal: deleteColumns with margins" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 4, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcdefg\nABCDEFG\nzyxwvut\nZYXWVUT");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(2, 5);
+    t.setTopAndBottomMargin(2, 3);
+    t.setCursorPos(2, 3);
+    t.deleteColumns(99);
+
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("abcdefg\nAB   FG\nzy   ut\nZYXWVUT", str);
+    }
+}
+
+test "Terminal: backIndex moves cursor left" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 3, .cols = 8 });
+    defer t.deinit(alloc);
+
+    t.setCursorPos(2, 5);
+    t.backIndex();
+    try testing.expectEqual(@as(usize, 3), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.y);
+
+    // Left of the left margin it still moves, but stops at the screen edge.
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(3, 5);
+    t.setCursorPos(1, 2);
+    t.backIndex();
+    try testing.expectEqual(@as(usize, 0), t.screens.active.cursor.x);
+    t.backIndex();
+    try testing.expectEqual(@as(usize, 0), t.screens.active.cursor.x);
+}
+
+test "Terminal: backIndex scrolls at left margin" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 5, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString(" abcde\n fghij\n klmno\n pqrst\n uvwxy");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(3, 5);
+    t.setTopAndBottomMargin(2, 4);
+    t.setCursorPos(3, 3);
+    t.backIndex();
+
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.y);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings(" abcde\n f ghj\n k lmo\n p qrt\n uvwxy", str);
+    }
+}
+
+test "Terminal: forwardIndex moves cursor right" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 3, .cols = 8 });
+    defer t.deinit(alloc);
+
+    t.setCursorPos(2, 5);
+    t.forwardIndex();
+    try testing.expectEqual(@as(usize, 5), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 1), t.screens.active.cursor.y);
+
+    // Right of the right margin it still moves, but stops at the screen edge.
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(3, 5);
+    t.setCursorPos(1, 7);
+    t.forwardIndex();
+    try testing.expectEqual(@as(usize, 7), t.screens.active.cursor.x);
+    t.forwardIndex();
+    try testing.expectEqual(@as(usize, 7), t.screens.active.cursor.x);
+}
+
+test "Terminal: forwardIndex scrolls at right margin" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 5, .cols = 8 });
+    defer t.deinit(alloc);
+
+    try t.printString(" abcde\n fghij\n klmno\n pqrst\n uvwxy");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setLeftAndRightMargin(3, 5);
+    t.setTopAndBottomMargin(2, 4);
+    t.setCursorPos(3, 5);
+    t.forwardIndex();
+
+    try testing.expectEqual(@as(usize, 4), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(usize, 2), t.screens.active.cursor.y);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings(" abcde\n fhi j\n kmn o\n prs t\n uvwxy", str);
+    }
+}
+
+test "Terminal: forwardIndex scrolls whole screen at right edge" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 2, .cols = 4 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcd");
+    try testing.expect(t.screens.active.cursor.pending_wrap);
+    t.forwardIndex();
+
+    try testing.expect(!t.screens.active.cursor.pending_wrap);
+    try testing.expectEqual(@as(usize, 3), t.screens.active.cursor.x);
+    {
+        const str = try t.plainString(alloc);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("bcd", str);
     }
 }
 
@@ -16404,6 +16755,61 @@ test "Terminal: fullReset preserves kitty graphics limits" {
             .disabled => return error.TestUnexpectedResult,
         }
     }
+}
+
+test "Terminal: kitty dirty changes on scrollback erase and limits" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var t = try init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    const storage = &t.screens.get(.primary).?.kitty_images;
+
+    var dirty = storage.dirty;
+    t.eraseDisplay(.scrollback, false);
+    try testing.expect(storage.dirty != dirty);
+
+    dirty = storage.dirty;
+    t.setScrollbackMaxLines(100);
+    try testing.expect(storage.dirty != dirty);
+
+    dirty = storage.dirty;
+    t.setScrollbackMaxBytes(0);
+    try testing.expect(storage.dirty != dirty);
+}
+
+test "Terminal: kitty dirty differs across screen switch" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var t = try init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    // Advance the primary counter past the fresh alternate screen's
+    // value so a naive bump on switch would collide with it.
+    const primary = &t.screens.get(.primary).?.kitty_images;
+    primary.markDirty();
+    primary.markDirty();
+    const primary_dirty = primary.dirty;
+
+    _ = try t.switchScreen(.alternate);
+    const alt = &t.screens.active.kitty_images;
+    try testing.expect(alt.dirty != primary_dirty);
+    const alt_dirty = alt.dirty;
+
+    _ = try t.switchScreen(.primary);
+    try testing.expect(primary.dirty != primary_dirty);
+    try testing.expect(primary.dirty != alt_dirty);
+}
+
+test "Terminal: fullReset changes kitty dirty" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var t = try init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    const dirty = t.screens.active.kitty_images.dirty;
+    t.fullReset();
+    try testing.expect(t.screens.active.kitty_images.dirty != dirty);
 }
 
 // https://github.com/mitchellh/ghostty/issues/1607

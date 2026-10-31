@@ -9,7 +9,7 @@ const gresource = @import("../build/gresource.zig");
 
 const Common = @import("../class.zig").Common;
 const Surface = @import("surface.zig").Surface;
-const DebugWarning = @import("debug_warning.zig").DebugWarning;
+const DebugWarning = @import("debug_warning.zig").debugWarning;
 const InspectorWidget = @import("inspector_widget.zig").InspectorWidget;
 const WeakRef = @import("../weak_ref.zig").WeakRef;
 

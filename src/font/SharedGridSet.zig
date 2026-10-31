@@ -190,15 +190,15 @@ fn collection(
         // A buffer we use to store the font names for logging.
         var name_buf: [256]u8 = undefined;
 
-        inline for (@typeInfo(Style).@"enum".fields) |field| {
-            const style = @field(Style, field.name);
+        inline for (@typeInfo(Style).@"enum".field_names) |field| {
+            const style = @field(Style, field);
             for (key.descriptorsForStyle(style)) |desc| {
                 {
                     var disco_it = try disco.discover(self.alloc, desc);
                     defer disco_it.deinit();
                     if (try disco_it.next()) |face| {
                         log.info("font {s}: {s}", .{
-                            field.name,
+                            field,
                             try face.name(&name_buf),
                         });
 
@@ -229,7 +229,7 @@ fn collection(
                     defer disco_it.deinit();
                     if (try disco_it.next()) |face| {
                         log.info("font {s}: {s}", .{
-                            field.name,
+                            field,
                             try face.name(&name_buf),
                         });
 
@@ -245,7 +245,7 @@ fn collection(
                 }
 
                 log.warn("font-family {s} not found: {s}", .{
-                    field.name,
+                    field,
                     desc.family.?,
                 });
             }
@@ -641,8 +641,8 @@ pub const Key = struct {
 
     /// These are the offsets into the descriptors array for
     /// each style. For example, bold is from
-    /// offsets[@intFromEnum(.bold) - 1] to
-    /// offsets[@intFromEnum(.bold)].
+    /// offsets[@backingInt(.bold) - 1] to
+    /// offsets[@backingInt(.bold)].
     style_offsets: StyleOffsets = @splat(0),
 
     /// The codepoint map configuration.
@@ -666,10 +666,10 @@ pub const Key = struct {
     comptime {
         // We assume this throughout this structure. If this changes
         // we may need to change this structure.
-        assert(@intFromEnum(Style.regular) == 0);
-        assert(@intFromEnum(Style.bold) == 1);
-        assert(@intFromEnum(Style.italic) == 2);
-        assert(@intFromEnum(Style.bold_italic) == 3);
+        assert(@backingInt(Style.regular) == 0);
+        assert(@backingInt(Style.bold) == 1);
+        assert(@backingInt(Style.italic) == 2);
+        assert(@backingInt(Style.bold_italic) == 3);
     }
 
     pub fn init(
@@ -800,7 +800,7 @@ pub const Key = struct {
         self: Key,
         style: Style,
     ) []const discovery.Descriptor {
-        const idx = @intFromEnum(style);
+        const idx = @backingInt(style);
         const start: usize = if (idx == 0) 0 else self.style_offsets[idx - 1];
         const end = self.style_offsets[idx];
         return self.descriptors[start..end];
@@ -818,8 +818,8 @@ pub const Key = struct {
         autoHash(hasher, self.metric_modifiers.count());
         autoHash(hasher, self.freetype_load_flags);
         if (self.metric_modifiers.count() > 0) {
-            inline for (@typeInfo(Metrics.Key).@"enum".fields) |field| {
-                const key = @field(Metrics.Key, field.name);
+            inline for (@typeInfo(Metrics.Key).@"enum".field_names) |field| {
+                const key = @field(Metrics.Key, field);
                 if (self.metric_modifiers.get(key)) |value| {
                     autoHash(hasher, key);
                     value.hash(hasher);

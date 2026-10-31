@@ -205,11 +205,11 @@ test "Frame init error set includes expected errors" {
     // Compile-time check that init can return the documented error variants.
     const fn_info = @typeInfo(@TypeOf(Frame.init)).@"fn";
     const Errors = @typeInfo(fn_info.return_type.?).error_union.error_set;
-    const err_fields = @typeInfo(Errors).error_set.?;
+    const err_names = @typeInfo(Errors).error_set.error_names orelse &.{};
     inline for (.{ "CommandAllocatorCreationFailed", "CommandListCreationFailed", "CommandListCloseFailed" }) |name| {
         comptime var found = false;
-        inline for (err_fields) |e| {
-            if (comptime std.mem.eql(u8, e.name, name)) found = true;
+        inline for (err_names) |err_name| {
+            if (comptime std.mem.eql(u8, err_name, name)) found = true;
         }
         try std.testing.expect(found);
     }
@@ -218,11 +218,11 @@ test "Frame init error set includes expected errors" {
 test "Frame reset error set includes expected errors" {
     const fn_info = @typeInfo(@TypeOf(Frame.reset)).@"fn";
     const Errors = @typeInfo(fn_info.return_type.?).error_union.error_set;
-    const err_fields = @typeInfo(Errors).error_set.?;
+    const err_names = @typeInfo(Errors).error_set.error_names orelse &.{};
     inline for (.{ "FrameNotInitialized", "CommandAllocatorResetFailed", "CommandListResetFailed" }) |name| {
         comptime var found = false;
-        inline for (err_fields) |e| {
-            if (comptime std.mem.eql(u8, e.name, name)) found = true;
+        inline for (err_names) |err_name| {
+            if (comptime std.mem.eql(u8, err_name, name)) found = true;
         }
         try std.testing.expect(found);
     }

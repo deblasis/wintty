@@ -80,7 +80,7 @@ pub const FreshError = Allocator.Error || error{LogonEnvironmentUnavailable};
 /// The environment a fresh logon composes for the current user, read now.
 /// Windows only.
 pub fn freshLogonMap(alloc: Allocator) FreshError!EnvMap {
-    if (comptime builtin.os.tag != .windows) return error.LogonEnvironmentUnavailable;
+    if (comptime builtin.target.os.tag != .windows) return error.LogonEnvironmentUnavailable;
 
     const create = userenv.createEnvironmentBlock() orelse
         return error.LogonEnvironmentUnavailable;
@@ -295,7 +295,7 @@ test "isTestLever" {
 }
 
 test "freshLogonMap reads a real logon block" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     // A variable only this process holds. bInherit FALSE means a logon block
     // never carries it; with TRUE (this process's block layered on, so a
     // launcher's `FOO=1` reaches every terminal) SystemRoot and PATH would

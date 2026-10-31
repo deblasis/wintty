@@ -253,7 +253,7 @@ pub const Tab = extern struct {
         const priv = self.private();
         if (priv.title_override) |v| glib.free(@ptrCast(@constCast(v)));
         priv.title_override = null;
-        if (title) |v| priv.title_override = glib.ext.dupeZ(u8, v);
+        if (title) |v| priv.title_override = glib.ext.dupeSentinel(u8, v, 0);
         self.as(gobject.Object).notifyByPspec(properties.@"title-override".impl.param_spec);
     }
     fn titleDialogSet(
@@ -510,7 +510,7 @@ pub const Tab = extern struct {
         // in every case for something so unlikely.
         const config = if (config_) |v| v.get() else {
             log.warn("config unavailable for computed title, likely bug", .{});
-            return glib.ext.dupeZ(u8, plain);
+            return glib.ext.dupeSentinel(u8, plain, 0);
         };
 
         // Use an allocator to build up our string as we write it.
@@ -527,8 +527,8 @@ pub const Tab = extern struct {
             buf.writer.writeAll("🔍 ") catch {};
         }
 
-        buf.writer.writeAll(plain) catch return glib.ext.dupeZ(u8, plain);
-        return glib.ext.dupeZ(u8, buf.written());
+        buf.writer.writeAll(plain) catch return glib.ext.dupeSentinel(u8, plain, 0);
+        return glib.ext.dupeSentinel(u8, buf.written(), 0);
     }
 
     const C = Common(Self, Private);

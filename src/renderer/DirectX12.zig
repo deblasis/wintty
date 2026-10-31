@@ -361,7 +361,7 @@ pub fn init(
     _ = app_device;
     var result = DirectX12{ .allocator = alloc, .init_started = opts.init_started };
 
-    if (comptime builtin.os.tag != .windows) {
+    if (comptime builtin.target.os.tag != .windows) {
         return result;
     }
 
@@ -854,7 +854,8 @@ pub fn recoverDevice(self: *DirectX12) !void {
 ///
 /// Used by the generic renderer before it destroys state the retirement
 /// queue does not cover -- PSOs and root signatures on a shader reinit,
-/// and every frame's resources at teardown.
+/// and every frame's resources at teardown -- and by the deep-idle trim,
+/// to release retired image textures immediately.
 pub fn waitGpu(self: *DirectX12) void {
     if (self.dev) |*dev_ptr| {
         // A removed device cannot signal and is not executing anything;
@@ -1031,7 +1032,7 @@ pub fn drawFrameEnd(self: *DirectX12) void {
 /// a shared texture (ghostty_surface_shared_texture) and has no
 /// presented frame to copy.
 pub fn snapshotLastFrame(self: *DirectX12) !device.Device.LastFrameSnapshot {
-    if (comptime builtin.os.tag != .windows) return error.NotWindows;
+    if (comptime builtin.target.os.tag != .windows) return error.NotWindows;
     if (self.swap_chain3 == null) return error.NoSwapChain;
     const dev_ptr = &(self.dev orelse return error.NoDevice);
     const src = self.back_buffers[self.pending_frame_index] orelse

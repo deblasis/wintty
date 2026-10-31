@@ -173,7 +173,7 @@ pub const PinMap = struct {
             alloc: Allocator,
             node: Node,
         ) Allocator.Error!void {
-            if (self.nodes.getLastOrNull()) |last| {
+            if (self.nodes.last()) |last| {
                 if (last.node == node) return;
             }
 
@@ -411,13 +411,13 @@ pub const TerminalFormatter = struct {
         // simplicity we just emit them all before. If we make this more complex
         // later we should add test cases for it.
         if (self.opts.emit == .vt and self.extra.modes) {
-            inline for (@typeInfo(modespkg.Mode).@"enum".fields) |field| {
-                const mode: modespkg.Mode = @enumFromInt(field.value);
+            inline for (@typeInfo(modespkg.Mode).@"enum".field_names, @typeInfo(modespkg.Mode).@"enum".field_values) |field, field_value| {
+                const mode: modespkg.Mode = @fromBackingInt(field_value);
                 const current = self.terminal.modes.get(mode);
-                const default_val = @field(self.terminal.modes.default, field.name);
+                const default_val = @field(self.terminal.modes.default, field);
 
                 if (current != default_val) {
-                    const tag: modespkg.ModeTag = @bitCast(@intFromEnum(mode));
+                    const tag: modespkg.ModeTag = @bitCast(@backingInt(mode));
                     const prefix = if (tag.ansi) "" else "?";
                     const suffix = if (current) "h" else "l";
                     try writer.print("\x1b[{s}{d}{s}", .{ prefix, tag.value, suffix });
@@ -564,6 +564,17 @@ pub const TerminalFormatter = struct {
             };
         }
 
+        // A wrap is pending at the right margin when the cursor is within
+        // the left and right margins, which the modes (DECLRMM) and the
+        // scrolling region above restore before the cursor is.
+        if (self.opts.emit == .vt and
+            self.extra.modes and
+            self.extra.scrolling_region and
+            self.terminal.screens.active.cursor.x <= self.terminal.scrolling_region.right)
+        {
+            screen_formatter.wrap_column = self.terminal.scrolling_region.right;
+        }
+
         try screen_formatter.format(writer);
     }
 };
@@ -599,6 +610,13 @@ pub const ScreenFormatter = struct {
     /// top-left of the screen unless the output is replayed in origin mode
     /// (DECOM), where CUP counts from the top-left of the scrolling region.
     cursor_origin: CursorOrigin = .{},
+
+    /// The column where a pending wrap is restored by printing the cell
+    /// under the cursor again. This is the last column of the screen
+    /// unless the output is replayed with left and right margins (DECSLRM)
+    /// that the cursor is within, where a wrap is pending at the right
+    /// margin instead. Null means the last column.
+    wrap_column: ?size.CellCountInt = null,
 
     pub const Content = union(enum) {
         /// Emit no content, only terminal state such as modes, palette, etc.
@@ -730,7 +748,8 @@ pub const ScreenFormatter = struct {
             const origin = self.cursor_origin;
 
             // If we don't have pending wrap, then we can just use CUP.
-            if (!cursor.pending_wrap or cursor.x != self.screen.pages.cols - 1) {
+            const wrap_column = self.wrap_column orelse self.screen.pages.cols - 1;
+            if (!cursor.pending_wrap or cursor.x != wrap_column) {
                 try writer.print("\x1b[{d};{d}H", .{
                     (cursor.y -| origin.y) + 1,
                     (cursor.x -| origin.x) + 1,
@@ -1658,7 +1677,7 @@ pub const PageFormatter = struct {
                                 sameBackground(cell, &cells_subset[cell_i + run])) run += 1;
 
                             var buf: [32]u8 = undefined;
-                            const seq = std.fmt.bufPrint(
+                            const seq = std.mem.print(
                                 &buf,
                                 "\x1b[{d}X\x1b[{d}C",
                                 .{ run, run },
@@ -1999,7 +2018,7 @@ pub const PageFormatter = struct {
         y: size.CellCountInt,
     ) std.Io.Writer.Error!void {
         var buf: [32]u8 = undefined;
-        const seq = std.fmt.bufPrint(&buf, "\x1b[{d}C", .{count}) catch unreachable;
+        const seq = std.mem.print(&buf, "\x1b[{d}C", .{count}) catch unreachable;
         try writer.writeAll(seq);
         if (self.point_map) |*map| map.map.appendNTimes(
             map.alloc,
@@ -6572,6 +6591,55 @@ test "Terminal vt with cursor in origin mode" {
             t.screens.active.cursor.pending_wrap,
             t2.screens.active.cursor.pending_wrap,
         );
+    }
+}
+
+test "Terminal vt cursor preserves pending wrap at the right margin" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    // Each stream sets left and right margins (which need mode 69) and
+    // leaves a pending wrap: at the right margin, at the right margin with
+    // a wide character, and at the last column with the cursor right of
+    // the margins.
+    const streams = [_][]const u8{
+        "\x1b[?69h\x1b[;2s00",
+        "\x1b[?69h\x1b[3;6s\x1b[1;5H\u{1F600}",
+        "\x1b[?69h\x1b[3;6s\x1b[1;20Hx",
+    };
+    for (streams) |stream| {
+        var builder: std.Io.Writer.Allocating = .init(alloc);
+        defer builder.deinit();
+
+        var t = try Terminal.init(io, alloc, .{ .cols = 20, .rows = 4 });
+        defer t.deinit(alloc);
+        var s = t.vtStream();
+        defer s.deinit();
+        s.nextSlice(stream);
+        try testing.expect(t.screens.active.cursor.pending_wrap);
+
+        var formatter: TerminalFormatter = .init(&t, .vt);
+        formatter.extra = .all;
+        try formatter.format(&builder.writer);
+
+        var t2 = try Terminal.init(io, alloc, .{ .cols = 20, .rows = 4 });
+        defer t2.deinit(alloc);
+        var s2 = t2.vtStream();
+        defer s2.deinit();
+        s2.nextSlice(builder.writer.buffered());
+
+        try testing.expectEqual(t.screens.active.cursor.x, t2.screens.active.cursor.x);
+        try testing.expectEqual(t.screens.active.cursor.y, t2.screens.active.cursor.y);
+        try testing.expect(t2.screens.active.cursor.pending_wrap);
+
+        s.nextSlice("X");
+        s2.nextSlice("X");
+        const contents = try t.screens.active.dumpStringAlloc(alloc, .{ .screen = .{} });
+        defer alloc.free(contents);
+        const contents2 = try t2.screens.active.dumpStringAlloc(alloc, .{ .screen = .{} });
+        defer alloc.free(contents2);
+        try testing.expectEqualStrings(contents, contents2);
     }
 }
 
