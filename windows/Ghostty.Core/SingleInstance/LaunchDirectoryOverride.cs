@@ -16,25 +16,37 @@ namespace Ghostty.Core.SingleInstance;
 /// secondary), so it reads the flag out of the argv the request already
 /// carries and applies it to the pane it opens for that launch.
 ///
-/// The dialect mirrors the CLI the cold start runs, cell for cell:
-/// <see cref="Ghostty.Core.Session.SpawnCwdPolicy"/> permitting, values are
-/// trimmed of ASCII whitespace the way <c>parseCLI</c> trims them, one
-/// surrounding pair of double quotes is stripped the way it strips them,
-/// a repeated flag applies its LAST value the way the config cascade applies
-/// argv in order, everything after the first <c>-e</c> is command payload and
-/// never a flag (mirroring <see cref="LaunchCommand"/>'s boundary), and
-/// <c>~</c> expands only before a forward slash, which is the one shape
-/// libghostty's Windows home expansion accepts. <c>home</c> reads
-/// <c>USERPROFILE</c>, then <c>HOMEDRIVE</c>+<c>HOMEPATH</c>, the same order
-/// the native side reads them. A relative value resolves against the
-/// directory the launch was started in — the CLI resolves relatives on the
-/// CLIENT, against the caller's cwd, before any receiver sees them, and the
-/// wire's working-directory field is exactly that base.
+/// The dialect mirrors the CLI the cold start runs in every cell that decides
+/// a directory: values are trimmed of ASCII whitespace the way
+/// <c>parseCLI</c> trims them, one surrounding pair of double quotes is
+/// stripped the way it strips them, a repeated flag applies its LAST value
+/// the way the config cascade applies argv in order, everything after the
+/// first <c>-e</c> is command payload and never a flag (mirroring
+/// <see cref="LaunchCommand"/>'s boundary), and <c>~</c> expands only before
+/// a forward slash, which is the one shape libghostty's Windows home
+/// expansion accepts. <c>home</c> reads <c>USERPROFILE</c>, then
+/// <c>HOMEDRIVE</c>+<c>HOMEPATH</c>, the same order the native side reads
+/// them. A relative value resolves against the directory the launch was
+/// started in — the wire's working-directory field is exactly that base —
+/// anchored by Win32 normalization rather than an existence-checked realpath:
+/// trailing dots fold and links keep their spelling, and the receiver's own
+/// directory check remains the arbiter of what exists.
 ///
-/// A value that does not pass the spawn policy is no override: a remote UNC
-/// directory names who would receive the user's credentials when the pane's
-/// shell is spawned there, and a launch flag is not exempt from the rule every
-/// other non-config cwd source passes.
+/// A resolved value is NOT passed through the spawn policy, because on the
+/// cold leg this flag is a CONFIG source and a user-configured directory is
+/// the class that policy exempts (its scope note says only reported values
+/// pass through it, and the native side documents a working directory naming
+/// a UNC share as legitimate). Gating the forwarded half alone would make
+/// the same flag work or silently fall back depending on whether a primary
+/// happened to be running. A uniform spawn-directory policy across every
+/// leg is a separate question.
+///
+/// Two cells deliberately diverge from the cold parser, both in the safe
+/// direction: an occurrence whose value trims or strips to empty contributes
+/// nothing here (the cold parser diagnoses it and leaves any earlier value
+/// standing, which this preserves for the trim-empty cell), and a value that
+/// cannot resolve against its base at all is no override rather than an
+/// error.
 ///
 /// Pure (no I/O beyond the profile path) so the model is unit-testable
 /// without a GUI.
@@ -73,13 +85,18 @@ public static class LaunchDirectoryOverride
             if (!arg.StartsWith(Prefix, StringComparison.Ordinal)) continue;
 
             var value = TrimAscii(arg[Prefix.Length..]);
-            if (value.Length == 0) continue;
 
             // parseCLI strips one surrounding pair of double quotes after
             // trimming; a value that kept them would fail the receiver's
-            // directory check and silently fall back.
+            // directory check and silently fall back. A value that is empty
+            // once stripped (a launcher quoting a possibly-empty variable, or
+            // only whitespace inside the quotes) contributes nothing:
+            // GetFullPath would otherwise fold it into the base and turn a
+            // no-op into the launch's own directory.
             if (value.Length >= 2 && value[0] == '"' && value[^1] == '"')
                 value = value[1..^1];
+
+            if (TrimAscii(value).Length == 0) continue;
 
             found = value;
         }
@@ -93,18 +110,16 @@ public static class LaunchDirectoryOverride
     /// them, <c>inherit</c> falls back to the directory the launch was
     /// started in, anything else is taken as given when anchored and resolved
     /// against <paramref name="inheritedDirectory"/> when not (the CLI
-    /// resolves relatives on the client, against the caller's cwd). A null
-    /// <paramref name="requested"/> is null: callers apply their inherited
-    /// rules, never a guess. A value the spawn policy refuses is null for the
-    /// same reason, except <c>inherit</c>, which only names what the wire
-    /// field already carries.
+    /// resolves relatives on the client, against the caller's cwd). A null or
+    /// empty <paramref name="requested"/> is null: callers apply their
+    /// inherited rules, never a guess.
     /// </summary>
     public static string? Resolve(string? requested, string inheritedDirectory)
     {
-        if (requested is null) return null;
+        if (string.IsNullOrEmpty(requested)) return null;
 
         if (string.Equals(requested, "home", StringComparison.Ordinal))
-            return PassesSpawnPolicy(HomeDirectory());
+            return HomeDirectory();
 
         if (string.Equals(requested, "inherit", StringComparison.Ordinal))
             return inheritedDirectory;
@@ -112,36 +127,22 @@ public static class LaunchDirectoryOverride
         // libghostty's Windows home expansion accepts `~/` only; `~\` is a
         // literal relative path there, and one dialect is what this is for.
         if (requested.StartsWith("~/", StringComparison.Ordinal))
-            return PassesSpawnPolicy(HomeDirectory() + "\\" + requested[2..]);
+            return HomeDirectory() + "\\" + requested[2..];
 
-        string resolved;
         if (Path.IsPathFullyQualified(requested))
-        {
-            resolved = requested;
-        }
-        else
-        {
-            try
-            {
-                resolved = Path.GetFullPath(requested, inheritedDirectory);
-            }
-            catch (Exception)
-            {
-                // A value that cannot resolve to a path is no override; the
-                // receiver would drop it with a warning anyway.
-                return null;
-            }
-        }
+            return requested;
 
-        return PassesSpawnPolicy(resolved);
+        try
+        {
+            return Path.GetFullPath(requested, inheritedDirectory);
+        }
+        catch (Exception)
+        {
+            // A value that cannot resolve to a path is no override; the
+            // receiver would drop it with a warning anyway.
+            return null;
+        }
     }
-
-    /// <summary>
-    /// The spawn policy's verdict, as an override value: refused means the
-    /// launch's inherited rules apply.
-    /// </summary>
-    private static string? PassesSpawnPolicy(string directory)
-        => Ghostty.Core.Session.SpawnCwdPolicy.MaySpawnAt(directory) ? directory : null;
 
     /// <summary>
     /// The user's home, read in the order the native side reads it:

@@ -70,6 +70,31 @@ public sealed class LaunchDirectoryOverrideTests
     }
 
     [Fact]
+    public void AnEarlierValueSurvivesATrailingEmptyOccurrence()
+    {
+        // The cold parser diagnoses the empty occurrence and leaves the
+        // earlier assignment standing; the diagnostics continue parsing, so
+        // both legs keep the first value.
+        var got = Ghostty.Core.SingleInstance.LaunchDirectoryOverride.FromArgs(
+            new[] { "wintty.exe", "--working-directory=C:\\a", "--working-directory=" });
+        Assert.Equal("C:\\a", got);
+    }
+
+    [Fact]
+    public void AValueEmptyAfterTheQuoteStripIsNoValue()
+    {
+        // A launcher quoting a possibly-empty variable emits these; an empty
+        // override resolved against its base would become the launch's own
+        // directory, moving the pane for a no-op.
+        Assert.Null(Ghostty.Core.SingleInstance.LaunchDirectoryOverride.FromArgs(
+            new[] { "wintty.exe", "--working-directory=\"\"" }));
+        Assert.Null(Ghostty.Core.SingleInstance.LaunchDirectoryOverride.FromArgs(
+            new[] { "wintty.exe", "--working-directory=\" \"" }));
+        Assert.Null(Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
+            "", "C:\\inherited"));
+    }
+
+    [Fact]
     public void AbsentFlagYieldsNull()
     {
         Assert.Null(Ghostty.Core.SingleInstance.LaunchDirectoryOverride.FromArgs(
@@ -180,17 +205,17 @@ public sealed class LaunchDirectoryOverrideTests
     }
 
     [Fact]
-    public void ARemoteUncNameIsRefused()
+    public void ARemoteUncNameIsTakenAsGiven()
     {
-        // The spawn policy: a remote UNC directory names who receives the
-        // user's credentials when a shell is spawned there, and a launch
-        // flag is not exempt.
-        Assert.Null(Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
-            "\\\\evil.example.com\\share", "C:\\inherited"));
-        Assert.Null(Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
-            "//evil.example.com/share", "C:\\inherited"));
-        Assert.Null(Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
-            "\\\\.\\C:", "C:\\inherited"));
+        // A working directory naming a UNC share is legitimate (the native
+        // side documents and tests it), and on the cold leg this flag is a
+        // config source — the class the spawn policy exempts. Gating only
+        // the forwarded half would make the same flag silently fall back
+        // depending on whether a primary was running; a uniform
+        // spawn-directory policy belongs to every leg or none.
+        var got = Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
+            "\\\\fileserver.example.com\\projects", "C:\\inherited");
+        Assert.Equal("\\\\fileserver.example.com\\projects", got);
     }
 
     [Fact]
