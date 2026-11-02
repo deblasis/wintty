@@ -14,6 +14,23 @@ pub fn ensureLocale() !void {
     // run in a test as a result.
     assert(!builtin.is_test);
 
+    if (builtin.os.tag == .windows) {
+        if (setlocale(LC_ALL, "")) |v| {
+            log.info("setlocale from env result={s}", .{v});
+        } else {
+            log.warn("setlocale from system defaults failed", .{});
+        }
+
+        // libghostty shares the UCRT locale with its WinUI host. TabView
+        // formats XAML path geometry using the CRT, but XAML requires a
+        // decimal point. A comma-decimal system locale otherwise makes
+        // constructing the first window throw XamlParseException. Keep
+        // the user's character and language settings, but use invariant
+        // numeric formatting before the host constructs any controls.
+        if (setlocale(c.LC_NUMERIC, "C") == null) return error.NumericLocaleFailed;
+        return;
+    }
+
     // On macOS, pre-populate the LANG env var with system preferences.
     // When launching the .app, LANG is not set so we must query it from the
     // OS. When launching from the CLI, LANG is usually set by the parent
@@ -29,20 +46,6 @@ pub fn ensureLocale() !void {
     // Set the locale to whatever is set in env vars.
     if (setlocale(LC_ALL, "")) |v| {
         log.info("setlocale from env result={s}", .{v});
-        return;
-    }
-
-    if (builtin.os.tag == .windows) {
-        // Exit early for Windows.
-        //
-        // NOTE: There currently is no official Windows version of Ghostty,
-        // either by way of an official Windows port or through use of
-        // libghostty-internal. As such this function is likely unused on those
-        // platforms, so this serves as a TODO stub to support more robust
-        // locale support on Windows. setlocale on Windows sets an
-        // "implementation-defined native environment" with an empty string, so
-        // we are currently just doing best-effort for now.
-        log.info("TODO: setlocale failed on Windows, implement better fallbacks", .{});
         return;
     }
 
