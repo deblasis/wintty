@@ -66,6 +66,7 @@ pub const getConfigEditCommand = edit.getConfigEditCommand;
 
 test {
     _ = file;
+    _ = locale;
     _ = windows_logon_env;
     _ = openpkg;
     _ = stderr;

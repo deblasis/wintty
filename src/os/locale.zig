@@ -13,6 +13,36 @@ pub fn ensureLocale() !void {
     // This does a lot of in-process mutation of the environment and can't be
     // run in a test as a result.
     assert(!builtin.is_test);
+    return ensureLocaleInner();
+}
+
+/// The body of `ensureLocale`, split out so the Windows numeric-locale
+/// contract can be tested. On Windows this only mutates the CRT locale,
+/// which a test can save and restore.
+fn ensureLocaleInner() !void {
+    if (builtin.os.tag == .windows) {
+        // libghostty is a library inside a WinUI host. In the shipped
+        // NativeAOT build it is linked statically, so its CRT calls resolve
+        // to the process UCRT that WinUI also uses; taking the locale from
+        // the system therefore changes WinUI's numeric formatting too. That
+        // gives the user's language and character settings, which the shell
+        // integrations want, but it also gives their decimal comma.
+        //
+        // WinUI formats its own XAML through that CRT. TabView's item
+        // template builds a Path geometry with StringCchPrintf("%f") and
+        // parses the result, so a comma makes the first window throw
+        // XamlParseException during the first window's layout pass. Keep the
+        // other categories and pin numeric formatting to the invariant
+        // locale; every number libghostty writes or parses is written that
+        // way.
+        if (setlocale(LC_ALL, "")) |v| {
+            log.info("setlocale from system result={s}", .{v});
+        } else {
+            log.warn("setlocale from system defaults failed", .{});
+        }
+        if (setlocale(LC_NUMERIC, "C") == null) return error.NumericLocaleFailed;
+        return;
+    }
 
     // On macOS, pre-populate the LANG env var with system preferences.
     // When launching the .app, LANG is not set so we must query it from the
@@ -29,20 +59,6 @@ pub fn ensureLocale() !void {
     // Set the locale to whatever is set in env vars.
     if (setlocale(LC_ALL, "")) |v| {
         log.info("setlocale from env result={s}", .{v});
-        return;
-    }
-
-    if (builtin.os.tag == .windows) {
-        // Exit early for Windows.
-        //
-        // NOTE: There currently is no official Windows version of Ghostty,
-        // either by way of an official Windows port or through use of
-        // libghostty-internal. As such this function is likely unused on those
-        // platforms, so this serves as a TODO stub to support more robust
-        // locale support on Windows. setlocale on Windows sets an
-        // "implementation-defined native environment" with an empty string, so
-        // we are currently just doing best-effort for now.
-        log.info("TODO: setlocale failed on Windows, implement better fallbacks", .{});
         return;
     }
 
@@ -220,8 +236,76 @@ fn preferredLanguageFromCocoa(
     return slice[0 .. slice.len - 1 :0];
 }
 
+/// Copy a `setlocale` result before the next call invalidates it. Returns
+/// null when the value does not fit the fixed buffer.
+fn copyLocaleString(ptr: [*:0]const u8, buf: *[128:0]u8) ?[:0]const u8 {
+    const value = std.mem.sliceTo(ptr, 0);
+    if (value.len >= buf.len) return null;
+    @memcpy(buf[0..value.len], value);
+    buf[value.len] = 0;
+    return buf[0..value.len :0];
+}
+
+test "windows pins LC_NUMERIC to the invariant locale" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // setlocale returns a pointer that the next call invalidates, so the
+    // saved value has to be copied before anything else runs.
+    const saved_ptr = setlocale(LC_ALL, null) orelse return error.SkipZigTest;
+    var saved_buf: [128:0]u8 = undefined;
+    const saved = copyLocaleString(saved_ptr, &saved_buf) orelse return error.SkipZigTest;
+    defer if (setlocale(LC_ALL, saved.ptr) == null)
+        @panic("failed to restore the process locale after the test");
+
+    // A machine whose system locale is already C cannot tell the defect from
+    // the fix, so skip instead of passing vacuously.
+    if (setlocale(LC_ALL, "")) |_| {
+        const numeric = setlocale(LC_NUMERIC, null) orelse return error.SkipZigTest;
+        if (std.mem.eql(u8, std.mem.sliceTo(numeric, 0), "C")) return error.SkipZigTest;
+    } else return error.SkipZigTest;
+
+    // The system values for the categories the fix must preserve.
+    var ctype_buf: [128:0]u8 = undefined;
+    var time_buf: [128:0]u8 = undefined;
+    const system_ctype = copyLocaleString(
+        setlocale(LC_CTYPE, null) orelse return error.TestUnexpectedResult,
+        &ctype_buf,
+    ) orelse return error.TestUnexpectedResult;
+    const system_time = copyLocaleString(
+        setlocale(LC_TIME, null) orelse return error.TestUnexpectedResult,
+        &time_buf,
+    ) orelse return error.TestUnexpectedResult;
+
+    // Start from C so a dropped system load is visible: the categories have
+    // to come back as the system values, not stay C. A refactor that pins
+    // with `setlocale(LC_ALL, "C")` fails the same way.
+    if (setlocale(LC_ALL, "C") == null) return error.TestUnexpectedResult;
+
+    try ensureLocaleInner();
+
+    const numeric = setlocale(LC_NUMERIC, null) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("C", std.mem.sliceTo(numeric, 0));
+    try std.testing.expectEqualStrings(
+        system_ctype,
+        std.mem.sliceTo(
+            setlocale(LC_CTYPE, null) orelse return error.TestUnexpectedResult,
+            0,
+        ),
+    );
+    try std.testing.expectEqualStrings(
+        system_time,
+        std.mem.sliceTo(
+            setlocale(LC_TIME, null) orelse return error.TestUnexpectedResult,
+            0,
+        ),
+    );
+}
+
 const c = @import("locale-c");
 const LC_ALL: c_int = c.LC_ALL;
+const LC_NUMERIC: c_int = c.LC_NUMERIC;
+const LC_CTYPE: c_int = c.LC_CTYPE;
+const LC_TIME: c_int = c.LC_TIME;
 const LC_ALL_MASK: c_int = c.LC_ALL_MASK;
 const locale_t = c.locale_t;
 const setlocale = c.setlocale;
