@@ -1568,6 +1568,17 @@ public partial class App : Application
             // existing priority in the arm above. With no profile named, the
             // pane follows the same rules a cold start's does (#1136).
 
+            // A --working-directory the secondary asked for on its own
+            // command line is an explicit choice a cold start honors through
+            // its config; the primary cannot borrow that config, so it reads
+            // the flag off the argv the request already carries. The wire's
+            // working-directory field stays what it was: the inherited
+            // process cwd, which the launch policy keeps dropping for
+            // command-less launches.
+            var requestedDirectory = Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
+                Ghostty.Core.SingleInstance.LaunchDirectoryOverride.FromArgs(req.Args),
+                req.WorkingDirectory);
+
             // The first plain launch into a -e process restores the session
             // that process held back, instead of opening a default window.
             if (forwardedCommand is null && launch.ProfileId is null && RestoreHeldSession())
@@ -1576,7 +1587,8 @@ public partial class App : Application
             OpenJumpListWindow(
                 launch.ProfileId,
                 req.WorkingDirectory,
-                command: forwardedCommand);
+                command: forwardedCommand,
+                requestedDirectory: requestedDirectory);
         }
         else
         {
@@ -1982,13 +1994,16 @@ public partial class App : Application
     private void OpenJumpListWindow(
         string? profileId,
         string workingDirectory,
-        string? command = null)
+        string? command = null,
+        string? requestedDirectory = null)
     {
         // A window other than the cold -e one ends the hold (#1136).
         RestoreHeldSession();
 
-        // The caller's directory goes with a -e command only, as on a cold start.
-        var directory = Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory(command, workingDirectory);
+        // A directory the launch asked for wins outright; the INHERITED cwd
+        // still goes with a -e command only, as on a cold start.
+        var directory = requestedDirectory
+            ?? Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory(command, workingDirectory);
 
         Ghostty.Core.Profiles.ProfileSnapshot? snapshot;
         if (profileId is null)
