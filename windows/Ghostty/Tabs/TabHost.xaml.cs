@@ -2660,7 +2660,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private string ThemeKey()
         => _highContrast
             ? "HighContrast"
-            : ThemedResources.ThemeDictionaryKey(TabViewControl.ActualTheme);
+            : ThemedResources.ThemeDictionaryKey(
+                _cachedTheme == ElementTheme.Default ? TabViewControl.ActualTheme : _cachedTheme);
 
     private bool TryThemeBrush(string key, out Brush brush)
     {

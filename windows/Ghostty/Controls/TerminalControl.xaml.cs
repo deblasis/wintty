@@ -333,6 +333,22 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal IntPtr SurfaceHandle => _surface.Handle;
 
     /// <summary>
+    /// The renderer's config-derived pair and generation, for the seam's
+    /// resolution readout. Null before the surface exists or after teardown;
+    /// the native side answers false on a dormant surface it cannot wake.
+    /// </summary>
+    internal uint? TestSeamBackground
+        => _surfaceDisposed ? null : Interop.NativeMethods.SurfaceBackground(_surface);
+    internal uint? TestSeamForeground
+        => _surfaceDisposed ? null : Interop.NativeMethods.SurfaceForeground(_surface);
+    internal ulong TestSeamConfigGeneration
+        => _surfaceDisposed ? 0 : Interop.NativeMethods.SurfaceConfigGeneration(_surface);
+    internal (uint? Background, uint? Foreground, ulong Generation) TestSeamSurfaceColors
+        => _surfaceDisposed
+            ? (null, null, 0)
+            : Interop.NativeMethods.SurfaceColors(_surface);
+
+    /// <summary>
     /// The grid and pixel size the surface had when SurfaceNew returned: the
     /// size its pty is created at. Read by the test seam; zeros before
     /// creation.

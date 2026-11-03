@@ -31,6 +31,15 @@ public interface IConfigService : IDisposable
     bool SettingsUiEnabled { get; }
 
     /// <summary>
+    /// The colour scheme the running native config and resolved colours
+    /// were built with. Window chrome resolves "system" against this, not a
+    /// fresh deskop sample, so the chrome and the terminal describe one
+    /// config. A pending observation lives on the service and is committed
+    /// only by a successful reload.
+    /// </summary>
+    bool AppliedDark { get; }
+
+    /// <summary>
     /// Background opacity from config (0.0 fully transparent, 1.0 opaque).
     /// </summary>
     double BackgroundOpacity { get; }

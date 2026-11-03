@@ -120,8 +120,9 @@ public sealed class WindowClassBrushWiringTests
         var resolve = apply.Call("RootBackgroundResolver.Resolve");
 
         Assert.Equal("_currentBackdropStyle", resolve.Arg(0));
-        var polarity = resolve.ArgExpression(3).AssertCallTo("OsTheme.IsDark");
-        Assert.Equal("_systemUiSettings", polarity.Arg(0));
+        var polarity = resolve.ArgExpression(3).ToString();
+        Assert.Contains("_themeManager.IsDarkMode", polarity);
+        Assert.Contains("OsTheme.IsDark", polarity);
 
         var resolved = Assert.Single(
             resolve.Ancestors().OfType<VariableDeclaratorSyntax>()).Identifier.ValueText;
@@ -194,8 +195,11 @@ public sealed class WindowClassBrushWiringTests
             ctor.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
             a => a.Left.ToString() == "_shellTheme");
 
+        // Two passes: the pre-manager one and the post-manager correction.
+        // Both read _shellTheme, so the assignment has to precede the first.
+        var firstBackdrop = ctor.Calls("ApplyBackdropStyle").First();
         Assert.True(
-            construction.SpanStart < ctor.Call("ApplyBackdropStyle").SpanStart,
+            construction.SpanStart < firstBackdrop.SpanStart,
             "_shellTheme is read while resolving the class brush colour, so constructing "
                 + "it further down the constructor throws on the first window.");
     }

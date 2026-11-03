@@ -15,7 +15,16 @@ internal static class OsTheme
     /// <see cref="UISettings"/> to ask; callers holding one already
     /// should use the overload.
     /// </summary>
-    public static bool IsDark() => IsDark(new UISettings());
+    public static bool IsDark() => TestOnlyDarkOverride ?? IsDark(new UISettings());
+
+    /// <summary>
+    /// Test seam only: the scheme the next no-argument sample answers.
+    /// `system-color-scheme` sets it so the seam can drive a scheme change
+    /// without touching the desktop, and an explicit reload then samples the
+    /// same value the transaction is retrying. Per process; never set by the
+    /// product.
+    /// </summary>
+    internal static bool? TestOnlyDarkOverride { get; set; }
 
     /// <summary>
     /// True when the given settings snapshot reports dark mode.

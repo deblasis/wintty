@@ -30,6 +30,7 @@
 //! dark-on-dark. `wintty_theme_test.zig` encodes the polarity-aware rule, and
 //! separately pins that slot 0 and slot 15 can never collide.
 
+const std = @import("std");
 const builtin = @import("builtin");
 const conditional = @import("conditional.zig");
 
@@ -39,6 +40,44 @@ const conditional = @import("conditional.zig");
 /// expected to behave like upstream Ghostty, whose unconfigured default is
 /// the compile-time colours in Config.zig.
 pub const enabled = builtin.os.tag == .windows;
+
+/// WCAG 2.x AA for body text. The same 4.5 the Windows chrome is held to;
+/// one constant so the palette test, the config floor and the C# mirror
+/// cannot drift.
+pub const aa_text: f64 = 4.5;
+
+/// WCAG 2.x relative luminance of an sRGB colour, gamma-expanded to linear
+/// light. 0.0 for black, 1.0 for white.
+pub fn luminance(rgb: [3]u8) f64 {
+    var channels: [3]f64 = undefined;
+    for (rgb, &channels) |raw, *out| {
+        const c = @as(f64, @floatFromInt(raw)) / 255.0;
+        out.* = if (c <= 0.03928)
+            c / 12.92
+        else
+            std.math.pow(f64, (c + 0.055) / 1.055, 2.4);
+    }
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+/// WCAG contrast ratio between two sRGB colours, 1.0 to 21.0.
+pub fn contrast(a: [3]u8, b: [3]u8) f64 {
+    const la = luminance(a);
+    const lb = luminance(b);
+    return (@max(la, lb) + 0.05) / (@min(la, lb) + 0.05);
+}
+
+/// The foreground to render on `background`: `foreground` when it already
+/// clears AA, otherwise the better of pure white and pure black. This is the
+/// terminal-pair floor's whole rule; the C# resolver mirrors it.
+pub fn readableForeground(background: [3]u8, foreground: [3]u8) [3]u8 {
+    if (contrast(background, foreground) >= aa_text) return foreground;
+    return if (contrast(background, .{ 255, 255, 255 }) >=
+        contrast(background, .{ 0, 0, 0 }))
+        .{ 255, 255, 255 }
+    else
+        .{ 0, 0, 0 };
+}
 
 /// The theme source for a given desktop colour scheme, in Ghostty config
 /// syntax. Parsed by the same iterator that reads a theme file, so any

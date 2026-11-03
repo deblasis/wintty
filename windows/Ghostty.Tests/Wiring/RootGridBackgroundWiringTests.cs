@@ -22,21 +22,19 @@ public sealed class RootGridBackgroundWiringTests
             p => p.Identifier.ValueText == name);
 
     [Fact]
-    public void The_root_grid_asks_the_desktop_for_its_polarity()
+    public void The_root_grid_asks_the_resolved_window_theme()
     {
         var call = ShellSource.Load("MainWindow.xaml.cs")
             .Method("ApplyRootGridBackground")
             .Call("RootBackgroundResolver.Resolve");
 
-        // Asserted on the node: a substring match here reads the same
-        // against `!OsTheme.IsDark(...)`, so it would have passed the whole
-        // resolution through inverted and reported the wiring intact.
-        var polarity = call.ArgExpression(3).AssertCallTo("OsTheme.IsDark");
-
-        // The window already holds a UISettings and subscribes to it. A
-        // freshly activated one answers for a different moment, which is
-        // the drift OsTheme's overload exists to prevent.
-        Assert.Equal("_systemUiSettings", polarity.Arg(0));
+        // The painted ground follows the resolved window theme, not a
+        // second desktop sample: the manager is the one source the fill and
+        // the ink are both scored against. The desktop is only the fallback
+        // for the constructor pass before the manager exists.
+        var polarity = call.ArgExpression(3).ToString();
+        Assert.Contains("_themeManager.IsDarkMode", polarity);
+        Assert.Contains("OsTheme.IsDark", polarity);
     }
 
     /// <summary>

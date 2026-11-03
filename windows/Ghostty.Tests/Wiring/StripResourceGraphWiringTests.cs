@@ -267,7 +267,7 @@ public sealed class StripResourceGraphWiringTests
         var forCall = Assert.Single(keyList.DescendantNodes().OfType<InvocationExpressionSyntax>(),
             c => c.CalleeText() == "StripThemeKeys.For");
         var args = forCall.ArgumentList.Arguments;
-        Assert.Equal("ActualTheme == ElementTheme.Light", args[0].ToString());
+        Assert.Equal("EffectiveElementTheme == ElementTheme.Light", args[0].ToString());
         Assert.Equal("_highContrast", args[1].ToString());
 
         // The window composes the OS state with the config opt-out and

@@ -260,6 +260,92 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
+    /// Install the window's element theme on the strip. The palette path
+    /// needs this too: without it the value the last default-path pass set
+    /// stays in force, and the hover/pressed overrides resolve at the
+    /// outgoing theme (#2218). Writing only the strip's own theme keeps
+    /// NavView's deferred-write invariant intact.
+    /// </summary>
+    internal void SetElementTheme(ElementTheme theme)
+    {
+        _elementTheme = theme;
+        RequestedTheme = theme;
+
+        if (!_shellThemeActive) return;
+
+        // The two brushes are owned ledger entries; writing them again
+        // updates their colour in place, never replaces the entry.
+        SetNavResource(
+            "NavigationViewItemBackgroundPointerOver",
+            ResolveStripThemeBrush("SubtleFillColorSecondaryBrush"));
+        SetNavResource(
+            "NavigationViewItemBackgroundPressed",
+            ResolveStripThemeBrush("SubtleFillColorTertiaryBrush"));
+        RefreshNavViewTheme();
+    }
+
+    /// <summary>The theme the strip is painting under, from the window push.</summary>
+    internal string TestSeamEffectiveTheme => EffectiveElementTheme.ToString();
+
+    /// <summary>Declared and resolved strip theme, for the seam.</summary>
+    internal string TestSeamThemeState => $"{RequestedTheme}/{ActualTheme}";
+
+    /// <summary>The colours the seam checks: the two #2242 keys plus the
+    /// lane surface.</summary>
+    internal IReadOnlyList<string> TestSeamResolveKeys() => new[]
+    {
+        "LayerFillColorDefaultBrush",
+        "SubtleFillColorSecondaryBrush",
+        "SubtleFillColorTertiaryBrush",
+    };
+
+    internal uint? TestSeamSelectedFill
+        => _selectedTabFillBrush is { } fill ? PackArgb(fill.Color) : null;
+
+    internal uint? TestSeamSelectedDefault
+        => _defaultSelectedTabBgBrush is { } fill ? PackArgb(fill.Color) : null;
+
+    /// <summary>
+    /// The installed brush, the strip-theme dictionary value, and the
+    /// app-theme dictionary value for one key. The installed side reads the
+    /// object actually in use (Background / the NavView override), never a
+    /// fresh resolve, so the seam cannot prove the helper against itself.
+    /// </summary>
+    internal (uint? Installed, uint? StripDefault, uint? AppDefault) TestSeamResolveBrush(
+        string key, ElementTheme appTheme)
+    {
+        uint? installed = key switch
+        {
+            "LayerFillColorDefaultBrush" =>
+                Background is SolidColorBrush lane ? PackArgb(lane.Color) : null,
+            "SubtleFillColorSecondaryBrush" => NavResourceColor(
+                "NavigationViewItemBackgroundPointerOver"),
+            "SubtleFillColorTertiaryBrush" => NavResourceColor(
+                "NavigationViewItemBackgroundPressed"),
+            _ => null,
+        };
+
+        uint? stripDefault = TryFindStripThemeColor(key, out var stripColor)
+            ? PackArgb(stripColor)
+            : null;
+        uint? appDefault = TryFindThemeColor(
+            Application.Current.Resources,
+            ThemedResources.ThemeDictionaryKey(appTheme),
+            key, 0, out var appColor)
+            ? PackArgb(appColor)
+            : null;
+        return (installed, stripDefault, appDefault);
+    }
+
+    private uint? NavResourceColor(string key)
+        => NavView.Resources.TryGetValue(key, out var value) && value is SolidColorBrush brush
+            ? PackArgb(brush.Color)
+            : null;
+
+    private static uint PackArgb(Color c) =>
+        ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
+
+    /// <summary>
     /// Unselected rows are muted rather than given a second colour, so the
     /// selected row is the only one carrying full-strength ink.
     /// </summary>
@@ -331,7 +417,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         // divides them no better than a uniform backdrop did.
         var hc = _highContrast;
         Background = hc
-            ? ResolveThemeBrush("LayerFillColorDefaultBrush")
+            ? ResolveStripThemeBrush("LayerFillColorDefaultBrush")
             : _chromeFillRgb is { } chromeFill
                 ? TabColorBrush.FromPackedRgb(chromeFill)
                 : TransparentBrush;
@@ -416,7 +502,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         }
         else
         {
-            _selectedTabFillBrush = ResolveThemeBrush("SubtleFillColorTertiaryBrush");
+            // The early selected fill is the strip's own dictionary value,
+            // not the app-theme fallback: under a strip theme that differs
+            // from the app's the two are different colours (#2242).
+            _selectedTabFillBrush = ResolveStripThemeBrush("SubtleFillColorTertiaryBrush");
         }
     }
 
@@ -1993,8 +2082,18 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     private IReadOnlyList<string> StripThemeKeyList()
         => StripThemeKeys.For(
-            ActualTheme == ElementTheme.Light,
+            EffectiveElementTheme == ElementTheme.Light,
             _highContrast);
+
+    /// <summary>
+    /// The theme the strip is painting under, taken from the window's push
+    /// first. `ActualTheme` follows `RequestedTheme` synchronously in this
+    /// framework, but it is also Default before the element joins a live
+    /// tree; the pushed value is the one the window decided and the one the
+    /// same-pass brush resolutions must use.
+    /// </summary>
+    private ElementTheme EffectiveElementTheme
+        => _elementTheme == ElementTheme.Default ? ActualTheme : _elementTheme;
 
     /// <summary>
     /// The colour this key takes from the strip's theme with no override,

@@ -12,6 +12,31 @@ internal static partial class Win32Interop
     [LibraryImport("gdi32.dll")]
     public static partial IntPtr GetStockObject(int fnObject);
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LOGBRUSH
+    {
+        public uint lbStyle;
+        public uint lbColor;
+        public IntPtr lbHatch;
+    }
+
+    // GetObject is a macro over the W/A pair; a LOGBRUSH has no text form.
+    [LibraryImport("gdi32.dll", EntryPoint = "GetObjectW")]
+    public static partial int GetObject(IntPtr h, int cb, out LOGBRUSH brush);
+
+    // DWMWA_USE_IMMERSIVE_DARK_MODE, read back for the seam.
+    [LibraryImport("dwmapi.dll")]
+    private static partial int DwmGetWindowAttribute(
+        IntPtr hwnd, int attribute, out int value, int size);
+
+    public static bool? ImmersiveDark(IntPtr hwnd)
+    {
+        const int UseImmersiveDarkMode = 20;
+        var hr = DwmGetWindowAttribute(
+            hwnd, UseImmersiveDarkMode, out var value, sizeof(int));
+        return hr >= 0 ? value != 0 : null;
+    }
+
     // NULL_BRUSH (HOLLOW_BRUSH) -- transparent class brush so
     // composition alpha shows through to the desktop.
     public const int NULL_BRUSH = 5;

@@ -364,16 +364,31 @@ internal sealed partial class ThemePreviewService : IDisposable
         var themePath = Path.Combine(configDir, "themes", themeName);
         if (!File.Exists(themePath)) return;
 
-        var (palette, fg, bg, cursor, cursorText) = ParseThemeFile(themePath);
+        // The preview is a cheap, in-memory colour swap: one theme file
+        // read (already done for the palette) and a floor. It must not build
+        // or write a config -- the config file is touched only when the user
+        // actually saves the theme.
+        var (palette, themeFg, themeBg, cursor, cursorText) = ParseThemeFile(themePath);
 
-        // If called from the UI thread (inline picker dispatch), apply
-        // directly. If called from a background thread (pipe server),
-        // dispatch to UI thread.
-        if (_dispatcher.HasThreadAccess)
+        void Apply()
+        {
+            // Explicit committed colours still win over the preview, but
+            // read them from the in-memory snapshot/native handle: no file
+            // write, no config build. Save is the only path that writes.
+            var bg = _configService.IsConfiguredInFile("background")
+                ? _configService.BackgroundColor
+                : themeBg;
+            var fg = _configService.LiveForegroundIsExplicit
+                ? _configService.ForegroundColor
+                : Ghostty.Core.Windows.ThemeResolution.ResolveTerminalForeground(
+                    bg, themeFg, foregroundExplicit: false);
             _configService.ApplyThemeColors(fg, bg, cursor, cursorText, palette);
+        }
+
+        if (_dispatcher.HasThreadAccess)
+            Apply();
         else
-            _dispatcher.TryEnqueue(() =>
-                _configService.ApplyThemeColors(fg, bg, cursor, cursorText, palette));
+            _dispatcher.TryEnqueue(Apply);
     }
 
     private static (uint[] palette, uint fg, uint bg, uint? cursor, uint? cursorText) ParseThemeFile(string path)

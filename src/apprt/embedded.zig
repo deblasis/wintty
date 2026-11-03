@@ -3266,6 +3266,79 @@ pub const CAPI = struct {
         };
     }
 
+    /// The pair the renderer is drawing the surface with, read under the
+    /// renderer's draw mutex. Wake-first: a dormant terminal must be woken
+    /// before its renderer state is meaningful, and a failed wake answers
+    /// "no colour" rather than walking a torn-down surface. The values are
+    /// the config-derived pair, not a terminal OSC override, so an embedder
+    /// can tell whether a config swap reached the surface.
+    fn surfaceColor(
+        surface: *Surface,
+        foreground: bool,
+        out: *terminal.color.RGB.C,
+    ) bool {
+        const core = &surface.core_surface;
+        if (!core.io.wakeIfDormant()) return false;
+        core.renderer.draw_mutex.lockUncancelable(global.io());
+        defer core.renderer.draw_mutex.unlock(global.io());
+        const rgb = if (foreground)
+            core.renderer.config.foreground
+        else
+            core.renderer.config.background;
+        out.* = rgb.cval();
+        return true;
+    }
+
+    /// The pair and the generation from one lock acquisition, so a caller
+    /// cannot mix a colour from one config swap with a generation from the
+    /// next.
+    pub const SurfaceColors = extern struct {
+        background: terminal.color.RGB.C,
+        foreground: terminal.color.RGB.C,
+        generation: u64,
+    };
+
+    export fn ghostty_surface_colors(
+        surface: *Surface,
+        out: *SurfaceColors,
+    ) bool {
+        const core = &surface.core_surface;
+        if (!core.io.wakeIfDormant()) return false;
+        core.renderer.draw_mutex.lockUncancelable(global.io());
+        defer core.renderer.draw_mutex.unlock(global.io());
+        out.* = .{
+            .background = core.renderer.config.background.cval(),
+            .foreground = core.renderer.config.foreground.cval(),
+            .generation = core.renderer.config.config_generation,
+        };
+        return true;
+    }
+
+    export fn ghostty_surface_background(
+        surface: *Surface,
+        out: *terminal.color.RGB.C,
+    ) bool {
+        return surfaceColor(surface, false, out);
+    }
+
+    export fn ghostty_surface_foreground(
+        surface: *Surface,
+        out: *terminal.color.RGB.C,
+    ) bool {
+        return surfaceColor(surface, true, out);
+    }
+
+    /// Monotonic per-surface renderer config generation. Bumped under the
+    /// same draw mutex as the pair, so a caller can poll a swap instead of
+    /// guessing from colour equality.
+    export fn ghostty_surface_config_generation(surface: *Surface) u64 {
+        const core = &surface.core_surface;
+        if (!core.io.wakeIfDormant()) return 0;
+        core.renderer.draw_mutex.lockUncancelable(global.io());
+        defer core.renderer.draw_mutex.unlock(global.io());
+        return core.renderer.config.config_generation;
+    }
+
     /// Returns the PID of the foreground process for the surface PTY.
     export fn ghostty_surface_foreground_pid(surface: *Surface) u64 {
         return surface.core_surface.getProcessInfo(.foreground_pid) orelse 0;

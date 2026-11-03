@@ -75,12 +75,18 @@ public class ConfigLoadOrderWiringTests
     /// preview that could differ from what confirming it produces.
     /// </summary>
     [Theory]
-    [InlineData("Reload")]
+    [InlineData("ReloadWithScheme")]
     [InlineData("PreviewTheme")]
     public void LiveConfigsAreBuiltByTheOneHelper(string member)
     {
         var method = ShellSource.Load(ConfigService).Method(member);
-        Assert.Single(method.Calls("BuildLiveConfig"));
+        // The High Contrast path builds a second, no-HC config for the
+        // chrome pair; every build must still come from the one helper, and
+        // no caller assembles a config of its own.
+        var builds = method.Calls("BuildLiveConfig").ToList();
+        Assert.NotEmpty(builds);
+        foreach (var extra in builds.Skip(1))
+            Assert.Contains("highContrast: null", extra.ToString());
         Assert.Empty(LoadSequence(method));
         Assert.Empty(method.Calls("NativeMethods.ConfigLoadFile"));
     }
