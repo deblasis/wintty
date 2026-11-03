@@ -3307,9 +3307,9 @@ public sealed partial class MainWindow : Window
         // The shell-theme fan-out runs synchronously inside ConfigChanged,
         // while WindowThemeManager's own re-resolve is deferred. Resolve
         // here so the palette pass and the element theme describe the same
-        // config; then push it before any strip resolves a dictionary.
-        if (_themeManager.ResolveNow()) ApplyTheme();
-        else PushElementTheme();
+        // config. The default path's ApplyTheme below pushes; the palette
+        // path needs the push before any strip resolves a dictionary.
+        var themeChanged = _themeManager.ResolveNow();
 
         if (!_shellTheme.IsEnabled)
         {
@@ -3330,6 +3330,9 @@ public sealed partial class MainWindow : Window
             ApplyCaptionButtonChrome();
             return;
         }
+
+        if (themeChanged) ApplyTheme();
+        else PushElementTheme();
 
         // Caption buttons: transparent in horizontal mode, opaque in
         // vertical -- see ApplyCaptionButtonChrome().

@@ -364,15 +364,26 @@ internal sealed partial class ThemePreviewService : IDisposable
         var themePath = Path.Combine(configDir, "themes", themeName);
         if (!File.Exists(themePath)) return;
 
-        // File I/O only on this thread; the native build, explicitness and
-        // floor read `_configService` and belong on the UI thread. The pair
-        // comes from the same resolver confirm uses, so a floored theme
-        // previews floored and an included/CLI colour previews as it will
-        // confirm.
-        var (palette, _, _, cursor, cursorText) = ParseThemeFile(themePath);
+        // The preview is a cheap, in-memory colour swap: one theme file
+        // read (already done for the palette) and a floor. It must not build
+        // or write a config -- the config file is touched only when the user
+        // actually saves the theme.
+        var (palette, themeFg, themeBg, cursor, cursorText) = ParseThemeFile(themePath);
 
-        void Apply() => _configService.ApplyLegacyPreview(
-            themePath, palette, cursor, cursorText);
+        void Apply()
+        {
+            // Explicit committed colours still win over the preview, but
+            // read them from the in-memory snapshot/native handle: no file
+            // write, no config build. Save is the only path that writes.
+            var bg = _configService.IsConfiguredInFile("background")
+                ? _configService.BackgroundColor
+                : themeBg;
+            var fg = _configService.LiveForegroundIsExplicit
+                ? _configService.ForegroundColor
+                : Ghostty.Core.Windows.ThemeResolution.ResolveTerminalForeground(
+                    bg, themeFg, foregroundExplicit: false);
+            _configService.ApplyThemeColors(fg, bg, cursor, cursorText, palette);
+        }
 
         if (_dispatcher.HasThreadAccess)
             Apply();

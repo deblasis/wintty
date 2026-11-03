@@ -2005,10 +2005,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         Dictionary<string, List<string>>? themeCache;
         GhosttyConfig preview;
         var previewHasHighContrast = false;
+        string? overlay = null;
         try
         {
             themeCache = LoadIniFile(themePath);
-            var overlay = WriteThemePreviewOverlay(themeName);
+            overlay = WriteThemePreviewOverlay(themeName);
             if (overlay is null) return false;
             preview = BuildLiveConfig(
                 overlay, isOsDark, _highContrast.Wanted,
@@ -2076,7 +2077,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             try
             {
                 var pre = BuildLiveConfig(
-                    WriteThemePreviewOverlay(themeName), isOsDark, highContrast: null,
+                    overlay!, isOsDark, highContrast: null,
                     out _, out _, out _, out _);
                 previewPreHc = pre;
                 _previewForegroundExplicit =
@@ -2369,73 +2370,6 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// is only read while a preview config is being built from it; the next
     /// preview overwrites it.
     /// </summary>
-    /// <summary>
-    /// Apply a chrome-only preview for the +list-themes TUI. The pair comes
-    /// from a real native build of `theme = &lt;absolute path&gt;` (so
-    /// config-file includes and CLI values layer exactly as confirm will),
-    /// with no High Contrast layer; only the C# colours change. The terminal
-    /// keeps the committed config until the user confirms, as this preview
-    /// always has.
-    /// </summary>
-    internal bool ApplyLegacyPreview(
-        string themePath, uint[] palette, uint? cursor, uint? cursorText)
-    {
-        if (_shuttingDown || _app.Handle == IntPtr.Zero) return false;
-        if (LegacyThemePreviewOverlayPath() is not { } overlay) return false;
-
-        try
-        {
-            File.WriteAllText(overlay, $"theme = {themePath}\n");
-        }
-        catch (Exception ex)
-        {
-            try { File.Delete(overlay); } catch (Exception) { }
-            StaticLoggers.ConfigService.LogThemePreviewFailed(ex, themePath);
-            return false;
-        }
-
-        GhosttyConfig config = default;
-        try
-        {
-            try
-            {
-                config = BuildLiveConfig(
-                    overlay, AppliedDark, highContrast: null,
-                    out var files, out var found, out _, out _);
-                if (ConfigReloadGate.Decide(files, found, _defaultFilesFound) ==
-                    ConfigReloadDecision.Decline)
-                    return false;
-            }
-            catch (Exception ex)
-            {
-                StaticLoggers.ConfigService.LogThemePreviewFailed(ex, themePath);
-                return false;
-            }
-
-            var pair = ResolveChromePair(config);
-            ApplyThemeColors(
-                pair.Foreground,
-                pair.Background,
-                cursor ?? pair.Foreground,
-                cursorText ?? pair.Background,
-                palette);
-            return true;
-        }
-        finally
-        {
-            if (config.Handle != IntPtr.Zero) NativeMethods.ConfigFree(config);
-            try { File.Delete(overlay); } catch (Exception) { }
-        }
-    }
-
-    private static string? LegacyThemePreviewOverlayPath()
-        => string.IsNullOrEmpty(Ghostty.Core.AppStateBase.LocalRoot)
-            ? null
-            : Path.Combine(
-                Ghostty.Core.AppStateBase.LocalRoot,
-                Ghostty.Core.AppIdentity.StateDirName,
-                "legacy-theme-preview.conf");
-
     private static string? ThemePreviewOverlayPath()
         => string.IsNullOrEmpty(Ghostty.Core.AppStateBase.LocalRoot)
             ? null
