@@ -153,6 +153,63 @@ public sealed partial class MainWindow : Window
             ? $"{fe.RequestedTheme}/{fe.ActualTheme}"
             : "no-content";
 
+    /// <summary>The painted RootGrid fill, for the seam's ground readout.</summary>
+    internal string TestSeamRootFill
+        => RootGrid.Background is SolidColorBrush brush
+            ? $"#{brush.Color.R:X2}{brush.Color.G:X2}{brush.Color.B:X2}"
+            : "none";
+
+    /// <summary>
+    /// The Win32 class brush actually installed, read back from the window
+    /// rather than from the memo a caller would otherwise be trusting.
+    /// </summary>
+    internal string TestSeamClassBrush
+    {
+        get
+        {
+            if (_lastClassBrushKind is not { } kind) return "none";
+            if (kind == ClassBrushKind.Transparent) return "transparent";
+            var hwnd = WindowNative.GetWindowHandle(this);
+            var brush = GetClassLongPtr(hwnd, GCLP_HBRBACKGROUND);
+            if (brush == IntPtr.Zero) return "none";
+            if (Win32Interop.GetObject(
+                    brush, Marshal.SizeOf<Win32Interop.LOGBRUSH>(), out var logBrush) == 0)
+                return "unreadable";
+            var color = logBrush.lbColor;
+            return $"#{(color & 0xFF):X2}{((color >> 8) & 0xFF):X2}{((color >> 16) & 0xFF):X2}";
+        }
+    }
+
+    /// <summary>DWM immersive dark mode as the frame actually has it.</summary>
+    internal bool? TestSeamDwmDark
+    {
+        get
+        {
+            try
+            {
+                return Win32Interop.ImmersiveDark(WindowNative.GetWindowHandle(this));
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Drive the same scheme transaction the OS handler uses, for the
+    /// seam's deterministic resolution matrix. No desktop state changes.
+    /// </summary>
+    internal bool TestSeamApplySystemColorScheme(bool dark)
+    {
+        // The seam is the scheme source for this process: an explicit reload
+        // after the forced target declined must sample the target, not the
+        // real desktop, or the retry can never be driven deterministically.
+        OsTheme.TestOnlyDarkOverride = dark;
+        _configService.NoteObservedScheme(dark);
+        return _configService.ApplyPendingScheme();
+    }
+
     /// <summary>Both tab hosts' theme states, same readout shape.</summary>
     internal string TestSeamHorizontalThemeState
         => _horizontalTabHost?.TestSeamThemeState ?? "no-host";
@@ -532,6 +589,10 @@ public sealed partial class MainWindow : Window
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static partial IntPtr SetClassLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
+    [LibraryImport("user32.dll", EntryPoint = "GetClassLongPtrW")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial IntPtr GetClassLongPtr(IntPtr hWnd, int nIndex);
+
     [LibraryImport("gdi32.dll")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static partial IntPtr CreateSolidBrush(uint crColor);
@@ -814,17 +875,11 @@ public sealed partial class MainWindow : Window
         // between the callers that depend on it.
         _systemUiSettings = new Windows.UI.ViewManagement.UISettings();
         var initialDark = Ghostty.Services.OsTheme.IsDark(_systemUiSettings);
-        var initialScheme = initialDark
-            ? Ghostty.Core.Interop.GhosttyColorScheme.Dark
-            : Ghostty.Core.Interop.GhosttyColorScheme.Light;
-        Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, initialScheme);
-        // Closes the gap between ConfigService seeding its themed values in
-        // its constructor and this window reading the scheme: a flip in
-        // between would leave libghostty on the new scheme and the config
-        // caches on the old one, with nothing to reconcile them until the
-        // next flip. A no-op in the common case, since the service guards
-        // on the scheme actually having moved.
-        _configService.RefreshForOsColorScheme(initialDark);
+        // The app's conditional state was seeded from the config built with
+        // ConfigService's own sample. If this window sampled a different
+        // scheme (a flip in between), or that snapshot failed, apply it
+        // through the same transaction a live flip uses. A no-op otherwise.
+        _configService.ApplyStartupScheme(initialDark);
         // NotifyColorSchemeChanged is not called here because no surfaces
         // exist yet at window construction time. Each surface picks up the
         // app-level scheme when it initializes. The runtime handler below
@@ -885,6 +940,11 @@ public sealed partial class MainWindow : Window
         // ExtendsContentIntoTitleBar is true).
         _themeManager = new WindowThemeManager(configService, DispatcherQueue);
         ApplyTheme();
+        // The first backdrop pass runs before the manager exists and
+        // classifies from the desktop; repeat it now that the manager has
+        // resolved the window theme, before the window is shown, so the
+        // Win32 class brush is never left on the desktop's polarity.
+        ApplyBackdropStyle();
         _themeManager.ThemeChanged += OnWindowThemeChanged;
 
         _shellTheme.ThemeChanged += OnShellThemeChanged;
@@ -3183,9 +3243,7 @@ public sealed partial class MainWindow : Window
         // theme — so _isClosed is the startup-safe teardown signal (#208).
         if (_isClosed) return;
 
-        if (Content is FrameworkElement root)
-            root.RequestedTheme = _themeManager.ElementTheme;
-        _themeManager.ApplyToWindow(this);
+        PushElementTheme();
 
         // Caption button colors must be set explicitly when
         // ExtendsContentIntoTitleBar is true, otherwise WinUI 3
@@ -3221,15 +3279,23 @@ public sealed partial class MainWindow : Window
             pressedBg: pressedBg,
             pressedFg: fg);
 
-        // Propagate theme to tab hosts so their text/icons adapt.
-        // Guard: tab hosts are created after the first ApplyTheme call.
-        if (_horizontalTabHost is not null)
-        {
-            _horizontalTabHost.SetRequestedTheme(_themeManager.ElementTheme);
-            _verticalTabHost.SetRequestedTheme(_themeManager.ElementTheme);
-        }
-
         ApplyCaptionButtonChrome();
+    }
+
+    /// <summary>
+    /// The one place the window pushes its resolved element theme onto the
+    /// XAML root, both tab hosts and the DWM frame. Called from every chrome
+    /// pass, so no path can leave the previous theme installed. The hosts
+    /// are null during the constructor's first pass; root and DWM are not.
+    /// </summary>
+    private void PushElementTheme()
+    {
+        var theme = _themeManager.ElementTheme;
+        if (Content is FrameworkElement root)
+            root.RequestedTheme = theme;
+        _themeManager.ApplyToWindow(this);
+        _horizontalTabHost?.SetRequestedTheme(theme);
+        _verticalTabHost?.SetRequestedTheme(theme);
     }
 
     /// <summary>
@@ -3238,6 +3304,13 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyShellTheme()
     {
+        // The shell-theme fan-out runs synchronously inside ConfigChanged,
+        // while WindowThemeManager's own re-resolve is deferred. Resolve
+        // here so the palette pass and the element theme describe the same
+        // config; then push it before any strip resolves a dictionary.
+        if (_themeManager.ResolveNow()) ApplyTheme();
+        else PushElementTheme();
+
         if (!_shellTheme.IsEnabled)
         {
             // Revert to standard chrome. Reset VerticalTitleText so
@@ -3764,8 +3837,7 @@ public sealed partial class MainWindow : Window
         {
             _horizontalTabHost.ClearShellTheme();
             _verticalTabHost.ClearShellTheme();
-            _horizontalTabHost.SetRequestedTheme(_themeManager.ElementTheme);
-            _verticalTabHost.SetRequestedTheme(_themeManager.ElementTheme);
+            PushElementTheme();
         }
 
         ApplyVerticalTitleBarChrome();
@@ -4200,7 +4272,7 @@ public sealed partial class MainWindow : Window
             _currentBackdropStyle,
             _shellTheme.IsEnabled,
             ShellThemeBackgroundArgb,
-            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
+            (_themeManager is not null ? _themeManager.IsDarkMode : Ghostty.Services.OsTheme.IsDark(_systemUiSettings)));
 
         switch (style)
         {
@@ -4441,6 +4513,12 @@ public sealed partial class MainWindow : Window
     private void OnWindowThemeChanged(bool isDark)
     {
         ApplyTheme();
+        // The element theme and the painted ground move together: the Win32
+        // class brush and RootGrid read the manager, and a polarity move
+        // that did not repaint them would leave the frame on the desktop's
+        // fill around a terminal on the other one.
+        ApplyBackdropStyle();
+        ApplyRootGridBackground();
         // The manager resolves its light/dark answer on a deferred turn, so
         // this lands after the config fan-out already repainted the chrome
         // from the new palette. ApplyTheme flips the surfaces the element
@@ -4478,28 +4556,19 @@ public sealed partial class MainWindow : Window
         DispatcherQueue.TryEnqueue(() =>
         {
             if (_isClosed) return;
-            var scheme = dark
-                ? Ghostty.Core.Interop.GhosttyColorScheme.Dark
-                : Ghostty.Core.Interop.GhosttyColorScheme.Light;
-            Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, scheme);
-            _host.NotifyColorSchemeChanged(scheme);
 
-            // The two calls above move libghostty onto the new scheme,
-            // so the surfaces repaint. Anything the C# chrome derives
-            // from a conditional theme is still resolved against the
-            // outgoing one until this runs, which is what would leave
-            // window chrome on the old palette beside a repainted
-            // terminal. Self-guarding, so the per-window duplicates of
-            // this handler collapse to one refresh. Handed the same
-            // `dark` that drove the two calls above, so libghostty and
-            // the config caches cannot describe different schemes.
-            _configService.RefreshForOsColorScheme(dark);
+            // Record, then build/gate/commit as one transaction. A decline
+            // leaves the app, every surface, the pair and the paint on the
+            // applied scheme; the next successful reload catches up. The
+            // per-window duplicates of this handler collapse on the
+            // Pending == Applied no-op.
+            _configService.NoteObservedScheme(dark);
+            _configService.ApplyPendingScheme();
 
-            // Not covered by the reload above. RefreshForOsColorScheme only
-            // reaches the chrome when the config it resolves actually
-            // changed, and a palette that is pinned in the file does not --
-            // but the backdrop still re-tints off the new desktop, so
-            // everything scored against it is stale until this runs.
+            // The backdrop re-tints off the new desktop even when the
+            // config reload was declined, so the ink scored against it has
+            // to move too; the config fan-out owns root, class brush and the
+            // strips.
             RefreshBackdropChrome();
         });
     }
@@ -4560,6 +4629,7 @@ public sealed partial class MainWindow : Window
         // unsubscribes this handler; the gate covers the in-flight call.
         if (_isClosed) return;
         ApplyShellTheme();
+        ApplyBackdropStyle();
         ApplyRootGridBackground();
     }
 
@@ -4580,7 +4650,10 @@ public sealed partial class MainWindow : Window
         UpdateAcrylicTuning();
         ApplyGradientTint();
         UpdateCursorAccentColors();
+        // ApplyBackdropStyle computes the Win32 class brush from the shell
+        // theme, so it runs again after ApplyShellTheme has the new values.
         ApplyShellTheme();
+        ApplyBackdropStyle();
         ApplyRootGridBackground();
         RefreshPaneGutters();
     }
@@ -4637,7 +4710,7 @@ public sealed partial class MainWindow : Window
             _currentBackdropStyle,
             _shellTheme.IsEnabled,
             ShellThemeBackgroundArgb,
-            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
+            (_themeManager is not null ? _themeManager.IsDarkMode : Ghostty.Services.OsTheme.IsDark(_systemUiSettings)));
 
         var next = UnpackArgb(argb);
 
@@ -5693,7 +5766,7 @@ public sealed partial class MainWindow : Window
             // The half of a light/dark pair on screen now, which is where the
             // highlight starts.
             ActiveTheme = () => Ghostty.Core.Config.ThemeParser.SelectForScheme(
-                _configService.CurrentTheme, Services.OsTheme.IsDark()),
+                _configService.CurrentTheme, _configService.AppliedDark),
             Browse = themeBrowse,
             // The rows' swatches, read from the file libghostty would load
             // for each name: the same directories, in the same order.

@@ -609,7 +609,7 @@ public class WindowTeardownWiringTests
 
         var gateIndex = queued.TakeWhile(s => !IsClosedGuard(s, MainWindow.ClosedFlag)).Count();
         var callIndex = queued
-            .TakeWhile(s => !s.Calls("Ghostty.Interop.NativeMethods.AppSetColorScheme").Any())
+            .TakeWhile(s => !s.ToString().Contains("ApplyPendingScheme", StringComparison.Ordinal))
             .Count();
 
         // Both have to exist, or TakeWhile silently returns the full count and
@@ -618,8 +618,8 @@ public class WindowTeardownWiringTests
             gateIndex < queued.Count,
             "the dispatched body must re-check _isClosed; it runs a turn after the handler that "
             + "queued it, and the close disposes _host in between");
-        Assert.True(callIndex < queued.Count, "expected the dispatched body to set the app colour scheme");
-        Assert.True(gateIndex < callIndex, "the gate must precede the call through _host.App");
+        Assert.True(callIndex < queued.Count, "expected the dispatched body to apply the pending scheme");
+        Assert.True(gateIndex < callIndex, "the gate must precede the scheme transaction");
     }
 
     /// <summary>

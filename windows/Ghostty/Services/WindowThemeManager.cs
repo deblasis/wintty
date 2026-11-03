@@ -28,10 +28,6 @@ internal sealed partial class WindowThemeManager : IDisposable
     private readonly DispatcherQueue _dispatcher;
     private readonly ThemeFallbackStyle _fallback;
 
-    // System theme tracking for "system" mode (and any non-explicit
-    // mode when the fallback is System).
-    private readonly Windows.UI.ViewManagement.UISettings _uiSettings;
-
     // Set in Dispose so a callback already queued on the dispatcher before
     // teardown becomes inert instead of touching a dying window (issue #208).
     private bool _isDisposed;
@@ -58,12 +54,10 @@ internal sealed partial class WindowThemeManager : IDisposable
         _configService = configService;
         _dispatcher = dispatcher;
         _fallback = fallback;
-        _uiSettings = new Windows.UI.ViewManagement.UISettings();
 
         _configService.ConfigChanged += OnConfigChanged;
-        _uiSettings.ColorValuesChanged += OnSystemThemeChanged;
 
-        Resolve();
+        ResolveNow();
     }
 
     public void Dispose()
@@ -72,7 +66,6 @@ internal sealed partial class WindowThemeManager : IDisposable
         _isDisposed = true;
 
         _configService.ConfigChanged -= OnConfigChanged;
-        _uiSettings.ColorValuesChanged -= OnSystemThemeChanged;
 
         // Drop subscribers so the owning window/control isn't rooted
         // via this event after teardown.
@@ -121,14 +114,21 @@ internal sealed partial class WindowThemeManager : IDisposable
     private void OnConfigChanged(IConfigService _) =>
         _dispatcher.TryEnqueue(ResolveAndNotifyIfChanged);
 
-    private void OnSystemThemeChanged(
-        Windows.UI.ViewManagement.UISettings sender, object args)
+    /// <summary>
+    /// Resolve now, silently: no <see cref="ThemeChanged"/>. The chrome pass
+    /// that needs the new answer calls this before it paints and pushes the
+    /// result itself; the deferred notification below still announces the
+    /// change to controls that only listen.
+    /// </summary>
+    internal bool ResolveNow()
     {
-        // ColorValuesChanged fires on a background thread. System theme
-        // flips only matter when the resolved mode consults the OS;
-        // skip the dispatch otherwise.
-        if (!ThemeResolution.TracksSystem(_configService.WindowTheme, _fallback)) return;
-        _dispatcher.TryEnqueue(ResolveAndNotifyIfChanged);
+        var previous = IsDarkMode;
+        IsDarkMode = ThemeResolution.ResolveIsDark(
+            _configService.WindowTheme,
+            _configService.BackgroundColor,
+            _fallback,
+            _configService.AppliedDark);
+        return IsDarkMode != previous;
     }
 
     private void ResolveAndNotifyIfChanged()
@@ -137,18 +137,7 @@ internal sealed partial class WindowThemeManager : IDisposable
         // disposed there are no subscribers and the window is gone (#208).
         if (_isDisposed) return;
 
-        var previous = IsDarkMode;
-        Resolve();
-        if (IsDarkMode != previous)
+        if (ResolveNow())
             ThemeChanged?.Invoke(IsDarkMode);
-    }
-
-    private void Resolve()
-    {
-        IsDarkMode = ThemeResolution.ResolveIsDark(
-            _configService.WindowTheme,
-            _configService.BackgroundColor,
-            _fallback,
-            OsTheme.IsDark());
     }
 }

@@ -24,9 +24,9 @@ public enum ThemeFallbackStyle
 ///
 /// Callers (e.g. <c>Ghostty.Services.WindowThemeManager</c>) own the
 /// subscriptions to <c>IConfigService</c> and <c>UISettings</c> and
-/// feed the current values into <see cref="ResolveIsDark"/>. They also
-/// use <see cref="TracksSystem"/> to decide whether a system-theme
-/// flip should trigger a re-resolve.
+/// feed the current values into <see cref="ResolveIsDark"/>. A scheme
+/// flip is applied through the config transaction, then the caches are
+/// re-read; there is no separate "does this mode track the OS" decision.
 /// </summary>
 public static class ThemeResolution
 {
@@ -56,20 +56,6 @@ public static class ThemeResolution
         _ => fallback == ThemeFallbackStyle.System
             ? isSystemDark
             : IsBackgroundDark(backgroundColor),
-    };
-
-    /// <summary>
-    /// True when the resolved value depends on the OS theme. Callers
-    /// use this to skip dispatching work on <c>ColorValuesChanged</c>
-    /// when the system theme cannot affect the outcome.
-    /// </summary>
-    public static bool TracksSystem(
-        string windowTheme,
-        ThemeFallbackStyle fallback) => windowTheme switch
-    {
-        "light" or "dark" => false,
-        "system" => true,
-        _ => fallback == ThemeFallbackStyle.System,
     };
 
     /// <summary>
@@ -299,6 +285,27 @@ public static class ThemeResolution
     }
 
     /// <summary>
+    /// WCAG 2.x AA for body text. One constant so the palette test, the
+    /// native floor and this resolver cannot drift.
+    /// </summary>
+    public const double AaTextContrast = 4.5;
+
+    /// <summary>
+    /// The foreground a terminal renders for a resolved background: the
+    /// user's explicit value when they wrote one, otherwise the readable
+    /// pole. The native floor applies the same rule; this side exists so the
+    /// chrome derives from the pair the terminal actually renders.
+    /// </summary>
+    public static uint ResolveTerminalForeground(
+        uint background,
+        uint foreground,
+        bool foregroundExplicit,
+        double minContrast = AaTextContrast)
+        => foregroundExplicit
+            ? foreground
+            : EnsureReadableForeground(background, foreground, minContrast);
+
+    /// <summary>
     /// Pick a legible foreground for text drawn over
     /// <paramref name="background"/>. Keeps <paramref name="desired"/> when it
     /// already clears the WCAG AA contrast threshold (4.5:1); otherwise falls
@@ -312,7 +319,7 @@ public static class ThemeResolution
     /// cursor-text can both land light or both dark (#342).
     /// </summary>
     public static uint EnsureReadableForeground(
-        uint background, uint desired, double minContrast = 4.5)
+        uint background, uint desired, double minContrast = AaTextContrast)
     {
         if (ContrastRatio(background, desired) >= minContrast)
             return desired;

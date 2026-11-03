@@ -130,52 +130,6 @@ public sealed class ThemeResolutionTests
         Assert.False(ThemeResolution.IsBackgroundDark(0xFFFFFFFF));
     }
 
-    // ── TracksSystem: dispatch-skip optimisation ─────────────────────────
-
-    [Theory]
-    [InlineData("light", ThemeFallbackStyle.Palette)]
-    [InlineData("light", ThemeFallbackStyle.System)]
-    [InlineData("dark", ThemeFallbackStyle.Palette)]
-    [InlineData("dark", ThemeFallbackStyle.System)]
-    public void TracksSystem_Explicit_IsFalse(
-        string windowTheme, ThemeFallbackStyle fallback)
-    {
-        // Explicit light/dark never consult the OS, so a system-theme
-        // flip cannot change the resolved value.
-        Assert.False(ThemeResolution.TracksSystem(windowTheme, fallback));
-    }
-
-    [Theory]
-    [InlineData(ThemeFallbackStyle.Palette)]
-    [InlineData(ThemeFallbackStyle.System)]
-    public void TracksSystem_System_IsTrue(ThemeFallbackStyle fallback)
-    {
-        Assert.True(ThemeResolution.TracksSystem("system", fallback));
-    }
-
-    [Theory]
-    [InlineData("auto")]
-    [InlineData("ghostty")]
-    [InlineData("")]
-    public void TracksSystem_NonExplicit_PaletteFallback_IsFalse(string windowTheme)
-    {
-        // Palette fallback reads the background colour, not the OS theme
-        // — OS flips are noise; skip the dispatch.
-        Assert.False(ThemeResolution.TracksSystem(
-            windowTheme, ThemeFallbackStyle.Palette));
-    }
-
-    [Theory]
-    [InlineData("auto")]
-    [InlineData("ghostty")]
-    [InlineData("")]
-    public void TracksSystem_NonExplicit_SystemFallback_IsTrue(string windowTheme)
-    {
-        // System fallback means OS flips matter.
-        Assert.True(ThemeResolution.TracksSystem(
-            windowTheme, ThemeFallbackStyle.System));
-    }
-
     // ── Regression scenarios ─────────────────────────────────────────────
 
     [Fact]
@@ -596,5 +550,31 @@ public sealed class MutedInkMemoBatteryTests
                     seen[ground] = packed;
             }
         }
+    }
+}
+
+/// <summary>
+/// The terminal-pair floor: the native side and the chrome side apply the
+/// same rule, with the same exemption. The repro pair is the resize-film
+/// shape (explicit dark background, built-in light foreground).
+/// </summary>
+public sealed class TerminalForegroundFloorTests
+{
+    [Theory]
+    [InlineData(0x141A24u, 0x1E2333u, false, 0xFFFFFFu)]
+    [InlineData(0x141A24u, 0x1E2333u, true, 0x1E2333u)]
+    [InlineData(0xF4F6FBu, 0x1E2333u, false, 0x1E2333u)]
+    public void ResolveTerminalForeground_AppliesTheFloor(
+        uint background, uint foreground, bool foregroundExplicit, uint expected)
+    {
+        var result = ThemeResolution.ResolveTerminalForeground(
+            background, foreground, foregroundExplicit);
+
+        Assert.Equal(expected, result);
+        if (!foregroundExplicit)
+            Assert.True(
+                ThemeResolution.ContrastRatio(background, result) >=
+                    ThemeResolution.AaTextContrast,
+                $"resolved {result:X6} on {background:X6} is under AA");
     }
 }

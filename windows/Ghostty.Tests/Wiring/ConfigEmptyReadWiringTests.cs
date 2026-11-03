@@ -27,7 +27,7 @@ public class ConfigEmptyReadWiringTests
         // are both int: swapped, the hold reads the record backwards and
         // waves through the mid-save window it exists for, every test green.
         var ask = Assert.Single(
-            ConfigService().Method("Reload").Calls("ConfigReloadGate.IsEmptyRead"));
+            ConfigService().Method("ReloadWithScheme").Calls("ConfigReloadGate.IsEmptyRead"));
 
         Assert.Equal("defaultFiles", ask.Arg(0));
         Assert.Equal("defaultFilesEmptyReads", ask.Arg(1));
@@ -39,7 +39,7 @@ public class ConfigEmptyReadWiringTests
     public void Reload_honours_the_look_budget_before_applying_an_empty_read()
     {
         Assert.NotEmpty(
-            ConfigService().Method("Reload").Calls("ConfigReloadGate.ShouldApplyEmptyRead"));
+            ConfigService().Method("ReloadWithScheme").Calls("ConfigReloadGate.ShouldApplyEmptyRead"));
     }
 
     /// <summary>
@@ -54,7 +54,7 @@ public class ConfigEmptyReadWiringTests
     [Fact]
     public void The_empty_read_decline_frees_logs_asks_and_returns()
     {
-        var reload = ConfigService().Method("Reload");
+        var reload = ConfigService().Method("ReloadWithScheme");
 
         var gate = Assert.Single(reload.DescendantNodes()
             .OfType<IfStatementSyntax>()
@@ -92,7 +92,7 @@ public class ConfigEmptyReadWiringTests
     [Fact]
     public void The_look_budget_moves_on_every_look_and_resets_when_applied()
     {
-        var reload = ConfigService().Method("Reload");
+        var reload = ConfigService().Method("ReloadWithScheme");
 
         var counter = Assert.Single(reload.DescendantNodes()
             .OfType<IfStatementSyntax>(),
@@ -140,7 +140,7 @@ public class ConfigEmptyReadWiringTests
         // And the applied path records the count it applied, not a stale
         // field: the shrink gate compares against this.
         var applied = Assert.Single(
-            ConfigService().Method("Reload").Calls("RecordDefaultFiles"));
+            ConfigService().Method("ReloadWithScheme").Calls("RecordDefaultFiles"));
         Assert.Equal("defaultFilesFound", applied.Arg(0));
 
         // One writer, so the record and the question cannot drift apart.

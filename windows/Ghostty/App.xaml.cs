@@ -316,6 +316,18 @@ public partial class App : Application
         return false;
     }
 
+    /// <summary>
+    /// Move every live surface onto a conditional scheme. The transaction
+    /// that commits a scheme change uses this, so a window other than the
+    /// one that observed the event cannot keep its surfaces on the outgoing
+    /// state while the app and chrome move.
+    /// </summary>
+    internal static void NotifyAllSurfacesColorScheme(Ghostty.Core.Interop.GhosttyColorScheme scheme)
+    {
+        foreach (var host in _hostBySurface.Values.Distinct())
+            host.NotifyColorSchemeChanged(scheme);
+    }
+
     internal static void UnregisterHostSurfaces(GhosttyHost host)
     {
         // Drain every entry whose value equals `host`. Called from
@@ -1083,6 +1095,7 @@ public partial class App : Application
         // the teardown below can take them back.
         _bootstrapHost.OpenConfigRequested += OnAppOpenConfigRequested;
         _bootstrapHost.ReloadConfigRequested += OnAppReloadConfigRequested;
+        _bootstrapHost.SoftReloadRequested += OnAppSoftReloadRequested;
 
         // The +list-themes server, one for the process. The pipe name it
         // claims carries the process id and it is created with
@@ -2186,6 +2199,15 @@ public partial class App : Application
         _configService?.Reload();
 
     /// <summary>
+    /// A soft reload action is libghostty asking for the current conditional
+    /// state to be reapplied. The transaction that moved it already built
+    /// the config, so this is a no-op then; after a decline it is suppressed
+    /// until a new observation or an explicit reload.
+    /// </summary>
+    private void OnAppSoftReloadRequested(object? sender, EventArgs e) =>
+        _configService?.ReloadFromSoftAction();
+
+    /// <summary>
     /// A LIST_THEMES arriving on the preview pipe. The picker is drawn by
     /// libghostty into a surface, so it needs a window even though the
     /// request is process-wide: it goes to the one the user was last in,
@@ -2667,6 +2689,7 @@ public partial class App : Application
                 {
                     _bootstrapHost.OpenConfigRequested -= OnAppOpenConfigRequested;
                     _bootstrapHost.ReloadConfigRequested -= OnAppReloadConfigRequested;
+                    _bootstrapHost.SoftReloadRequested -= OnAppSoftReloadRequested;
                 }
 
                 // Bootstrap host is the LAST host. Its Dispose drains

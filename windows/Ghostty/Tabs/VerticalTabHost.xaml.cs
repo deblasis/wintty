@@ -386,9 +386,13 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
             _strip.ApplyDefaultPaneChrome(theme);
         }
         else
-            // Element theme still drives icon/hamburger brushes when shell
-            // theme owns the pane fill -- refresh so MUXC re-reads resources.
-            _strip.RefreshNavViewTheme();
+        {
+            // The palette path must declare the strip's theme too: leaving
+            // the last default-path value installed made the hover/pressed
+            // dictionaries follow the outgoing theme (#2218). SetElementTheme
+            // re-writes the owned brushes in place and refreshes MUXC.
+            _strip.SetElementTheme(theme);
+        }
     }
 
     /// <summary>

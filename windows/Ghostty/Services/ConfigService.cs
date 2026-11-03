@@ -11,6 +11,7 @@ using Ghostty.Core.Env;
 using Ghostty.Core.Interop;
 using Ghostty.Core.Shell;
 using Ghostty.Core.Themes;
+using Ghostty.Core.Windows;
 using Ghostty.Interop;
 using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
@@ -30,7 +31,7 @@ internal readonly record struct GradientPoint(
 /// Fires <see cref="ConfigChanged"/> on the UI thread after every
 /// successful reload so consumers can re-read values they depend on, and
 /// again on an OS light/dark flip (see
-/// <see cref="RefreshForOsColorScheme"/>) -- the file has not changed
+/// <see cref="Reload"/>) -- the file has not changed
 /// there, but what a conditional theme resolves to may have.
 /// </summary>
 internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profiles.IProfileConfigSource
@@ -556,9 +557,51 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// this at reload time, so every colour read out of
     /// <see cref="_activeThemeFileCache"/> is only valid while the OS
     /// scheme still matches. Written by <see cref="ReadFlags(bool)"/>, compared
-    /// by <see cref="RefreshForOsColorScheme"/>.
+    /// by <see cref="ReadFlags"/>.
     /// </summary>
     private bool _themedValuesAreForDarkOs;
+
+    /// <summary>
+    /// The scheme the running native config and C# pair were built with.
+    /// The window theme manager and the painted chrome read this, not the
+    /// desktop and not the next observation.
+    /// </summary>
+    public bool AppliedDark => _themedValuesAreForDarkOs;
+
+    /// <summary>
+    /// The last observed scheme, and the input the next applied reload
+    /// builds with. Equal to <see cref="AppliedDark"/> when nothing is
+    /// awaiting application.
+    /// </summary>
+    public bool PendingDark { get; private set; }
+
+    /// <summary>Increments once per applied reload. Preview and revert
+    /// fan-outs do not move it.</summary>
+    public int AppliedGeneration { get; private set; }
+
+    /// <summary>Reload attempts made by the scheme transaction, for the seam.</summary>
+    public int SchemeAttempts { get; private set; }
+
+    /// <summary>The ctor snapshot read failed; startup forces one reload.</summary>
+    internal bool SnapshotFailed { get; private set; }
+
+    // The target of the last declined scheme attempt. While set, a soft
+    // reload raised by the attempt's own native calls must not start another.
+    private bool? _declinedDark;
+
+    // Re-entrancy guard for the synchronous transaction.
+    private bool _inSchemeTransaction;
+
+    /// <summary>
+    /// The config/theme pair under High Contrast, built without the HC
+    /// overlay. Null when HC is not layered. The chrome keeps this pair
+    /// (#790); the native config and every surface keep the HC palette.
+    /// </summary>
+    private (uint Background, uint Foreground, bool ForegroundExplicit)? _preHcPair;
+
+    // The preview config's (pre-HC) explicitness while one is up, so the
+    // seam answers for the pair the preview actually applied.
+    private bool? _previewForegroundExplicit;
 
     /// <summary>
     /// The current config handle. Passed to <see cref="GhosttyHost"/>
@@ -742,7 +785,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         catch (Exception ex)
         {
             // ReadFlags reads files, so it can fail on a config another
-            // process holds. Reload and RefreshForOsColorScheme already
+            // process holds. Reload and the snapshot refresh already
             // treat that as recoverable; this one used to be the exception,
             // and an unhandled throw here kills the process inside
             // App.OnLaunched with no window and no message.
@@ -753,16 +796,18 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             StaticLoggers.ConfigService.LogSnapshotRefreshFailed(ex);
 
             // Consistent is not the same as usable, and the retry has to
-            // stay open. ReadFlags records the scheme its caches hold as its
-            // last act, so a throw leaves the field at its default of false.
-            // On a light desktop that is accidentally the truth, and
-            // RefreshForOsColorScheme's "already on this scheme" guard would
-            // then decline every retry for the life of the process, leaving
-            // the chrome on field defaults that no build renders. Point the
-            // flag at the scheme we do not have so the next flip goes
-            // through.
-            _themedValuesAreForDarkOs = !isOsDark;
+            // stay open. The constructor's native config was finalized with
+            // this scheme, so that is the applied scheme even though the C#
+            // snapshot failed; `SnapshotFailed` makes startup force one
+            // reload instead of trusting the equal Pending/Applied pair.
+            SnapshotFailed = true;
+            _themedValuesAreForDarkOs = isOsDark;
         }
+
+        // The constructor's snapshot is the first applied config. Later
+        // reloads increment the generation; preview fan-outs do not.
+        PendingDark = isOsDark;
+        AppliedGeneration = 1;
     }
 
     private static Ghostty.Core.Interop.GhosttyColorScheme ToScheme(bool isDark)
@@ -865,7 +910,128 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         if (AutoReloadEnabled) StartWatcher();
     }
 
+    /// <summary>
+    /// Record a desktop scheme observation. The next applied reload builds
+    /// with it; nothing is committed until that reload passes its gates.
+    /// Also clears a declined attempt, so a new observation is a fresh try.
+    /// </summary>
+    internal void NoteObservedScheme(bool dark)
+    {
+        // A duplicate observation (every window sees the same OS event, and
+        // an accent change raises it too) must not re-arm a declined attempt:
+        // each retry builds the config, and a held file blocks the loader.
+        if (PendingDark == dark) return;
+        PendingDark = dark;
+        _declinedDark = null;
+    }
+
+    /// <summary>
+    /// Apply the observed scheme transactionally: build and gate the config
+    /// first, and only then commit the app/surface conditional state and the
+    /// config together. A decline touches no conditional state and emits no
+    /// soft reload.
+    /// </summary>
+    internal bool ApplyPendingScheme(bool force = false)
+    {
+        // Same teardown fence as Reload: the app may already be freed, and
+        // this can be reached from a queued soft action (#208).
+        if (_shuttingDown || _app.Handle == IntPtr.Zero) return false;
+        if (_inSchemeTransaction) return false;
+        if (!force && !SnapshotFailed && PendingDark == AppliedDark) return true;
+
+        // A duplicate observation of a target this transaction already
+        // declined must not pay the loader's held-file retry again. An
+        // explicit reload clears the marker before calling; a new
+        // observation clears it in NoteObservedScheme.
+        if (!force && _declinedDark is { } declined && declined == PendingDark)
+            return false;
+
+        var target = PendingDark;
+        _inSchemeTransaction = true;
+        SchemeAttempts++;
+        try
+        {
+            var applied = ReloadWithScheme(target);
+            if (applied)
+            {
+                _declinedDark = null;
+            }
+            else
+            {
+                _declinedDark = target;
+            }
+            return applied;
+        }
+        finally
+        {
+            _inSchemeTransaction = false;
+        }
+    }
+
+    /// <summary>
+    /// A soft <c>reload_config</c> action. The commit itself raises one when
+    /// it moves the conditional state; that action must not start another
+    /// attempt, and neither must a decline. Only a pending scheme nobody has
+    /// tried yet starts a transaction.
+    /// </summary>
+    internal void ReloadFromSoftAction()
+    {
+        if (_declinedDark is not null) return;
+        if (PendingDark == AppliedDark) return;
+        ApplyPendingScheme();
+    }
+
+    /// <summary>
+    /// Startup: record the window's sample and apply it if it differs from
+    /// the constructor's snapshot, or if that snapshot failed (a config
+    /// another process held). Runs once, before the first paint.
+    /// </summary>
+    internal void ApplyStartupScheme(bool observedDark)
+    {
+        NoteObservedScheme(observedDark);
+        if (SnapshotFailed || PendingDark != AppliedDark)
+            ApplyPendingScheme(force: SnapshotFailed);
+    }
+
+    /// <summary>
+    /// The ordinary reload: a config-file change, an explicit reload, or a
+    /// High Contrast override. It observes the desktop once so a flip whose
+    /// event was missed is caught; if the observed scheme differs from the
+    /// applied one it runs the scheme transaction instead of silently
+    /// building a config the app and surfaces are not in.
+    /// </summary>
     public bool Reload()
+    {
+        if (_shuttingDown || _app.Handle == IntPtr.Zero) return false;
+
+        // Sample once, first. A flip-back whose event was missed must not
+        // retry a stale target; a held-file decline is retried only while
+        // the desktop still says the target is current.
+        var observed = OsTheme.IsDark();
+        if (SnapshotFailed || observed != AppliedDark)
+        {
+            NoteObservedScheme(observed);
+            // An explicit reload is a retry: a target a previous attempt
+            // declined is allowed to run again now (the file may be free).
+            // The OS handler's duplicate path does not come through here and
+            // still no-ops on the same declared target.
+            _declinedDark = null;
+            return ApplyPendingScheme(force: SnapshotFailed);
+        }
+
+        // The desktop is back on the applied scheme: drop a target that a
+        // previous attempt declined and reload the file on the current one.
+        _declinedDark = null;
+        return ReloadWithScheme(AppliedDark);
+    }
+
+    /// <summary>
+    /// Build and apply a config for an explicit scheme. The caller has
+    /// already put the app and every surface into that scheme (or is
+    /// applying the same one they are already in). This is the only body
+    /// that calls <c>AppUpdateConfig</c>.
+    /// </summary>
+    internal bool ReloadWithScheme(bool isOsDark)
     {
         // No reloads once teardown has begun: the libghostty app (and the
         // DX12 renderer it drives) may already be freed, so AppUpdateConfig
@@ -894,13 +1060,6 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // instruction.
         var loadDefaultsRequested = _loadDefaultsPending;
         _loadDefaultsPending = false;
-
-        // Sampled once for the whole reload. Sampling again for ReadFlags
-        // would let a desktop flip between the two land a config resolved
-        // against one scheme in caches recorded as holding the other, and
-        // the second sample is the one the retry guard believes -- so the
-        // first would never be corrected.
-        var isOsDark = OsTheme.IsDark();
 
         // One read of the requested High Contrast palette for the whole
         // reload, handed to the build, and the palette the build reports it
@@ -1156,7 +1315,63 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             return false;
         }
 
+        // The chrome's High Contrast exception needs the same config without
+        // the HC layer. Built after every gate so a declined reload pays
+        // nothing; only the scalars survive, the handle is freed here.
+        _preHcPair = null;
+        if (highContrastBuilt is not null)
+        {
+            GhosttyConfig preHighContrast;
+            try
+            {
+                preHighContrast = BuildLiveConfig(
+                    overlayPath: null, isOsDark, highContrast: null,
+                    out _, out _, out _, out _);
+            }
+            catch (Exception ex)
+            {
+                NativeMethods.ConfigFree(newConfig);
+                _suppressWatcher = wasSuppressed;
+                StaticLoggers.ConfigService.LogReloadFailed(ex);
+                return false;
+            }
+
+            try
+            {
+                var preHcPair = ResolveChromePair(preHighContrast);
+                _preHcPair = (
+                    preHcPair.Background,
+                    preHcPair.Foreground,
+                    NativeMethods.ConfigForegroundIsExplicit(preHighContrast));
+            }
+            finally
+            {
+                NativeMethods.ConfigFree(preHighContrast);
+            }
+        }
+
+        // Resolve the pair from the config that is about to be committed,
+        // before the commit. ReadFlags runs after the native swap and can
+        // throw on a file another process holds; if it does, the pair must
+        // already match the scheme and config the surfaces just received.
+        var committedPair = _preHcPair is { } preHcCommitted
+            ? (preHcCommitted.Background, preHcCommitted.Foreground)
+            : ResolveChromePair(newConfig);
+        BackgroundColor = committedPair.Background;
+        ForegroundColor = committedPair.Foreground;
+
+        // Commit the conditional state and the config together, and only
+        // after every gate above. A declined reload therefore never moves
+        // the app or a surface, and emits no soft reload; a soft reload the
+        // commit itself raises is a no-op because PendingDark is set here
+        // before the queued action runs.
+        var scheme = ToScheme(isOsDark);
+        NativeMethods.AppSetColorScheme(_app, scheme);
+        Ghostty.App.NotifyAllSurfacesColorScheme(scheme);
         NativeMethods.AppUpdateConfig(_app, newConfig);
+        _themedValuesAreForDarkOs = isOsDark;
+        PendingDark = isOsDark;
+        AppliedGeneration++;
 
         // Any palette theme preview is over: the app now holds a clone of
         // the committed config, so the preview config is no longer
@@ -1188,9 +1403,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         {
             CacheDiagnostics();
             ReadFlags(isOsDark);
+            // Only a snapshot that actually landed clears the forced-retry
+            // marker; a throw below leaves it set so the next reload tries
+            // the file again instead of trusting ctor defaults.
+            SnapshotFailed = false;
         }
         catch (Exception ex)
         {
+            SnapshotFailed = true;
             // ReadFlags reads files, so this is reachable on a locked or
             // half-written config -- most likely right after a save, while
             // the editor still holds the file. Reload runs inside a
@@ -1242,90 +1462,6 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             ConfigChangeFanOut.InvokeAll(ProfileConfigChanged, LogChangedHandlerFault);
         });
         return true;
-    }
-
-    /// <summary>
-    /// Re-resolve the config values that depend on the OS colour scheme,
-    /// and notify. The guard is on the scheme itself, not on whether a
-    /// conditional theme is configured, so a plain theme refreshes to the
-    /// same values and notifies anyway -- a flip is rare enough that the
-    /// redundant fan-out is cheaper than a second thing to keep in sync.
-    ///
-    /// A conditional <c>theme = light:X,dark:Y</c> picks its file when the
-    /// config is read, so an OS light/dark flip leaves every colour in the
-    /// theme cache pointing at the wrong palette. libghostty handles its
-    /// own side of the flip -- <c>AppSetColorScheme</c> moves the
-    /// conditional state and the surfaces repaint -- but the C# chrome
-    /// reads these cached values, so without this it keeps painting the
-    /// outgoing palette next to freshly repainted terminals.
-    ///
-    /// This itself does no reloading: the config file has not changed, so
-    /// re-parsing it would push a redundant AppUpdateConfig through to the
-    /// renderer, and only the file-derived caches are rebuilt. Note that a
-    /// subscriber can still reload downstream -- under High Contrast,
-    /// HighContrastMonitor rebuilds its override from system colours,
-    /// which do move on a flip, and hands it back through
-    /// SetHighContrastOverride.
-    /// </summary>
-    /// <param name="isOsDark">
-    /// The scheme the caller observed. Passed in rather than sampled here
-    /// so the value that drove <c>AppSetColorScheme</c> is the same one
-    /// the caches are rebuilt against; sampling again could disagree with
-    /// it and leave the two sides describing different schemes.
-    /// </param>
-    public void RefreshForOsColorScheme(bool isOsDark)
-    {
-        // Only the shutdown fence applies. Reload's second guard is about
-        // the pre-creation window before SetApp; by the time a window can
-        // observe a scheme change the app exists, so it would never fire.
-        // _shuttingDown is what actually matters: ReadFlagsCore reads the
-        // config handle, and ConfigChanged subscribers touch XAML, neither
-        // of which survives teardown.
-        if (_shuttingDown) return;
-
-        // Every window observes ColorValuesChanged, so this runs once per
-        // window per flip and only the first call finds a difference. Also
-        // filters the ColorValuesChanged firings that carry no scheme
-        // change at all -- accent colour edits and High Contrast toggles
-        // raise the same event.
-        if (_themedValuesAreForDarkOs == isOsDark) return;
-
-        try
-        {
-            ReadFlags(isOsDark);
-        }
-        catch (Exception ex)
-        {
-            // ReadFlags reads three files (the config, the theme, and the
-            // config again for the profile pass). Windows fires this event
-            // unattended on the auto light/dark schedule, and this runs
-            // inside a dispatcher lambda, so letting an IO failure escape
-            // would take the process down with every session in it.
-            //
-            // Whichever read failed, the scheme flag and the theme cache
-            // agree, so the palette is either wholly the old one or wholly
-            // the new one and the next flip is still able to move it.
-            StaticLoggers.ConfigService.LogThemeRefreshFailed(ex);
-        }
-
-        // Notified even when the read above threw. A failure partway can
-        // still leave the caches holding the incoming palette, and since
-        // the flag advances with them the guard would decline every retry
-        // -- so staying quiet here is what would strand the chrome, not
-        // what protects it. On the legs where nothing moved, subscribers
-        // re-read the values they already had.
-        //
-        // Deferred rather than invoked inline so the fan-out does not run
-        // on top of the ColorValuesChanged dispatcher frame, and to match
-        // the shape Reload already uses. The caches have finished settling
-        // either way -- ReadFlags is synchronous and has returned.
-        //
-        // Contained for the same reason as Reload's fan-out, and it matters
-        // more here: this leg fires unattended on the OS light/dark schedule
-        // and on every high-contrast toggle, so a faulting subscriber would
-        // kill the app while nobody was touching it.
-        _dispatcher.TryEnqueue(
-            () => ConfigChangeFanOut.InvokeAll(ConfigChanged, this, LogChangedHandlerFault));
     }
 
     /// <summary>
@@ -1540,7 +1676,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // fresh flag and fresh caches, which is the right palette. Recording
         // it at either end of this method instead lets one leg strand the
         // service claiming a scheme its caches do not hold, and the guard in
-        // RefreshForOsColorScheme would then decline every retry.
+        // the old retry guard would then decline every retry.
         _themedValuesAreForDarkOs = isOsDark;
 
         // _configFileCache and _activeThemeFileCache deliberately survive
@@ -1681,18 +1817,20 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         WindowSaveState = Ghostty.Core.Hosting.WindowSaveStateExtensions.Parse(
             GetString("window-save-state", "default"));
 
-        // Resolved from the config and theme text rather than through
-        // ghostty_config_get. The native handle is finalized against the
-        // scheme that was current when it was built, and an OS light/dark
-        // flip re-enters here without rebuilding it, so on the far side of
-        // a flip it still answers for the outgoing scheme. The text path
-        // takes isOsDark per call and does not have that problem.
+        // The pair the terminal renders, read from the finalized native
+        // config. This is the only source that sees every layer (file,
+        // config-file include, CLI, theme, High Contrast) with libghostty's
+        // own precedence. Reading the text caches here made the chrome miss
+        // an included or CLI colour while the terminal had it.
         //
-        // The defaults are libghostty's own compile-time colours, reached
-        // only on a build with no built-in theme; otherwise the built-in
-        // theme has already supplied both.
-        BackgroundColor = ResolveThemedColor("background", 0x00282C34);
-        ForegroundColor = ResolveThemedColor("foreground", 0x00FFFFFF);
+        // Under High Contrast the native pair is the system palette, and
+        // the chrome contract (#790) keeps the config/theme pair; that one
+        // is built separately in Reload and stored in _preHcPair.
+        var pair = _highContrast.Applied is not null && _preHcPair is { } preHc
+            ? (preHc.Background, preHc.Foreground)
+            : ResolveChromePair(_config);
+        BackgroundColor = pair.Background;
+        ForegroundColor = pair.Foreground;
         (CursorColor, CursorTextColor) = ResolveCursorColors(ForegroundColor, BackgroundColor);
 
         // accent-color is a Windows-only key (no Zig schema entry).
@@ -1860,9 +1998,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         if (!ThemeCatalog.IsPersistableName(themeName)) return false;
         if (ResolveThemePath(themeName) is not { } themePath) return false;
 
-        var isOsDark = OsTheme.IsDark();
+        // The applied scheme, not a fresh desktop sample: the preview must
+        // build the half the running config/surfaces are in, or confirm and
+        // preview describe different schemes.
+        var isOsDark = AppliedDark;
         Dictionary<string, List<string>>? themeCache;
         GhosttyConfig preview;
+        var previewHasHighContrast = false;
         try
         {
             themeCache = LoadIniFile(themePath);
@@ -1870,7 +2012,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             if (overlay is null) return false;
             preview = BuildLiveConfig(
                 overlay, isOsDark, _highContrast.Wanted,
-                out var previewFiles, out var previewFilesFound, out _, out _);
+                out var previewFiles, out var previewFilesFound, out _, out var previewHcBuilt);
+            previewHasHighContrast = previewHcBuilt is not null;
+            _previewForegroundExplicit = NativeMethods.ConfigForegroundIsExplicit(preview);
 
             // The same gate a reload takes, for a sharper reason: a preview
             // that could not read the user's config shows the theme over pure
@@ -1922,7 +2066,42 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // after the content beside it. The XAML side queues its
         // compositor updates first and the terminals follow, so a preview
         // arrives as one visible step (issue #1121).
-        var colors = ResolveThemeColors(themeCache, preview);
+        // Under High Contrast the preview config carries the system palette;
+        // the chrome keeps the pre-HC pair (#790), so build the same preview
+        // without the HC layer and read the pair from that. The handle is
+        // freed immediately; only the colours survive.
+        GhosttyConfig? previewPreHc = null;
+        if (previewHasHighContrast)
+        {
+            try
+            {
+                var pre = BuildLiveConfig(
+                    WriteThemePreviewOverlay(themeName), isOsDark, highContrast: null,
+                    out _, out _, out _, out _);
+                previewPreHc = pre;
+                _previewForegroundExplicit =
+                    NativeMethods.ConfigForegroundIsExplicit(pre);
+            }
+            catch (Exception ex)
+            {
+                NativeMethods.ConfigFree(preview);
+                DeleteThemePreviewOverlay();
+                StaticLoggers.ConfigService.LogThemePreviewFailed(ex, themeName);
+                return false;
+            }
+        }
+
+        ThemePreviewColors colors;
+        try
+        {
+            colors = ResolveThemeColors(themeCache, previewPreHc ?? preview);
+        }
+        finally
+        {
+            if (previewPreHc is { } pre && pre.Handle != IntPtr.Zero)
+                NativeMethods.ConfigFree(pre);
+        }
+
         ApplyThemeColors(colors.Foreground, colors.Background, colors.Cursor, colors.CursorText, colors.Palette);
 
         NativeMethods.AppUpdateConfig(_app, preview);
@@ -1991,11 +2170,40 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     internal uint? GetLiveNativeColor(string key)
         => GetColorFrom(_previewConfig.Handle != IntPtr.Zero ? _previewConfig : _config, key);
 
+    /// <summary>
+    /// Whether the live config's `foreground` is the user's own value.
+    /// Read from the same predicate the native floor uses, so the seam can
+    /// tell a floored pair from an exempt one.
+    /// </summary>
+    internal bool LiveForegroundIsExplicit
+    {
+        get
+        {
+            if (_previewConfig.Handle != IntPtr.Zero && _previewForegroundExplicit is { } preview)
+                return preview;
+            var source = _previewConfig.Handle != IntPtr.Zero ? _previewConfig : _config;
+            return source.Handle != IntPtr.Zero &&
+                NativeMethods.ConfigForegroundIsExplicit(source);
+        }
+    }
+
+    /// <summary>The pre-High-Contrast chrome pair, or null when HC is not
+    /// layered.</summary>
+    internal (uint Background, uint Foreground)? PreHighContrastPair
+        => _preHcPair is { } p ? (p.Background, p.Foreground) : null;
+
+    /// <summary>Whether the pre-High-Contrast `foreground` is the user's.</summary>
+    internal bool? PreHighContrastForegroundExplicit
+        => _previewConfig.Handle != IntPtr.Zero && _previewForegroundExplicit is { } preview
+            ? preview
+            : _preHcPair?.ForegroundExplicit;
+
     private void ReleaseThemePreviewConfig()
     {
         var preview = _previewConfig;
         _previewConfig = default;
         _previewThemeName = null;
+        _previewForegroundExplicit = null;
         if (preview.Handle != IntPtr.Zero) NativeMethods.ConfigFree(preview);
         DeleteThemePreviewOverlay();
     }
@@ -2161,6 +2369,73 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// is only read while a preview config is being built from it; the next
     /// preview overwrites it.
     /// </summary>
+    /// <summary>
+    /// Apply a chrome-only preview for the +list-themes TUI. The pair comes
+    /// from a real native build of `theme = &lt;absolute path&gt;` (so
+    /// config-file includes and CLI values layer exactly as confirm will),
+    /// with no High Contrast layer; only the C# colours change. The terminal
+    /// keeps the committed config until the user confirms, as this preview
+    /// always has.
+    /// </summary>
+    internal bool ApplyLegacyPreview(
+        string themePath, uint[] palette, uint? cursor, uint? cursorText)
+    {
+        if (_shuttingDown || _app.Handle == IntPtr.Zero) return false;
+        if (LegacyThemePreviewOverlayPath() is not { } overlay) return false;
+
+        try
+        {
+            File.WriteAllText(overlay, $"theme = {themePath}\n");
+        }
+        catch (Exception ex)
+        {
+            try { File.Delete(overlay); } catch (Exception) { }
+            StaticLoggers.ConfigService.LogThemePreviewFailed(ex, themePath);
+            return false;
+        }
+
+        GhosttyConfig config = default;
+        try
+        {
+            try
+            {
+                config = BuildLiveConfig(
+                    overlay, AppliedDark, highContrast: null,
+                    out var files, out var found, out _, out _);
+                if (ConfigReloadGate.Decide(files, found, _defaultFilesFound) ==
+                    ConfigReloadDecision.Decline)
+                    return false;
+            }
+            catch (Exception ex)
+            {
+                StaticLoggers.ConfigService.LogThemePreviewFailed(ex, themePath);
+                return false;
+            }
+
+            var pair = ResolveChromePair(config);
+            ApplyThemeColors(
+                pair.Foreground,
+                pair.Background,
+                cursor ?? pair.Foreground,
+                cursorText ?? pair.Background,
+                palette);
+            return true;
+        }
+        finally
+        {
+            if (config.Handle != IntPtr.Zero) NativeMethods.ConfigFree(config);
+            try { File.Delete(overlay); } catch (Exception) { }
+        }
+    }
+
+    private static string? LegacyThemePreviewOverlayPath()
+        => string.IsNullOrEmpty(Ghostty.Core.AppStateBase.LocalRoot)
+            ? null
+            : Path.Combine(
+                Ghostty.Core.AppStateBase.LocalRoot,
+                Ghostty.Core.AppIdentity.StateDirName,
+                "legacy-theme-preview.conf");
+
     private static string? ThemePreviewOverlayPath()
         => string.IsNullOrEmpty(Ghostty.Core.AppStateBase.LocalRoot)
             ? null
@@ -2199,15 +2474,30 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         _activeThemeFileCache = themeCache;
         try
         {
-            var background = ResolveThemedColor("background", 0x00282C34, source);
-            var foreground = ResolveThemedColor("foreground", 0x00FFFFFF, source);
-            var (cursor, cursorText) = ResolveCursorColors(foreground, background);
-            return new ThemePreviewColors(foreground, background, cursor, cursorText, GetAllPaletteColors());
+            var pair = ResolveChromePair(source);
+            var (cursor, cursorText) = ResolveCursorColors(pair.Foreground, pair.Background);
+            return new ThemePreviewColors(pair.Foreground, pair.Background, cursor, cursorText, GetAllPaletteColors());
         }
         finally
         {
             _activeThemeFileCache = committedTheme;
         }
+    }
+
+    /// <summary>
+    /// The chrome pair from a finalized config: native colours at
+    /// libghostty's precedence, with the readable-pole floor on a
+    /// foreground the user did not write.
+    /// </summary>
+    private static (uint Background, uint Foreground) ResolveChromePair(GhosttyConfig source)
+    {
+        var background = GetColorFrom(source, "background") ?? 0x00282C34;
+        var foreground = GetColorFrom(source, "foreground") ?? 0x00FFFFFF;
+        foreground = ThemeResolution.ResolveTerminalForeground(
+            background,
+            foreground,
+            NativeMethods.ConfigForegroundIsExplicit(source));
+        return (background, foreground);
     }
 
     /// <summary>
@@ -2979,11 +3269,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // A preview still up at teardown: the revert is fenced off once
         // shutdown starts, so whatever preview config is left is freed here,
         // after the app that cloned it.
-        if (_previewConfig.Handle != IntPtr.Zero)
-        {
-            NativeMethods.ConfigFree(_previewConfig);
-            _previewConfig = default;
-        }
+        ReleaseThemePreviewConfig();
         if (_config.Handle != IntPtr.Zero)
             NativeMethods.ConfigFree(_config);
     }

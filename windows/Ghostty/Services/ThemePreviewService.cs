@@ -364,16 +364,20 @@ internal sealed partial class ThemePreviewService : IDisposable
         var themePath = Path.Combine(configDir, "themes", themeName);
         if (!File.Exists(themePath)) return;
 
-        var (palette, fg, bg, cursor, cursorText) = ParseThemeFile(themePath);
+        // File I/O only on this thread; the native build, explicitness and
+        // floor read `_configService` and belong on the UI thread. The pair
+        // comes from the same resolver confirm uses, so a floored theme
+        // previews floored and an included/CLI colour previews as it will
+        // confirm.
+        var (palette, _, _, cursor, cursorText) = ParseThemeFile(themePath);
 
-        // If called from the UI thread (inline picker dispatch), apply
-        // directly. If called from a background thread (pipe server),
-        // dispatch to UI thread.
+        void Apply() => _configService.ApplyLegacyPreview(
+            themePath, palette, cursor, cursorText);
+
         if (_dispatcher.HasThreadAccess)
-            _configService.ApplyThemeColors(fg, bg, cursor, cursorText, palette);
+            Apply();
         else
-            _dispatcher.TryEnqueue(() =>
-                _configService.ApplyThemeColors(fg, bg, cursor, cursorText, palette));
+            _dispatcher.TryEnqueue(Apply);
     }
 
     private static (uint[] palette, uint fg, uint bg, uint? cursor, uint? cursorText) ParseThemeFile(string path)
