@@ -20,21 +20,19 @@
   pkg-config,
   python3,
   qemu,
-  scdoc,
   # snapcraft,
   valgrind,
   #, vulkan-loader # unused
   vttest,
-  wabt,
   wasm-tools,
-  wasmtime,
   binaryen,
   twiggy,
   wizer,
   wraptest,
   zig,
   zip,
-  llvmPackages_latest,
+  aflplusplus,
+  llvmPackages_22,
   bzip2,
   expat,
   fontconfig,
@@ -44,6 +42,7 @@
   gtk4-layer-shell,
   gobject-introspection,
   gst_all_1,
+  graphene,
   libadwaita,
   blueprint-compiler,
   gettext,
@@ -83,6 +82,8 @@
   # developer shell
   glycin-loaders,
   librsvg,
+  runCommandLocal,
+  withAfl ? false,
 }: let
   # See package.nix. Keep in sync.
   ld_library_path = import ./build-support/ld-library-path.nix {
@@ -97,6 +98,16 @@
     python-pkgs.ucs-detect
     python-pkgs.wasmtime
   ]);
+
+  # FIXME: Zig 0.17's pkg-config parser is much stricter than before
+  # and rejects any C flags it does not recognize.
+  patchedPkgConfig = runCommandLocal "patched-pkg-config" {} ''
+    mkdir $out
+    substitute ${graphene.dev}/lib/pkgconfig/graphene-1.0.pc $out/graphene-1.0.pc \
+      --replace-quiet '-mfpmath=sse -msse -msse2' ""
+    substitute ${glib.dev}/lib/pkgconfig/gmodule-2.0.pc $out/gmodule-2.0.pc \
+      --replace-quiet '-Wl,--export-dynamic' ""
+  '';
 in
   mkShell {
     name = "ghostty";
@@ -109,12 +120,10 @@ in
         # The fork's build and check recipes live in the justfile, and CI
         # invokes them through `nix develop -c just <recipe>`.
         just
-        llvmPackages_latest.llvm
         minisign
         ncurses
         pandoc
         pkg-config
-        scdoc
         zig
         zip
         zon2nix.packages.${stdenv.hostPlatform.system}.zon2nix
@@ -143,9 +152,7 @@ in
         # wasm
         binaryen
         twiggy
-        wabt
         wasm-tools
-        wasmtime
         wizer
 
         # Localization
@@ -156,12 +163,6 @@ in
 
         # Scripting
         nushell
-
-        # We need these GTK-related deps on all platform so we can build
-        # dist tarballs.
-        blueprint-compiler
-        libadwaita
-        gtk4
       ]
       ++ lib.optionals stdenv.hostPlatform.isLinux [
         # My nix shell environment installs the non-interactive version
@@ -200,6 +201,9 @@ in
         libXrandr
 
         # Only needed for GTK builds
+        blueprint-compiler
+        libadwaita
+        gtk4
         gtk4-layer-shell
         glib
         gobject-introspection
@@ -218,6 +222,13 @@ in
         # for benchmarking
         poop
       ]
+      ++ lib.optionals (stdenv.hostPlatform.isLinux && withAfl) [
+        (aflplusplus.override {
+          clang = llvmPackages_22.clang;
+          llvm = llvmPackages_22.llvm;
+          llvmPackages = llvmPackages_22;
+        })
+      ]
       ++ lib.optionals stdenv.hostPlatform.isDarwin [
         swiftlint
       ];
@@ -235,6 +246,8 @@ in
         # Minimal subset of env set by wrapGAppsHook4 for icons and global settings
         export XDG_DATA_DIRS=$XDG_DATA_DIRS:${hicolor-icon-theme}/share:${adwaita-icon-theme}/share
         export XDG_DATA_DIRS=$XDG_DATA_DIRS:$GSETTINGS_SCHEMAS_PATH # from glib setup hook
+
+        export PKG_CONFIG_PATH=${patchedPkgConfig}:$PKG_CONFIG_PATH
       '')
       + (lib.optionalString stdenv.hostPlatform.isDarwin ''
         # On macOS, we unset the macOS SDK env vars that Nix sets up because

@@ -453,12 +453,18 @@ pub fn reset(self: *Screen) void {
         // Reset kitty graphics storage
         const image_limits = self.kitty_images.image_limits;
         const total_limit = self.kitty_images.total_limit;
+        const dirty = self.kitty_images.dirty;
         self.kitty_images.deinit(self.alloc, self);
         self.kitty_images = .{
-            .dirty = true,
+            // Carry the counter over instead of starting from zero.
+            // A consumer that saw the old storage's value must see a
+            // different one after the reset, and a fresh counter could
+            // happen to match it.
+            .dirty = dirty,
             .image_limits = image_limits,
             .total_limit = total_limit,
         };
+        self.kitty_images.markDirty();
     }
 
     // Reset our basic state
@@ -964,7 +970,7 @@ pub fn cursorDownScroll(self: *Screen) !void {
 
     if (comptime build_options.kitty_graphics) {
         // Scrolling dirties the images because it updates their placements pins.
-        self.kitty_images.dirty = true;
+        self.kitty_images.markDirty();
     }
 
     // If we have no scrollback, then we shift all our rows instead.
@@ -1684,7 +1690,7 @@ pub inline fn scroll(self: *Screen, behavior: Scroll) void {
         // No matter what, scrolling marks our image state as dirty since
         // it could move placements. If there are no placements or no images
         // this is still a very cheap operation.
-        self.kitty_images.dirty = true;
+        self.kitty_images.markDirty();
     }
 
     switch (behavior) {
@@ -1697,19 +1703,70 @@ pub inline fn scroll(self: *Screen, behavior: Scroll) void {
     }
 }
 
-/// See PageList.scrollClear. In addition to that, we reset the cursor
-/// to be on top.
+/// Clear the screen by scrolling its contents up into the scrollback,
+/// instead of erasing them. Everything up to and including the last
+/// non-empty row of the active area moves into history, so the user can
+/// still scroll back to see it. This is how "clear" behaves in many
+/// terminals and is what `Terminal.eraseDisplay(.scroll_complete)` uses.
+///
+/// The cursor is kept valid afterwards:
+///
+///   - If the cursor's row is still in the active area (it was below all
+///     of the written content), it stays on that row, which is now
+///     closer to the top.
+///   - Otherwise the cursor's row has scrolled into history, and the
+///     cursor moves to the top-left of the active area.
+///
+/// In both cases the cursor keeps its current style and hyperlink, so
+/// the next printed text looks the same as it would have before the
+/// clear. The viewport is not changed. See `PageList.scrollClear` for
+/// the details of how rows are scrolled.
+///
+/// Example:
+///
+/// ```zig
+/// try screen.testWriteString("hello\nworld");
+/// try screen.scrollClear();
+///
+/// // "hello" and "world" are now in the scrollback, the active area
+/// // is empty, and the cursor is at the top-left.
+/// ```
+///
+/// Returns an error if memory for the new rows can't be allocated.
 pub inline fn scrollClear(self: *Screen) !void {
     defer self.assertIntegrity();
 
+    // Scrolling adds rows one at a time, and each new row can cause the
+    // oldest scrollback page to be deleted to stay within the scrollback
+    // limit. If the deleted page held the cursor, the page list moves the
+    // cursor pin to a page that still exists.
+    //
+    // The cursor's style and hyperlink are stored by ID, and IDs only
+    // mean something on the page that created them. So when the cursor
+    // ends up on a different page, we have to register the style and
+    // hyperlink again on that page. A plain cursorReload isn't enough.
+    // cursorDownScroll handles the same situation for a single row.
+    const old_node = self.cursor.page_pin.node;
     try self.pages.scrollClear();
-    self.cursorReload();
+    if (self.cursor.page_pin.node != old_node) {
+        // The page list marks a moved pin as garbage. The pin does point
+        // at a real location, and cursorReload needs to read it to place
+        // the cursor, so we clear the flag.
+        self.cursor.page_pin.garbage = false;
+
+        // The old page has been freed, so nothing can be released from
+        // it. cursorPageReplaced adds the style and hyperlink to the new
+        // page and then reloads the cursor.
+        self.cursorPageReplaced();
+    } else {
+        self.cursorReload();
+    }
 
     if (comptime build_options.kitty_graphics) {
         // No matter what, scrolling marks our image state as dirty since
         // it could move placements. If there are no placements or no images
         // this is still a very cheap operation.
-        self.kitty_images.dirty = true;
+        self.kitty_images.markDirty();
     }
 }
 
@@ -1726,8 +1783,20 @@ pub inline fn eraseHistory(
     bl: ?point.Point,
 ) void {
     defer self.assertIntegrity();
+
+    // Placements anchored in the erased rows are removed first, while
+    // their pins still identify those rows. Erasing marks those pins as
+    // garbage and moves them to the top-left of the retained rows.
+    if (comptime build_options.kitty_graphics) {
+        self.kitty_images.eraseHistory(self.io, self, bl);
+    }
+
     self.pages.eraseHistory(bl);
     self.cursorReload();
+
+    // Erasing rows shifts the placements below them, so placements may
+    // have moved.
+    if (comptime build_options.kitty_graphics) self.kitty_images.markDirty();
 }
 
 pub inline fn eraseActive(
@@ -1737,6 +1806,10 @@ pub inline fn eraseActive(
     defer self.assertIntegrity();
     self.pages.eraseActive(y);
     self.cursorReload();
+
+    // Erasing rows removes placements attached to them and shifts the
+    // ones below, so placements may have moved.
+    if (comptime build_options.kitty_graphics) self.kitty_images.markDirty();
 }
 
 // Clear the region specified by tl and bl, inclusive. Cleared cells are
@@ -2170,7 +2243,7 @@ pub inline fn resize(
     errdefer comptime unreachable;
 
     // Resizing moves image placements, so mark their geometry as dirty.
-    if (comptime build_options.kitty_graphics) self.kitty_images.dirty = true;
+    if (comptime build_options.kitty_graphics) self.kitty_images.markDirty();
 
     // If we have no scrollback and we shrunk our rows, we must explicitly
     // erase our history. This is because PageList always keeps at least
@@ -2473,11 +2546,11 @@ pub fn setAttribute(
         },
 
         .@"8_fg" => |n| {
-            self.cursor.style.fg_color = .{ .palette = @intFromEnum(n) };
+            self.cursor.style.fg_color = .{ .palette = @backingInt(n) };
         },
 
         .@"8_bg" => |n| {
-            self.cursor.style.bg_color = .{ .palette = @intFromEnum(n) };
+            self.cursor.style.bg_color = .{ .palette = @backingInt(n) };
         },
 
         .reset_fg => self.cursor.style.fg_color = .none,
@@ -2485,11 +2558,11 @@ pub fn setAttribute(
         .reset_bg => self.cursor.style.bg_color = .none,
 
         .@"8_bright_fg" => |n| {
-            self.cursor.style.fg_color = .{ .palette = @intFromEnum(n) };
+            self.cursor.style.fg_color = .{ .palette = @backingInt(n) };
         },
 
         .@"8_bright_bg" => |n| {
-            self.cursor.style.bg_color = .{ .palette = @intFromEnum(n) };
+            self.cursor.style.bg_color = .{ .palette = @backingInt(n) };
         },
 
         .@"256_fg" => |idx| {
@@ -4085,7 +4158,7 @@ test "Screen read and write no scrollback large" {
 
     for (0..1_000) |i| {
         var buf: [128]u8 = undefined;
-        const str = try std.fmt.bufPrint(&buf, "{}\n", .{i});
+        const str = try std.mem.print(&buf, "{}\n", .{i});
         try s.testWriteString(str);
     }
     try s.testWriteString("1000");
@@ -6319,7 +6392,7 @@ test "Screen: scroll above hyperlink-dense row to fresh page" {
     // page can hold with default hyperlink capacity.
     for (0..s.pages.cols) |i| {
         var buf: [64]u8 = undefined;
-        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{i});
+        const uri = try std.mem.print(&buf, "http://example.com/{d}", .{i});
         try s.startHyperlink(uri, null);
         try s.testWriteString("A");
         s.endHyperlink();
@@ -6375,7 +6448,7 @@ test "Screen: scroll above hyperlink-dense row to fresh page" {
         const id = page.lookupHyperlink(list_cell.cell).?;
         const link = page.hyperlink_set.get(page.memory, id);
         var buf: [64]u8 = undefined;
-        const expected = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+        const expected = try std.mem.print(&buf, "http://example.com/{d}", .{x});
         try testing.expectEqualStrings(expected, link.uri.slice(page.memory));
     }
 }
@@ -6402,7 +6475,7 @@ test "Screen: scroll above hyperlink-dense row to existing page" {
     // more than a page can hold with default hyperlink capacity.
     for (0..s.pages.cols) |i| {
         var buf: [64]u8 = undefined;
-        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{i});
+        const uri = try std.mem.print(&buf, "http://example.com/{d}", .{i});
         try s.startHyperlink(uri, null);
         try s.testWriteString("A");
         s.endHyperlink();
@@ -8164,10 +8237,6 @@ test "Screen: resize errors preserve state" {
             .origin = false,
             .charset = s.charset,
         };
-
-        if (comptime build_options.kitty_graphics) {
-            s.kitty_images.dirty = false;
-        }
 
         // Keep a shallow copy for all non-page state and a byte-for-byte
         // copy of the sole page so reference counts and prompt contents are
@@ -11583,8 +11652,8 @@ test "Screen: cursorSetHyperlink OOM + URI too large for string alloc" {
     // Start a hyperlink with a URI that just barely fits in the string alloc.
     // This will ensure that additional string alloc space is needed for the
     // redundant copy of the URI when the page is re-alloced.
-    const uri = "a" ** (pagepkg.std_capacity.string_bytes - 8);
-    try s.startHyperlink(uri, null);
+    const uri: [pagepkg.std_capacity.string_bytes - 8]u8 = @splat('a');
+    try s.startHyperlink(&uri, null);
 
     // Figure out how many cells should can have hyperlinks in this page,
     // and write twice that number, to guarantee the capacity needs to be
@@ -12803,5 +12872,101 @@ test "Screen: selectLine does not join lines across a recycled row" {
         });
         defer alloc.free(contents);
         try testing.expectEqualStrings("world", contents);
+    }
+}
+
+test "Screen: scrollClear cursor page pruned keeps per-page style id" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    // A scrollback limit of 0 lines still keeps one page of rows, which
+    // is the smallest amount allowed. This means the oldest page is
+    // deleted as soon as all of its rows have scrolled into history.
+    var s = try init(io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+        .max_scrollback_bytes = null,
+        .max_scrollback_lines = 0,
+    });
+    defer s.deinit();
+
+    // Fill the first page and put two more rows on a second page. Every
+    // row has text so that scrollClear scrolls the whole active area.
+    const page_rows = s.pages.pages.first.?.capacity().rows;
+    for (0..page_rows + 1) |_| try s.testWriteString("x\n");
+    try s.testWriteString("x");
+    try testing.expect(s.pages.pages.first.? != s.pages.pages.last.?);
+
+    // Move the cursor to the top of the active area, which is the last
+    // row of the first page. Making it bold gives the cursor a style ID
+    // that only exists on the first page.
+    s.cursorAbsolute(0, 0);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try s.setAttribute(.{ .bold = {} });
+    try testing.expect(s.cursor.style_id != style.default_id);
+    const first_node = s.pages.pages.first.?;
+
+    // Clearing scrolls all 3 active rows into history. The first page is
+    // now entirely history, so the scrollback limit deletes it and the
+    // cursor pin is moved to another page.
+    try s.scrollClear();
+    try testing.expect(s.cursor.page_pin.node != first_node);
+
+    // The cursor's style must be registered on the page it moved to.
+    const page = s.cursor.page_pin.node.page();
+    try testing.expect(s.cursor.style_id != style.default_id);
+    try testing.expect(page.styles.refCount(page.memory, s.cursor.style_id) > 0);
+    try testing.expect(!s.cursor.page_pin.garbage);
+
+    // Printing must work and produce a bold cell.
+    try s.testWriteString("y");
+    {
+        const list_cell = s.pages.getCell(.{ .active = .{ .x = 0, .y = 0 } }).?;
+        const cell_style = list_cell.style();
+        try testing.expect(cell_style.flags.bold);
+    }
+}
+
+test "Screen: scrollClear cursor page pruned keeps per-page hyperlink id" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    // Same setup as the style test above, but with a hyperlink instead
+    // of a style. Hyperlink IDs are also only valid on one page.
+    var s = try init(io, alloc, .{
+        .cols = 10,
+        .rows = 3,
+        .max_scrollback_bytes = null,
+        .max_scrollback_lines = 0,
+    });
+    defer s.deinit();
+
+    const page_rows = s.pages.pages.first.?.capacity().rows;
+    for (0..page_rows + 1) |_| try s.testWriteString("x\n");
+    try s.testWriteString("x");
+    try testing.expect(s.pages.pages.first.? != s.pages.pages.last.?);
+
+    s.cursorAbsolute(0, 0);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try s.startHyperlink("http://example.com", null);
+    try testing.expect(s.cursor.hyperlink_id != 0);
+    const first_node = s.pages.pages.first.?;
+
+    try s.scrollClear();
+    try testing.expect(s.cursor.page_pin.node != first_node);
+
+    // The cursor's hyperlink must be registered on the page it moved to.
+    const page = s.cursor.page_pin.node.page();
+    try testing.expect(s.cursor.hyperlink_id != 0);
+    try testing.expect(page.hyperlink_set.refCount(page.memory, s.cursor.hyperlink_id) > 0);
+    try testing.expect(!s.cursor.page_pin.garbage);
+
+    // Printing must work and produce a cell with a hyperlink.
+    try s.testWriteString("y");
+    {
+        const list_cell = s.pages.getCell(.{ .active = .{ .x = 0, .y = 0 } }).?;
+        try testing.expect(list_cell.cell.hyperlink);
     }
 }

@@ -355,7 +355,7 @@ pub const Command = union(enum) {
 
             const valid = writer.end > prefix_len;
             try writer.writeAll("\x1b\\");
-            _ = try std.fmt.bufPrint(
+            _ = try std.mem.print(
                 response[0..prefix_len],
                 prefix_fmt,
                 .{@intFromBool(valid)},
@@ -697,7 +697,7 @@ test "sixel DCS accumulator is capped" {
     // with the whole run. Total fed bytes stay far below max_bytes
     // so only the accumulator cap can trip here.
     _ = h.put('#');
-    for ("1" ** 100) |b| _ = h.put(b);
+    for (&@as([100]u8, @splat('1'))) |b| _ = h.put(b);
 
     switch (h.state) {
         .sixel => |p| try testing.expect(p.state == .ignore),

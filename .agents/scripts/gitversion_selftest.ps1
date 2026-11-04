@@ -93,16 +93,34 @@ function Get-DescribeArguments {
     if ($literals.Count -ne 1) {
         Stop-Harness "expected one describe argument list in GitVersion.zig, found $($literals.Count)"
     }
-    $words = @([regex]::Matches($literals[0].Value, '"([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
+    # Split the array literal into its elements. The path expression is not
+    # a quoted literal in the 0.17 build API (`b.root.subPathOrDot()`), so it
+    # is represented as <root>; a quoted global option in that slot is still
+    # rejected below.
+    $body = $literals[0].Value
+    $body = $body.Substring($body.IndexOf('{') + 1)
+    $body = $body.Substring(0, $body.LastIndexOf('}'))
+    $words = @(
+        foreach ($element in $body -split ',') {
+            $e = $element.Trim()
+            if ($e -match '^"([^"]*)"$') {
+                $Matches[1]
+            } else {
+                '<root>'
+            }
+        }
+    )
 
-    # "git", "-C", <the path expression, whose only literal is its orelse
-    # fallback>, "describe", ... A global option slipped in front of
+    # "git", "-C", <root>, "describe", ... A global option slipped in front of
     # "describe" would mean the product runs a command this script is not
     # reproducing, and a harness quietly testing a different command is worse
     # than no harness.
     $describeAt = [array]::IndexOf($words, 'describe')
     if ($words.Count -lt 5 -or $words[0] -ne 'git' -or $words[1] -ne '-C' -or $describeAt -ne 3) {
         Stop-Harness "unexpected describe invocation in GitVersion.zig: $($words -join ' ')"
+    }
+    if ($words[2] -ne '<root>') {
+        Stop-Harness "unexpected token before describe in GitVersion.zig: $($words[2])"
     }
     if ($words -notcontains '--exact-match' -or $words -notcontains '--tags') {
         Stop-Harness "describe no longer runs --exact-match --tags: $($words -join ' ')"

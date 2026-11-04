@@ -1016,11 +1016,11 @@ fn testRampDelays() [16]u16 {
 /// that skipped one frame's composition, its snapshot or its restore comes out
 /// different from that point on.
 fn testRestorePreviousGif(alloc: Allocator) ![]u8 {
-    const red_canvas = [_]u8{0} ** 16;
-    const blue_square = [_]u8{2} ** 4;
-    const green_row = [_]u8{1} ** 4;
-    const yellow_square = [_]u8{4} ** 4;
-    const cyan_square = [_]u8{5} ** 4;
+    const red_canvas: [16]u8 = @splat(0);
+    const blue_square: [4]u8 = @splat(2);
+    const green_row: [4]u8 = @splat(1);
+    const yellow_square: [4]u8 = @splat(4);
+    const cyan_square: [4]u8 = @splat(5);
 
     return testGif(alloc, 4, 4, &.{
         .{ .width = 4, .height = 4, .pixels = &red_canvas, .delay_cs = 10 },
@@ -1059,11 +1059,11 @@ test "gif animated: frames compose onto one canvas" {
     // produces different pixels here.
     const alloc = std.testing.allocator;
 
-    const red_canvas = [_]u8{0} ** 16;
-    const green_square = [_]u8{1} ** 4;
+    const red_canvas: [16]u8 = @splat(0);
+    const green_square: [4]u8 = @splat(1);
     const blue_checker = [_]u8{ 2, 7, 7, 2 };
-    const yellow_square = [_]u8{4} ** 4;
-    const cyan_pixel = [_]u8{ 7, 7, 7, 5 } ++ ([_]u8{7} ** 12);
+    const yellow_square: [4]u8 = @splat(4);
+    const cyan_pixel = [_]u8{ 7, 7, 7, 5 } ++ @as([12]u8, @splat(7));
 
     const data = try testGif(alloc, 4, 4, &.{
         .{ .width = 4, .height = 4, .pixels = &red_canvas, .delay_cs = 10 },
@@ -1348,7 +1348,7 @@ test "gif animated: decimating zero delays keeps the loop the same length" {
     // Zero delays fold into zero, so the count is the only thing stopping a
     // caller substituting a single gap where the file asked for four.
     const alloc = std.testing.allocator;
-    const delays = [_]u16{0} ** 16;
+    const delays: [16]u16 = @splat(0);
     const data = try testAnimation(alloc, &delays);
     defer alloc.free(data);
 

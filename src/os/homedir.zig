@@ -11,7 +11,7 @@ const Error = error{
 /// Determine the home directory for the currently executing user. This
 /// is generally an expensive process so the value should be cached.
 pub inline fn home(io: std.Io, environ_map: *const std.process.Environ.Map, buf: []u8) !?[]const u8 {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .linux, .freebsd, .macos => try homeUnix(io, environ_map, buf),
         .windows => homeWindows(environ_map, buf) catch return error.BufferTooSmall,
 
@@ -31,7 +31,7 @@ fn homeUnix(io: std.Io, environ_map: *const std.process.Environ.Map, buf: []u8) 
     }
 
     // On macOS: [NSFileManager defaultManager].homeDirectoryForCurrentUser.path
-    if (builtin.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         const NSFileManager = objc.getClass("NSFileManager").?;
         const manager = NSFileManager.msgSend(objc.Object, objc.sel("defaultManager"), .{});
         const homeURL = manager.getProperty(objc.Object, "homeDirectoryForCurrentUser");
@@ -115,7 +115,7 @@ pub fn expandHome(
     path: []const u8,
     buf: []u8,
 ) ExpandError![]const u8 {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .linux, .freebsd, .macos => try expandHomeUnix(io, environ_map, path, buf),
 
         // `~/` is not an idiom Windows itself uses, but it is the idiom
@@ -188,7 +188,7 @@ fn expandHomeWindows(
 }
 
 test "expandHomeWindows" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -229,7 +229,7 @@ test "expandHomeWindows" {
 }
 
 test "expandHomeUnix" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     const io = testing.io;

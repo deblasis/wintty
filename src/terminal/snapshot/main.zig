@@ -51,17 +51,38 @@
 //! +----------------------------------------+
 //! | SCREEN * terminal.screen_count         |
 //! | PAGE * each screen.page_count          |
+//! | KITTY_IMAGE_STORAGE (optional, per     |
+//! |   screen)                              |
 //! +----------------------------------------+
 //! | CONTINUATION                           |
 //! +----------------------------------------+
 //! | READY                                  |
 //! +----------------------------------------+
+//! | KITTY_IMAGE_PAYLOAD (optional, per     |
+//! |   image or frame, anywhere until       |
+//! |   FINISH)                              |
+//! +----------------------------------------+
 //! | HISTORY * terminal.screen_count        |
 //! | PAGE * each history.page_count         |
+//! | KITTY_IMAGE_PAGE_PLACEMENTS (optional, |
+//! |   after a PAGE with placements on it)  |
 //! +----------------------------------------+
 //! | FINISH                                 |
 //! +----------------------------------------+
 //! ```
+//!
+//! The optional Kitty graphics records carry each screen's images, pixels
+//! and placements. They are only written for screens that have images.
+//! The pixels of the images on screen come right after READY, the pixels
+//! of images in scrollback come right after their history page, and the
+//! rest come after all history. See `kitty.zig`.
+//!
+//! A decoder skips any record whose tag it does not know, wherever it
+//! appears, after checking its length and CRC32C. This lets newer encoders
+//! add optional kinds of records that older decoders ignore, without
+//! changing the snapshot version. The version only changes when the layout
+//! of an existing record changes, or when a new kind of record is needed for
+//! the terminal to be correct. See "Unknown Records" in `record.zig`.
 //!
 //! The SCREEN and HISTORY sequence groups may each appear in any key order.
 //! Each key must occur exactly once in each group and must identify one of the
@@ -134,8 +155,8 @@
 //!
 //! `snapshot.Decoder` decodes the same stream incrementally so the terminal
 //! becomes usable at READY, before history has arrived. Each `next` call
-//! applies one history page to the by-then live terminal and returning null
-//! validates FINISH:
+//! applies one history page, or the pixels of one image, to the by-then
+//! live terminal. A null result means FINISH was validated:
 //!
 //! ```zig
 //! var decoder: snapshot.Decoder = .init(&reader);
@@ -148,10 +169,14 @@
 //! defer terminal.deinit(alloc);
 //!
 //! // Render, replay the continuation, process input...
-//! while (try decoder.next(alloc, &terminal)) |progress| {
-//!     _ = progress; // Scrollback grew.
-//! }
+//! while (try decoder.next(alloc, &terminal)) |progress| switch (progress) {
+//!     .image => {}, // An image's pixels arrived.
+//!     .page => {}, // Scrollback grew.
+//! };
 //! ```
+//!
+//! Kitty graphics images are restored at READY with their pixels pending.
+//! `next` then delivers the pixels, which may be mixed in with history.
 //!
 //! ### Compressed History
 //!
@@ -177,6 +202,7 @@ pub const envelope = @import("envelope.zig");
 pub const grid = @import("grid.zig");
 pub const history = @import("history.zig");
 pub const hyperlink = @import("hyperlink.zig");
+pub const kitty = @import("kitty.zig");
 pub const page = @import("page.zig");
 pub const record = @import("record.zig");
 pub const screen = @import("screen.zig");

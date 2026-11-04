@@ -32,15 +32,10 @@ default: test build-dll
 # second cold compile of everything - `gates-selftest` holds them equal.
 TEST_VERSION := "0.0.0-test"
 
-# The seed the test steps run with. `zig build` draws a random one per
-# invocation and hands it to every test binary as `--seed=0x...`, and
-# that argument is part of the run step's cache manifest: measured on
-# this machine, a second `zig build test-lib-vt` at the same commit
-# compiled nothing and still ran both binaries for sixteen minutes. A
-# fixed seed is what makes an unchanged binary's run a cache hit.
-# Override it for a run that wants fresh randomness (the nightly does):
-#   $env:WINTTY_TEST_SEED = '0x1234'; just test
-TEST_SEED := env_var_or_default("WINTTY_TEST_SEED", "0x2a")
+# Zig 0.17's maker rejects the 0.16 fork's `--seed` flag, so the test
+# steps run with the maker's per-invocation seed. That seed is part of the
+# run step's cache manifest, so a test run is not carried from an earlier
+# invocation; the test binary itself is still cached.
 
 # Run all Zig tests
 test: test-configure test-lib-vt test-full test-pkg test-reachability
@@ -67,11 +62,11 @@ test-configure:
 #
 # Test libghostty-vt (fastest feedback loop)
 test-lib-vt:
-    zig build test-lib-vt "-Dversion-string={{TEST_VERSION}}" --seed {{TEST_SEED}} --summary all
+    zig build test-lib-vt "-Dversion-string={{TEST_VERSION}}" --summary all
 
 # Full Zig test suite
 test-full:
-    zig build test -Dapp-runtime=none "-Dversion-string={{TEST_VERSION}}" --seed {{TEST_SEED}} --summary all
+    zig build test -Dapp-runtime=none "-Dversion-string={{TEST_VERSION}}" --summary all
 
 # Tests that live in the vendored packages rather than in src/.
 #
@@ -85,7 +80,7 @@ test-full:
 # under pkg/ carry test blocks; why CI covers just this one is that job's
 # business, and duplicating a different list here would leave two to maintain.
 test-pkg:
-    cd pkg/wuffs && zig build test --seed {{TEST_SEED}} --summary all
+    cd pkg/wuffs && zig build test --summary all
 
 # Zig collects `test` blocks from the files a test binary's own test and
 # comptime blocks reach, so a file can carry assertions that no test step has

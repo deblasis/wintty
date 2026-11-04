@@ -1,6 +1,6 @@
-const c = @cImport({
-    @cInclude("stb_image_resize.h");
-});
+// 0.17 removed @cImport; the build generates the bindings as the `stb_c`
+// module (see SharedDeps.addImports / translate_c).
+const c = @import("stb_c");
 
 // We'll just add the exports of the functions or types we actually use
 // here, no need to export everything from the C lib if we don't use it.

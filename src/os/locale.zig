@@ -20,7 +20,7 @@ pub fn ensureLocale() !void {
 /// contract can be tested. On Windows this only mutates the CRT locale,
 /// which a test can save and restore.
 fn ensureLocaleInner() !void {
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         // libghostty is a library inside a WinUI host. In the shipped
         // NativeAOT build it is linked statically, so its CRT calls resolve
         // to the process UCRT that WinUI also uses; taking the locale from
@@ -126,7 +126,7 @@ fn setLangFromCocoa() void {
     // Format our locale as "<lang>_<country>.UTF-8" and set it as LANG.
     {
         var buf: [128]u8 = undefined;
-        const env_value = std.fmt.bufPrintZ(&buf, "{s}_{s}.UTF-8", .{ z_lang, z_country }) catch |err| {
+        const env_value = std.mem.printSentinel(&buf, "{s}_{s}.UTF-8", .{ z_lang, z_country }, 0) catch |err| {
             log.warn("error setting locale from system. err={}", .{err});
             return;
         };
@@ -247,7 +247,7 @@ fn copyLocaleString(ptr: [*:0]const u8, buf: *[128:0]u8) ?[:0]const u8 {
 }
 
 test "windows pins LC_NUMERIC to the invariant locale" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     // setlocale returns a pointer that the next call invalidates, so the
     // saved value has to be copied before anything else runs.

@@ -130,7 +130,7 @@ pub fn init(alloc: Allocator, opts: Options) !Thread {
 /// Clean up the thread. This is only safe to call once the thread
 /// completes executing; the caller must join prior to this.
 pub fn deinit(self: *Thread) void {
-    if (builtin.mode == .Debug and self.lifecycle.load(.seq_cst) == .running) @panic(
+    if (builtin.mode == .debug and self.lifecycle.load(.seq_cst) == .running) @panic(
         "Thread.deinit while the thread is running: join the OS " ++
             "thread first (teardown order is stop-notify, join, deinit)",
     );
@@ -177,7 +177,7 @@ fn threadMain_(self: *Thread) !void {
     // Right now, on Darwin, `std.Thread.setName` can only name the current
     // thread, and we have no way to get the current thread from within it,
     // so instead we use this code to name the thread instead.
-    if (comptime builtin.os.tag.isDarwin()) {
+    if (comptime builtin.target.os.tag.isDarwin()) {
         internal_os.macos.pthread_setname_np(&"search".*);
 
         // We can run with lower priority than other threads.
@@ -738,7 +738,7 @@ const ShutdownUserData = struct {
 
     /// Longer than `Message.WriteReq`'s small size so the needle is
     /// heap allocated and a dropped message is a detectable leak.
-    const needle = "y" ** 512;
+    const needle = &@as([512]u8, @splat('y'));
 
     thread: *Thread,
     queued: std.Io.Event = .unset,
@@ -863,7 +863,7 @@ test "search thread deinit frees messages left in the mailbox" {
     defer thread.deinit();
 
     // Longer than the small size so the needle is heap allocated.
-    const needle = "x" ** 512;
+    const needle = &@as([512]u8, @splat('x'));
     _ = thread.mailbox.push(
         io,
         .{ .change_needle = try .init(

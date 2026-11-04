@@ -1,4 +1,5 @@
 const std = @import("std");
+const meta_compat = @import("../meta_compat.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -470,7 +471,7 @@ pub fn shouldInheritWorkingDirectory(context: NewSurfaceContext, config: *const 
 /// Allocation failure yields null, which the config reports as "no
 /// inherited directory" rather than failing the call.
 pub fn dupeInheritedPwd(alloc: Allocator, cwd: []const u8) ?[*:0]const u8 {
-    return alloc.dupeZ(u8, cwd) catch null;
+    return alloc.dupeSentinel(u8, cwd, 0) catch null;
 }
 
 /// Release a working directory produced by dupeInheritedPwd.
@@ -628,7 +629,7 @@ test "surface message deinit frees a push the mailbox gave up" {
     // std.testing.allocator fails this test if `deinit` misses it. This
     // is the whole reason the app mailbox can take an attempt budget
     // instead of waiting forever for a slot.
-    const pwd = "/" ++ ("d" ** 400);
+    const pwd = "/" ++ (@as([400]u8, @splat('d')));
     const req = try Message.WriteReq.init(alloc, @as([]const u8, pwd));
     try std.testing.expect(req == .alloc);
 
@@ -641,7 +642,7 @@ test "surface message variants are all accounted for by the push give-up path" {
     // `deinit` has to release when a full mailbox gives the message up?
     // Make that decision, then bump this count. Without the guard a new
     // owning variant compiles and leaks silently on every drop.
-    const fields = @typeInfo(Message).@"union".fields;
+    const fields = comptime meta_compat.unionFields(Message);
     try std.testing.expectEqual(@as(usize, 30), fields.len);
 }
 

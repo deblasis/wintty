@@ -7,7 +7,7 @@ const compat_fd = @import("../lib/compat/fd.zig");
 /// pipe() that works on Windows and POSIX. For POSIX systems, this sets
 /// CLOEXEC on the file descriptors.
 pub fn pipe() ![2]posix.fd_t {
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         else => return compat_fd.pipe2(.{ .CLOEXEC = true }),
         .windows => {
             var read: windows.HANDLE = undefined;
@@ -26,7 +26,7 @@ pub fn pipe() ![2]posix.fd_t {
 /// are HANDLEs and need CloseHandle. `posix.system.close` does not
 /// link at all against the MSVC CRT.
 pub fn closeEnd(fd: posix.fd_t) void {
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         else => _ = posix.system.close(fd),
         .windows => _ = windows.exp.kernel32.CloseHandle(fd),
     }
@@ -45,7 +45,7 @@ pub const WriteResult = enum {
 /// Write to one end of a pipe from `pipe()`. See `closeEnd` for why
 /// this can't just be `posix.system.write` everywhere.
 pub fn writeEnd(fd: posix.fd_t, bytes: []const u8) WriteResult {
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         else => return switch (posix.errno(posix.system.write(
             fd,
             bytes.ptr,

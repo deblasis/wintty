@@ -71,7 +71,7 @@ fn dir(
     // First check the env var. On Windows we treat `APPDATA` (config) or
     // `LOCALAPPDATA` (cache/state) as a fallback for the corresponding XDG
     // variable.
-    const env = switch (builtin.os.tag) {
+    const env = switch (builtin.target.os.tag) {
         .windows => environ_map.get(internal_opts.env) orelse environ_map.get(internal_opts.windows_env) orelse "",
         else => environ_map.get(internal_opts.env) orelse "",
     };
@@ -136,7 +136,7 @@ test "cache directory paths" {
     const testing = std.testing;
     const io = testing.io;
     const alloc = testing.allocator;
-    const mock_home = if (builtin.os.tag == .windows) "C:\\Users\\test" else "/Users/test";
+    const mock_home = if (builtin.target.os.tag == .windows) "C:\\Users\\test" else "/Users/test";
     var environ_map = try testing.environ.createMap(alloc);
     defer environ_map.deinit();
 
@@ -166,7 +166,7 @@ test "cache directory paths" {
 }
 
 test "fallback when xdg env empty" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const io = std.testing.io;
     const alloc = std.testing.allocator;
@@ -205,7 +205,7 @@ test "fallback when xdg env empty" {
 }
 
 test "fallback when xdg env empty and subdir" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const io = std.testing.io;
     const alloc = std.testing.allocator;

@@ -351,6 +351,7 @@ pub fn complete(self: *const RenderPass) void {
 // --- Tests ---
 
 const std = @import("std");
+const meta_compat = @import("../../meta_compat.zig");
 
 test "RenderPass struct fields" {
     try std.testing.expect(@hasField(RenderPass, "command_list"));
@@ -377,8 +378,8 @@ test "Step supports multiple buffers" {
 }
 
 test "Step DrawType values" {
-    try std.testing.expectEqual(@as(u1, 0), @intFromEnum(Step.DrawType.triangle));
-    try std.testing.expectEqual(@as(u1, 1), @intFromEnum(Step.DrawType.triangle_strip));
+    try std.testing.expectEqual(@as(u1, 0), @backingInt(Step.DrawType.triangle));
+    try std.testing.expectEqual(@as(u1, 1), @backingInt(Step.DrawType.triangle_strip));
 }
 
 /// A command list that records the descriptor tables RenderPass.step binds
@@ -406,7 +407,7 @@ const RecordingList = struct {
 
     const vtable: L.VTable = vt: {
         var vt: L.VTable = undefined;
-        for (@typeInfo(L.VTable).@"struct".fields) |f| @field(vt, f.name) = @ptrCast(&unexpected);
+        for (meta_compat.structFields(L.VTable)) |f| @field(vt, f.name) = @ptrCast(&unexpected);
         vt.SetGraphicsRootDescriptorTable = &setTable;
         vt.SetPipelineState = &setPso;
         vt.SetGraphicsRootSignature = &setRootSignature;

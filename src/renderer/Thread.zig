@@ -250,7 +250,7 @@ pub fn init(
 /// Clean up the thread. This is only safe to call once the thread
 /// completes executing; the caller must join prior to this.
 pub fn deinit(self: *Thread) void {
-    if (builtin.mode == .Debug and self.lifecycle.load(.seq_cst) == .running) @panic("Thread.deinit while the thread is running: join the OS " ++
+    if (builtin.mode == .debug and self.lifecycle.load(.seq_cst) == .running) @panic("Thread.deinit while the thread is running: join the OS " ++
         "thread first (teardown order is notify, join, deinit)");
     self.stop.deinit();
     self.wakeup.deinit();
@@ -286,7 +286,7 @@ fn threadMain_(self: *Thread) !void {
     // Right now, on Darwin, `std.Thread.setName` can only name the current
     // thread, and we have no way to get the current thread from within it,
     // so instead we use this code to name the thread instead.
-    if (builtin.os.tag.isDarwin()) {
+    if (builtin.target.os.tag.isDarwin()) {
         internal_os.macos.pthread_setname_np(&"renderer".*);
     }
 
@@ -384,11 +384,11 @@ fn drainMailbox(self: *Thread) !void {
     //
     // This is effectively an @autoreleasepool{} block, which we need in
     // order to ensure that autoreleased objects are properly released.
-    const pool = if (builtin.os.tag.isDarwin())
+    const pool = if (builtin.target.os.tag.isDarwin())
         @import("objc").AutoreleasePool.init()
     else
         void;
-    defer if (builtin.os.tag.isDarwin()) pool.deinit();
+    defer if (builtin.target.os.tag.isDarwin()) pool.deinit();
 
     while (self.mailbox.pop(global.io())) |message| {
         log.debug("mailbox message={}", .{message});
@@ -451,14 +451,16 @@ fn drainMailbox(self: *Thread) !void {
 
             .deep_idle => {
                 // Tier B, renderer half: the image copies and the shaped-run
-                // cache exist only to make the next frame cheap, and a
-                // deep-idle surface's next frame may be arbitrarily far
-                // away. The terminal's image storage stays the source of
-                // truth; trimIdleMemory latches images_lost so the first
-                // updateFrame after the surface is shown rebuilds the
-                // copies -- without the latch, live placements would draw
-                // with nothing behind them, because no frame revisits
-                // placements whose terminal state did not change.
+                // cache exist only to make the next frame cheap. Image
+                // copies are trimmed only on a hidden surface; a visible
+                // surface draws on the wake the idle transition queues, so
+                // trimming them would just re-copy them in that wake. The
+                // shaped-run cache is trimmed on any deep-idle surface.
+                // The terminal's image storage stays the source of truth;
+                // trimIdleMemory latches images_lost so the show path
+                // rebuilds the copies -- without the latch, live placements
+                // would draw with nothing behind them, because no frame
+                // revisits placements whose terminal state did not change.
                 self.renderer.trimIdleMemory();
 
                 // Idle is the strongest "activity stopped" signal there is,
@@ -1601,7 +1603,7 @@ const CursorBlinkTestHost = struct {
 
 test "cursor blink: refocus in the tick that cancels a not-yet-started blink" {
     // The interleavings are the IOCP backend's.
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     var h: CursorBlinkTestHost = undefined;
     try h.init();
@@ -1617,7 +1619,7 @@ test "cursor blink: refocus in the tick that cancels a not-yet-started blink" {
 }
 
 test "cursor blink: refocus in the tick that cancels a started blink" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     var h: CursorBlinkTestHost = undefined;
     try h.init();
@@ -1634,7 +1636,7 @@ test "cursor blink: refocus in the tick that cancels a started blink" {
 }
 
 test "cursor blink: focus lost and regained before the loop ticks" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     var h: CursorBlinkTestHost = undefined;
     try h.init();
@@ -1655,7 +1657,7 @@ test "cursor blink: focus lost and regained before the loop ticks" {
 }
 
 test "cursor blink: losing focus stops the blink for good" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
 
     var h: CursorBlinkTestHost = undefined;
     try h.init();
@@ -1732,7 +1734,7 @@ test "no xev.Timer callback in this file returns .rearm" {
 // test's own text cannot match itself.
 test "deinit refuses to run while the thread is running" {
     const src = @embedFile("Thread.zig");
-    const gate = "builtin.mode == .Debug and self.lifecycle" ++ ".load(.seq_cst) == .running";
+    const gate = "builtin.mode == .debug and self.lifecycle" ++ ".load(.seq_cst) == .running";
     const refusal = "deinit while the thread is running: join the " ++ "OS ";
     const entry = "cmpxchgStrong(.never_" ++ "started, .running";
     try std.testing.expect(std.mem.indexOf(u8, src, gate) != null);
@@ -1791,7 +1793,7 @@ test "deinit refusal fires in a real run" {
     // binary's own zig-out while it is running.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const prefix = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    const prefix = try alloc.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
     defer alloc.free(prefix);
 
     // The child run can cost a minute on a cold cache (it builds this

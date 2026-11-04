@@ -80,7 +80,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     //
     // Note: we ALWAYS want to allocate here because the result is always
     // freed, do not try to use internal_os.getenv or posix getenv.
-    if (comptime builtin.mode != .Debug) env: {
+    if (comptime builtin.mode != .debug) env: {
         const dir = global.environ().getAlloc(alloc, "GHOSTTY_RESOURCES_DIR") catch |err| switch (err) {
             error.EnvironmentVariableMissing => break :env,
             else => return err,
@@ -116,7 +116,7 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
 
     // If terminfo detection failed in debug builds (somehow),
     // fallback and use the provided resources dir.
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         if (global.environ().getAlloc(alloc, "GHOSTTY_RESOURCES_DIR")) |dir| {
             if (validResourcesDir(dir)) return .{ .app_path = dir };
 
@@ -334,7 +334,7 @@ fn hasSentinelBeside(path: []const u8) bool {
 
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     inline for (sentinels) |sentinel| {
-        if (std.fmt.bufPrint(&buf, "{s}/{s}", .{ parent, sentinel })) |p| {
+        if (std.mem.print(&buf, "{s}/{s}", .{ parent, sentinel })) |p| {
             if (std.Io.Dir.cwd().statFile(global.io(), p, .{})) |stat| {
                 if (stat.kind == .file) return true;
             } else |_| {}
@@ -362,7 +362,7 @@ pub fn maybeDir(
     sub: []const u8,
     suffix: []const u8,
 ) !?[]const u8 {
-    const path = try std.fmt.bufPrint(buf, "{s}/{s}/{s}", .{ base, sub, suffix });
+    const path = try std.mem.print(buf, "{s}/{s}/{s}", .{ base, sub, suffix });
 
     const stat = std.Io.Dir.cwd().statFile(global.io(), path, .{}) catch {
         // Folder doesn't exist. If a different error happens its okay
@@ -388,7 +388,7 @@ fn createPackagedLayout(dir: std.Io.Dir) !void {
 
     // The sentinel, whatever this platform detects the tree by.
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sentinel_path = try std.fmt.bufPrint(
+    const sentinel_path = try std.mem.print(
         &buf,
         share_dir ++ "/{s}",
         .{sentinels[0]},
@@ -407,7 +407,7 @@ fn createPackagedLayout(dir: std.Io.Dir) !void {
 /// result mixes the two. Windows accepts that and every consumer goes through
 /// the filesystem, so this mirrors it rather than normalising it.
 fn packagedResourcesDir(alloc: Allocator, root: []const u8) ![]const u8 {
-    const share = try std.fmt.allocPrint(alloc, "{s}/" ++ share_dir, .{root});
+    const share = try alloc.print("{s}/" ++ share_dir, .{root});
     return try std.fs.path.join(alloc, &.{ share, "ghostty" });
 }
 
@@ -422,7 +422,7 @@ test "resourcesDirFromExe finds the tree from an app beside it in a packaged lay
     try createPackagedLayout(tmp.dir);
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
 
-    const exe = try std.fmt.allocPrint(alloc, "{s}/Wintty.exe", .{root});
+    const exe = try alloc.print("{s}/Wintty.exe", .{root});
     const found = (try resourcesDirFromExe(alloc, exe)) orelse
         return error.ResourcesDirNotFound;
 
@@ -446,7 +446,7 @@ test "resourcesDirFromExe climbs out of bin to the tree in a packaged layout" {
     try createPackagedLayout(tmp.dir);
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
 
-    const exe = try std.fmt.allocPrint(alloc, "{s}/bin/wintty.exe", .{root});
+    const exe = try alloc.print("{s}/bin/wintty.exe", .{root});
     const found = (try resourcesDirFromExe(alloc, exe)) orelse
         return error.ResourcesDirNotFound;
 
@@ -479,20 +479,20 @@ test "resourcesDirFromExe ignores a share directory that is not a resources tree
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "install/Wintty.exe", .data = "" });
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
 
-    const exe = try std.fmt.allocPrint(alloc, "{s}/install/Wintty.exe", .{root});
+    const exe = try alloc.print("{s}/install/Wintty.exe", .{root});
     const found = try resourcesDirFromExe(alloc, exe);
 
     // Either nothing, or something from further up that is genuinely a
     // resources tree. What it must never be is this `share`, which has the
     // right name and no sentinel.
     if (found) |v| {
-        const wrong = try std.fmt.allocPrint(alloc, "{s}/install/", .{root});
+        const wrong = try alloc.print("{s}/install/", .{root});
         try testing.expect(!std.mem.startsWith(u8, v.app().?, wrong));
     }
 }
 
 test "resourcesDirFromExe windows: never adopts a tree at a drive root" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -532,7 +532,7 @@ fn probeAllowsEverything(dir: []const u8) bool {
 }
 
 test "resourcesDirFromExe windows: the climb consults the probe predicate" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -549,7 +549,7 @@ test "resourcesDirFromExe windows: the climb consults the probe predicate" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "install/bin/Wintty.exe", .data = "" });
 
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sentinel_sub = try std.fmt.bufPrint(
+    const sentinel_sub = try std.mem.print(
         &buf,
         "install/" ++ share_dir ++ "/{s}",
         .{sentinels[0]},
@@ -558,7 +558,7 @@ test "resourcesDirFromExe windows: the climb consults the probe predicate" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = sentinel_sub, .data = "" });
 
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
-    const exe = try std.fmt.allocPrint(alloc, "{s}/install/bin/Wintty.exe", .{root});
+    const exe = try alloc.print("{s}/install/bin/Wintty.exe", .{root});
 
     const refused = try resourcesDirFromExeBy(alloc, exe, probeRefusesInstall);
     try testing.expect(refused == null);
@@ -568,7 +568,7 @@ test "resourcesDirFromExe windows: the climb consults the probe predicate" {
 }
 
 test "resourcesDirFromExe windows: a tree planted above the install is not adopted" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -589,7 +589,7 @@ test "resourcesDirFromExe windows: a tree planted above the install is not adopt
     // scenario): sentinel first, then the payload a planted tree exists to
     // deliver.
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const planted_sentinel = try std.fmt.bufPrint(
+    const planted_sentinel = try std.mem.print(
         &buf,
         share_dir ++ "/{s}",
         .{sentinels[0]},
@@ -599,7 +599,7 @@ test "resourcesDirFromExe windows: a tree planted above the install is not adopt
     try tmp.dir.createDirPath(testing.io, share_dir ++ "/ghostty/shell-integration/bash");
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
 
-    const exe = try std.fmt.allocPrint(alloc, "{s}/writable/vendor/install/Wintty.exe", .{root});
+    const exe = try alloc.print("{s}/writable/vendor/install/Wintty.exe", .{root});
     const found = try resourcesDirFromExe(alloc, exe);
 
     // Nothing is found: the executable's own directory and its parent hold
@@ -610,7 +610,7 @@ test "resourcesDirFromExe windows: a tree planted above the install is not adopt
 }
 
 test "resourcesDirFromExe windows: a directory named like the sentinel is not one" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -629,7 +629,7 @@ test "resourcesDirFromExe windows: a directory named like the sentinel is not on
     try tmp.dir.createDirPath(testing.io, "install/" ++ share_dir ++ "/terminfo/ghostty.terminfo");
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
 
-    const exe = try std.fmt.allocPrint(alloc, "{s}/install/Wintty.exe", .{root});
+    const exe = try alloc.print("{s}/install/Wintty.exe", .{root});
     const found = try resourcesDirFromExe(alloc, exe);
 
     try testing.expect(found == null);
@@ -656,7 +656,7 @@ test "validResourcesDir rejects a relative path that exists" {
 test "validResourcesDir rejects an absolute path that does not exist" {
     const testing = std.testing;
 
-    const missing = if (comptime builtin.os.tag == .windows)
+    const missing = if (comptime builtin.target.os.tag == .windows)
         "C:/ghostty-does-not-exist/share/ghostty"
     else
         "/ghostty-does-not-exist/share/ghostty";
@@ -679,7 +679,7 @@ test "validResourcesDir accepts the resources directory of a packaged layout" {
 }
 
 test "validResourcesDir windows: rejects a directory carrying no sentinel" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -694,12 +694,12 @@ test "validResourcesDir windows: rejects a directory carrying no sentinel" {
     try tmp.dir.createDirPath(testing.io, "planted/ghostty/shell-integration/cmd");
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
 
-    const planted = try std.fmt.allocPrint(alloc, "{s}/planted/ghostty", .{root});
+    const planted = try alloc.print("{s}/planted/ghostty", .{root});
     try testing.expect(!validResourcesDir(planted));
 }
 
 test "validResourcesDir windows: a directory named like the sentinel is not one" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -724,18 +724,18 @@ test "validResourcesDir windows: a directory named like the sentinel is not one"
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
 
     try testing.expect(!validResourcesDir(
-        try std.fmt.allocPrint(alloc, "{s}/as-dir/ghostty", .{root}),
+        try alloc.print("{s}/as-dir/ghostty", .{root}),
     ));
 
     // The same layout with the sentinel as a file is accepted, so the
     // assertion above is not passing because the shape is wrong.
     try testing.expect(validResourcesDir(
-        try std.fmt.allocPrint(alloc, "{s}/as-file/ghostty", .{root}),
+        try alloc.print("{s}/as-file/ghostty", .{root}),
     ));
 }
 
 test "validResourcesDir non-windows: takes an existing absolute directory" {
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
     const testing = std.testing;
     const TempDir = @import("TempDir.zig");
 

@@ -179,34 +179,34 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
     );
 
     @setEvalBranchQuota(200_000);
-    const fields = @typeInfo(Config).@"struct".fields;
+    const fields = @typeInfo(Config).@"struct".field_names;
     inline for (fields, 0..) |field, i| {
-        if (field.name[0] == '_') continue;
-        if (!@hasDecl(help_strings.Config, field.name)) continue;
+        if (field[0] == '_') continue;
+        if (!@hasDecl(help_strings.Config, field)) continue;
 
         // Skipping a documented field also drops the undocumented fields
         // grouped under it, since those are only reachable through the
         // inner loop below.
-        if (comptime isUnsupportedOnWindows(field.name)) continue;
+        if (comptime isUnsupportedOnWindows(field)) continue;
 
         // Write the field name.
         try writer.writeAll("## `");
-        try writer.writeAll(field.name);
+        try writer.writeAll(field);
         try writer.writeAll("`\n");
 
         // For all subsequent fields with no docs, they are grouped
         // with the previous field.
         if (i + 1 < fields.len) {
             inline for (fields[i + 1 ..]) |next_field| {
-                if (next_field.name[0] == '_') break;
-                if (@hasDecl(help_strings.Config, next_field.name)) break;
+                if (next_field[0] == '_') break;
+                if (@hasDecl(help_strings.Config, next_field)) break;
 
                 // A field for another platform can be grouped under an option
                 // we are keeping. Drop its header without ending the group.
-                if (comptime isUnsupportedOnWindows(next_field.name)) continue;
+                if (comptime isUnsupportedOnWindows(next_field)) continue;
 
                 try writer.writeAll("## `");
-                try writer.writeAll(next_field.name);
+                try writer.writeAll(next_field);
                 try writer.writeAll("`\n");
             }
         }
@@ -216,7 +216,7 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
 
         var iter = std.mem.splitScalar(
             u8,
-            @field(help_strings.Config, field.name),
+            @field(help_strings.Config, field),
             '\n',
         );
 

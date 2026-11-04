@@ -859,7 +859,7 @@ test "app mailbox push frees the message it has to give up" {
 
     // A pwd longer than the inline capacity is heap allocated, so
     // std.testing.allocator fails this test if the give-up path leaks it.
-    const pwd = "/" ++ ("d" ** 400);
+    const pwd = "/" ++ (@as([400]u8, @splat('d')));
     const req = try apprt.surface.Message.WriteReq.init(alloc, @as([]const u8, pwd));
     try testing.expect(req == .alloc);
 
@@ -972,7 +972,7 @@ test "app mailbox pushRequired gives up the moment teardown latches" {
     // and the required path asserts on those -- the assert lives in
     // `apprt.surface.Mailbox.pushRequired` (surface.zig), the wrapper
     // this test bypasses by driving `App.Mailbox` itself, not here.
-    const pwd = "/" ++ ("d" ** 400);
+    const pwd = "/" ++ (@as([400]u8, @splat('d')));
     const req = try apprt.surface.Message.WriteReq.init(alloc, @as([]const u8, pwd));
     try testing.expect(req == .alloc);
     try testing.expectEqual(@as(Mailbox.Queue.Size, 0), mailbox.pushBounded(

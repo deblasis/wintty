@@ -68,7 +68,7 @@ pub const Location = enum {
     /// the user's profile and `C:\Users` from a Program Files install, where
     /// the executable is protected and the ancestor is not.
     fn bundledThemesDir(arena_alloc: Allocator) error{OutOfMemory}!?[]const u8 {
-        if (comptime builtin.os.tag != .windows) return null;
+        if (comptime builtin.target.os.tag != .windows) return null;
 
         var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const exe: []const u8 = exe_buf[0 .. std.process.executablePath(
@@ -140,7 +140,7 @@ pub const Location = enum {
             // We need to do some comptime tricks to get the right
             // error set since some platforms don't support some
             // error types.
-            const Error = @TypeOf(err) || switch (builtin.os.tag) {
+            const Error = @TypeOf(err) || switch (builtin.target.os.tag) {
                 .ios => error{BufferTooSmall},
                 else => error{},
             };
@@ -171,9 +171,9 @@ pub const LocationIterator = struct {
         location: Location,
         dir: []const u8,
     } {
-        const max = @typeInfo(Location).@"enum".fields.len;
+        const max = @typeInfo(Location).@"enum".field_names.len;
         while (self.i < max) {
-            const location: Location = @enumFromInt(self.i);
+            const location: Location = @fromBackingInt(@intCast(self.i));
             self.i += 1;
             if (try location.dir(self.arena_alloc)) |dir|
                 return .{
@@ -220,8 +220,7 @@ pub fn open(
         ) orelse return null;
         const stat = file.stat(global.io()) catch |err| {
             try diags.append(arena_alloc, .{
-                .message = try std.fmt.allocPrintSentinel(
-                    arena_alloc,
+                .message = try arena_alloc.printSentinel(
                     "not reading theme from \"{s}\": {}",
                     .{ theme, err },
                     0,
@@ -233,8 +232,7 @@ pub fn open(
             .file => {},
             else => {
                 try diags.append(arena_alloc, .{
-                    .message = try std.fmt.allocPrintSentinel(
-                        arena_alloc,
+                    .message = try arena_alloc.printSentinel(
                         "not reading theme from \"{s}\": it is a {s}",
                         .{ theme, @tagName(stat.kind) },
                         0,
@@ -249,8 +247,7 @@ pub fn open(
     const basename = std.fs.path.basename(theme);
     if (!std.mem.eql(u8, theme, basename)) {
         try diags.append(arena_alloc, .{
-            .message = try std.fmt.allocPrintSentinel(
-                arena_alloc,
+            .message = try arena_alloc.printSentinel(
                 "theme \"{s}\" cannot include path separators unless it is an absolute path",
                 .{theme},
                 0,
@@ -268,8 +265,7 @@ pub fn open(
         if (cwd.openFile(global.io(), path, .{})) |file| {
             const stat = file.stat(global.io()) catch |err| {
                 try diags.append(arena_alloc, .{
-                    .message = try std.fmt.allocPrintSentinel(
-                        arena_alloc,
+                    .message = try arena_alloc.printSentinel(
                         "not reading theme from \"{s}\": {}",
                         .{ theme, err },
                         0,
@@ -281,8 +277,7 @@ pub fn open(
                 .file => {},
                 else => {
                     try diags.append(arena_alloc, .{
-                        .message = try std.fmt.allocPrintSentinel(
-                            arena_alloc,
+                        .message = try arena_alloc.printSentinel(
                             "not reading theme from \"{s}\": it is a {s}",
                             .{ theme, @tagName(stat.kind) },
                             0,
@@ -302,8 +297,7 @@ pub fn open(
             // Anything else is an error we log and give up on.
             else => {
                 try diags.append(arena_alloc, .{
-                    .message = try std.fmt.allocPrintSentinel(
-                        arena_alloc,
+                    .message = try arena_alloc.printSentinel(
                         "failed to load theme \"{s}\" from the file \"{s}\": {}",
                         .{ theme, path, err },
                         0,
@@ -323,8 +317,7 @@ pub fn open(
     while (try it.next()) |loc| {
         const path = try std.fs.path.join(arena_alloc, &.{ loc.dir, theme });
         try diags.append(arena_alloc, .{
-            .message = try std.fmt.allocPrintSentinel(
-                arena_alloc,
+            .message = try arena_alloc.printSentinel(
                 "theme \"{s}\" not found, tried path \"{s}\"",
                 .{ theme, path },
                 0,
@@ -351,16 +344,14 @@ pub fn openAbsolute(
     return std.Io.Dir.openFileAbsolute(global.io(), theme, .{}) catch |err| {
         switch (err) {
             error.FileNotFound => try diags.append(arena_alloc, .{
-                .message = try std.fmt.allocPrintSentinel(
-                    arena_alloc,
+                .message = try arena_alloc.printSentinel(
                     "failed to load theme from the path \"{s}\"",
                     .{theme},
                     0,
                 ),
             }),
             else => try diags.append(arena_alloc, .{
-                .message = try std.fmt.allocPrintSentinel(
-                    arena_alloc,
+                .message = try arena_alloc.printSentinel(
                     "failed to load theme from the path \"{s}\": {}",
                     .{ theme, err },
                     0,
@@ -381,8 +372,8 @@ test "theme: search order prefers the current config dir over the pre-rename one
     // install shadow a migrated one. Driving the iterator instead would
     // only assert against whatever directories the test machine happens to
     // have.
-    try testing.expect(@intFromEnum(Location.user) < @intFromEnum(Location.user_ghostty));
-    try testing.expect(@intFromEnum(Location.user_ghostty) < @intFromEnum(Location.resources));
+    try testing.expect(@backingInt(Location.user) < @backingInt(Location.user_ghostty));
+    try testing.expect(@backingInt(Location.user_ghostty) < @backingInt(Location.resources));
 }
 
 test "theme: the bundled floor reaches the install root and stops there" {

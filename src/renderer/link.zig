@@ -272,7 +272,7 @@ test "renderCellMap bounds regex backtracking" {
     // URL regex has to consider every way of splitting that run between
     // its repeated groups, which is exponential work, so this only
     // finishes because the search has a retry budget.
-    const pathological = "https://x.com/" ++ ("." ** 40);
+    const pathological = "https://x.com/" ++ "........................................";
     const trailing_url = "https://b.com";
     const row = pathological ++ " " ++ trailing_url;
 
@@ -348,7 +348,7 @@ test "renderCellMap gives up after repeated regex budget overruns" {
     // reached. Without a shared budget the scan would keep paying a fresh
     // budget for every row, which is how a viewport of this text turns a
     // bounded search into unbounded work per frame.
-    const pathological = "https://x.com/" ++ ("." ** 40);
+    const pathological = "https://x.com/" ++ "........................................";
     const rows = scan_overrun_budget + 1;
 
     var t: terminal.Terminal = try .init(testing.io, alloc, .{
