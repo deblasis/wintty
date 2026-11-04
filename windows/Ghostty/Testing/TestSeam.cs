@@ -8,8 +8,10 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Core.Tabs;
+using Ghostty.Core.Windows;
 using Ghostty.Panes;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 
 namespace Ghostty.Testing;
 
@@ -517,6 +519,16 @@ internal static class TestSeam
                     var tab = i == 0 ? manager.Tabs[0] : manager.NewTab(snapshot);
                     tab.UserOverrideTitle = i < titles.Count ? titles[i] : $"tab-{i + 1}";
                 }
+                // The tabs all exist now, but their strip rows are still
+                // mid-realization: the state walk below reads XAML
+                // properties of the just-created containers, and a read
+                // that lands before the layout pass settles can throw a
+                // COMException from an unrealized element - answering an
+                // op whose work succeeded with a failure, while a
+                // get-state moments later reads fine. One low-priority
+                // pass, the same settle the close loop above already
+                // grants teardown, lets realization finish first.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
                 return OkWithState(window, manager, op);
             }
 
@@ -1881,6 +1893,96 @@ internal static class TestSeam
                 // the chrome resolved and what the file says.
                 return PaletteThemeJson(window, op);
 
+            case "surface-colors":
+            {
+                // The renderer's config-derived pair and generation for one
+                // leaf. A dormant surface is woken by the native read; a
+                // leaf with no surface answers hasSurface:false without a
+                // native call.
+                var index = ArgInt(args, "index", -1);
+                var host = window.TestSeamActivePaneHost;
+                var terminal = index >= 0
+                    ? host.TestSeamLeafTerminal(index)
+                    : host.TestSeamLeafTerminal(host.TestSeamActiveLeafIndex);
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    if (terminal is null || terminal.SurfaceHandle == IntPtr.Zero)
+                    {
+                        json.WriteBoolean("hasSurface", false);
+                    }
+                    else
+                    {
+                        // One lock acquisition for the pair and generation:
+                        // three separate reads can mix two config swaps.
+                        var colors = terminal.TestSeamSurfaceColors;
+                        json.WriteBoolean("hasSurface", true);
+                        WriteHex(json, "background", colors.Background);
+                        WriteHex(json, "foreground", colors.Foreground);
+                        json.WriteNumber("generation", colors.Generation);
+                    }
+                    json.WriteEndObject();
+                });
+            }
+
+            case "system-color-scheme":
+            {
+                // Drive the same scheme transaction the OS event uses; no
+                // desktop state is touched. The caller polls config-state
+                // for the applied generation.
+                ArmConfigChangeLog(window);
+                var dark = ArgBool(args, "dark", true);
+                var applied = window.TestSeamApplySystemColorScheme(dark);
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteBoolean("applied", applied);
+                    json.WriteBoolean("pendingDark", window.TestSeamConfig.PendingDark);
+                    json.WriteBoolean("appliedDark", window.TestSeamConfig.AppliedDark);
+                    json.WriteNumber(
+                        "appliedGeneration", window.TestSeamConfig.AppliedGeneration);
+                    json.WriteNumber(
+                        "schemeAttempts", window.TestSeamConfig.SchemeAttempts);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "vstrip-resolve":
+            {
+                if (window.TestSeamVerticalStrip is not { } strip)
+                    return Error(op, "the vertical strip is not present");
+                var appTheme = ArgBool(args, "appLight", false)
+                    ? ElementTheme.Light
+                    : ElementTheme.Dark;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteString("effectiveTheme", strip.TestSeamEffectiveTheme);
+                    json.WriteString("stripTheme", strip.TestSeamThemeState);
+                    json.WriteStartArray("keys");
+                    foreach (var key in strip.TestSeamResolveKeys())
+                    {
+                        var resolved = strip.TestSeamResolveBrush(key, appTheme);
+                        json.WriteStartObject();
+                        json.WriteString("key", key);
+                        WriteArgb(json, "installed", resolved.Installed);
+                        WriteArgb(json, "stripDefault", resolved.StripDefault);
+                        WriteArgb(json, "appDefault", resolved.AppDefault);
+                        json.WriteEndObject();
+                    }
+                    json.WriteEndArray();
+                    WriteArgb(json, "selectedFill", strip.TestSeamSelectedFill);
+                    WriteArgb(json, "selectedDefault", strip.TestSeamSelectedDefault);
+                    json.WriteEndObject();
+                });
+            }
+
             case "menu":
             {
                 // A context menu opened with nothing clicked, so the menu a
@@ -2150,6 +2252,39 @@ internal static class TestSeam
             // strip and the content describe the same theme in this one
             // readout (issue #1121: they used to land visibly apart).
             WriteHex(json, "stripFill", window.TestSeamStripSelectionFill);
+            json.WriteString("windowTheme", config.WindowTheme);
+            json.WriteBoolean("foregroundExplicit", config.LiveForegroundIsExplicit);
+            json.WriteBoolean("colorScheme", config.AppliedDark);
+            json.WriteBoolean("pendingScheme", config.PendingDark);
+            json.WriteNumber("appliedGeneration", config.AppliedGeneration);
+            if (config.PreHighContrastPair is { } preHc)
+            {
+                WriteHex(json, "preHcBackground", preHc.Background);
+                WriteHex(json, "preHcForeground", preHc.Foreground);
+                if (config.PreHighContrastForegroundExplicit is { } explicitHc)
+                    json.WriteBoolean("preHcForegroundExplicit", explicitHc);
+                else
+                    json.WriteNull("preHcForegroundExplicit");
+            }
+            else
+            {
+                WriteHex(json, "preHcBackground", null);
+                WriteHex(json, "preHcForeground", null);
+                json.WriteNull("preHcForegroundExplicit");
+            }
+            var activeTerminal = window.TestSeamActivePaneHost.TestSeamLeafTerminal(
+                window.TestSeamActivePaneHost.TestSeamActiveLeafIndex);
+            var surfaceColors = activeTerminal?.TestSeamSurfaceColors ?? (null, null, 0);
+            var surfaceBackground = surfaceColors.Background;
+            var surfaceForeground = surfaceColors.Foreground;
+            WriteHex(json, "surfaceBackground", surfaceBackground);
+            WriteHex(json, "surfaceForeground", surfaceForeground);
+            json.WriteNumber("surfaceGeneration", surfaceColors.Generation);
+            if (surfaceBackground is { } sb && surfaceForeground is { } sf)
+                json.WriteNumber("terminalContrast",
+                    Math.Round(ThemeResolution.ContrastRatio(sb, sf), 2));
+            else
+                json.WriteNull("terminalContrast");
             json.WriteStartArray("palette");
             foreach (var entry in config.AnsiPalette) json.WriteStringValue($"#{entry:X6}");
             json.WriteEndArray();
@@ -2355,6 +2490,10 @@ internal static class TestSeam
             if (applied is { } a) json.WriteBoolean("applied", a);
             WriteHex(json, "nativeBackground", config.GetLiveNativeColor("background"));
             WriteHex(json, "highContrastBackground", config.HighContrastBackground);
+            json.WriteBoolean("appliedDark", config.AppliedDark);
+            json.WriteBoolean("pendingDark", config.PendingDark);
+            json.WriteNumber("appliedGeneration", config.AppliedGeneration);
+            json.WriteNumber("schemeAttempts", config.SchemeAttempts);
             json.WriteStartArray("changes");
             foreach (var (native, highContrast) in ConfigChanges)
             {
@@ -2382,6 +2521,12 @@ internal static class TestSeam
     private static void WriteHex(Utf8JsonWriter json, string name, uint? rgb)
     {
         if (rgb is { } value) json.WriteString(name, $"#{value:X6}");
+        else json.WriteNull(name);
+    }
+
+    private static void WriteArgb(Utf8JsonWriter json, string name, uint? argb)
+    {
+        if (argb is { } value) json.WriteString(name, $"#{value:X8}");
         else json.WriteNull(name);
     }
 
@@ -3092,6 +3237,10 @@ internal static class TestSeam
         json.WriteString("root", window.TestSeamRootTheme);
         json.WriteString("horizontal", window.TestSeamHorizontalThemeState);
         json.WriteString("vertical", window.TestSeamVerticalThemeState);
+        json.WriteString("rootFill", window.TestSeamRootFill);
+        json.WriteString("classBrush", window.TestSeamClassBrush);
+        if (window.TestSeamDwmDark is { } dwm) json.WriteBoolean("dwmDark", dwm);
+        else json.WriteNull("dwmDark");
         json.WriteEndObject();
         json.WriteNumber("active", manager.IndexOf(manager.ActiveTab));
         json.WriteNumber("paneWidth",

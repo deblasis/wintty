@@ -161,7 +161,7 @@ public class ConfigWatcherWiringTests
     /// </summary>
     private static (InvocationExpressionSyntax Decide, IfStatementSyntax Guard) ReloadGuard()
     {
-        var decide = Assert.Single(ConfigService().Method("Reload").Calls("ConfigReloadGate.Decide"));
+        var decide = Assert.Single(ConfigService().Method("ReloadWithScheme").Calls("ConfigReloadGate.Decide"));
         return (decide, decide.Ancestors().OfType<IfStatementSyntax>().First());
     }
 
@@ -369,7 +369,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void An_applied_reload_records_the_count_it_applied()
     {
-        var record = Assert.Single(ConfigService().Method("Reload").Calls("RecordDefaultFiles"));
+        var record = Assert.Single(ConfigService().Method("ReloadWithScheme").Calls("RecordDefaultFiles"));
 
         Assert.Equal("defaultFilesFound", record.Arg(0));
     }
@@ -384,7 +384,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void The_retry_budget_only_counts_a_look_that_was_scheduled()
     {
-        var reload = ConfigService().Method("Reload");
+        var reload = ConfigService().Method("ReloadWithScheme");
 
         var retry = Assert.Single(reload.DescendantNodes()
             .OfType<PostfixUnaryExpressionSyntax>()
@@ -407,7 +407,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void An_applied_reload_resets_the_budget_and_closes_the_stretch()
     {
-        var resets = ConfigService().Method("Reload")
+        var resets = ConfigService().Method("ReloadWithScheme")
             .DescendantNodes().OfType<AssignmentExpressionSyntax>();
 
         var retry = Assert.Single(resets
@@ -492,7 +492,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void A_stretch_that_outlives_its_asks_is_reported()
     {
-        Assert.NotEmpty(ConfigService().Method("Reload")
+        Assert.NotEmpty(ConfigService().Method("ReloadWithScheme")
             .Calls("StaticLoggers.ConfigService.LogReloadGaveUp"));
     }
 
@@ -601,7 +601,7 @@ public class ConfigWatcherWiringTests
         // The decision is asked for rather than reimplemented here, and it
         // is asked with a LOAD's verdict rather than with the watcher's
         // existence check, which is a proxy a dangling symlink defeats.
-        var reload = source.Method("Reload");
+        var reload = source.Method("ReloadWithScheme");
         var observed = Assert.Single(reload.Calls("_vanishProtocol.Observed"));
         Assert.Equal("defaultFiles", observed.Arg(0));
 
@@ -641,7 +641,7 @@ public class ConfigWatcherWiringTests
     public void Absence_carries_nothing_past_the_gate()
     {
         var source = ConfigService();
-        var reload = source.Method("Reload");
+        var reload = source.Method("ReloadWithScheme");
 
         var carry = Assert.Single(reload.Calls("ConfigReloadGate.CarriesPastGate"));
         Assert.Equal("persistentShrink", carry.Arg(0));
@@ -825,15 +825,15 @@ public class ConfigWatcherWiringTests
         // latch exists to end.
         var marks = source.Root.Calls("_highContrast.MarkApplied");
         var mark = Assert.Single(marks);
-        Assert.Equal("Reload",
+        Assert.Equal("ReloadWithScheme",
             mark.Ancestors().OfType<MethodDeclarationSyntax>().First().Identifier.ValueText);
 
         // Applied is marked with what THIS reload's build layered, reported
         // by the build itself, on the applied path, after the push. The build
         // is handed the reload's one read of Wanted rather than reading the
         // latch again itself.
-        var reload = source.Method("Reload");
-        var build = Assert.Single(reload.Calls("BuildLiveConfig"));
+        var reload = source.Method("ReloadWithScheme");
+        var build = reload.Calls("BuildLiveConfig").First();
         var args = build.ArgumentList.Arguments;
         Assert.Equal("out highContrastBuilt", args.Last().ToString());
         Assert.Equal("highContrastWanted", args[2].ToString());
@@ -945,7 +945,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void Every_load_verdict_reaches_the_question_before_the_gate()
     {
-        var reload = ConfigService().Method("Reload");
+        var reload = ConfigService().Method("ReloadWithScheme");
 
         var observed = Assert.Single(reload.Calls("_vanishProtocol.Observed"));
         Assert.Equal("defaultFiles", observed.Arg(0));
@@ -973,7 +973,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void A_verdict_that_disagrees_with_its_count_is_not_vanish_evidence()
     {
-        var observed = Assert.Single(ConfigService().Method("Reload")
+        var observed = Assert.Single(ConfigService().Method("ReloadWithScheme")
             .Calls("_vanishProtocol.Observed"));
 
         // The gate's own agreement check, short-circuiting in front of the
@@ -1100,7 +1100,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void The_shrink_stretch_is_measured_on_a_monotonic_clock()
     {
-        var reload = ConfigService().Method("Reload");
+        var reload = ConfigService().Method("ReloadWithScheme");
 
         // One sample in the method, and it reads the Stopwatch at origin
         // zero, which is the confirmer's own MonotonicNow shape.
@@ -1207,15 +1207,15 @@ public class ConfigWatcherWiringTests
         Assert.Single(asked.Calls("Reload"));
 
         var spent = Assert.Single(writes, w => w.Right.ToString() == "false");
-        Assert.Equal("Reload",
+        Assert.Equal("ReloadWithScheme",
             spent.Ancestors().OfType<MethodDeclarationSyntax>().First()
                 .Identifier.ValueText);
 
         // Read-and-clear sits before the build: a decline cannot bank the
         // ask for a later unrelated decline, and a click cannot apply
         // twice. The local it feeds is the one the carry condition reads.
-        var reload = ConfigService().Method("Reload");
-        var build = Assert.Single(reload.Calls("BuildLiveConfig"));
+        var reload = ConfigService().Method("ReloadWithScheme");
+        var build = reload.Calls("BuildLiveConfig").First();
         Assert.True(spent.Span.End < build.SpanStart,
             "the ask was consumed after the config was built");
         var carry = Assert.Single(reload.Calls("ConfigReloadGate.CarriesPastGate"));
@@ -1291,7 +1291,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void The_notice_ends_on_evidence_the_file_is_back()
     {
-        var applied = Assert.Single(ConfigService().Method("Reload")
+        var applied = Assert.Single(ConfigService().Method("ReloadWithScheme")
             .Calls("_missingNoticeSource.OnReloadApplied"));
 
         var guard = Assert.IsType<IfStatementSyntax>(applied.Ancestors()
@@ -1321,7 +1321,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void The_vanish_question_is_asked_only_where_the_machine_has_no_better_answer()
     {
-        var observed = Assert.Single(ConfigService().Method("Reload")
+        var observed = Assert.Single(ConfigService().Method("ReloadWithScheme")
             .Calls("_vanishProtocol.Observed"));
 
         // The conjunct is an operand of the same && chain that gates on the
@@ -1374,7 +1374,7 @@ public class ConfigWatcherWiringTests
     [Fact]
     public void A_swallowed_load_defaults_ask_is_reported()
     {
-        var reload = ConfigService().Method("Reload");
+        var reload = ConfigService().Method("ReloadWithScheme");
 
         var drops = reload.Calls(
             "StaticLoggers.ConfigService.LogLoadDefaultsRequestDropped");

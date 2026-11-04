@@ -449,6 +449,24 @@ _shader-notice-fuzz-in-lane args="":
 frame-style-fuzz args="": _no-wintty-from (_build-in-lane "frame-style-fuzz" "build-dll" "build-win")
     $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("frame-style-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _frame-style-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
 
+# The theme resolution matrix (#1953, #2218, #2242). Seam-driven scheme
+# changes, the terminal renderer's pair against the C# chrome pair, the
+# explicit-value exemption, the no-config built-in halves, the vertical
+# light -> wintty switch, and a declined reload that must commit nothing.
+# No desktop setting is read or written; the desktop lane is for the window
+# and the captures. Exit 0 clean, 2 product finding, 1 harness miss.
+#
+# Pass extra args through, e.g. `just seam-theme-resolution "-Mutate pair"`.
+[windows]
+seam-theme-resolution args="": _no-wintty-from (_build-in-lane "seam-theme-resolution" "build-dll" "build-win")
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("seam-theme-resolution {{replace(args, '"', '""')}}".Trim()) -- just _seam-theme-resolution-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+
+[windows]
+_seam-theme-resolution-in-lane args="":
+    pwsh -NoProfile -File windows/scripts/seam-theme-resolution.ps1 \
+        -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
+        -OutDir windows/scripts/seam-theme-resolution {{args}}; exit ($LASTEXITCODE ?? 1)
+
 # The desktop phase of `just frame-style-fuzz`, inside the lane it took.
 [windows]
 _frame-style-fuzz-in-lane args="":

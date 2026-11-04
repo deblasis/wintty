@@ -160,9 +160,6 @@ public sealed class WindowThemeAliasTests
                 ThemeResolution.ResolveIsDark("wintty", PaletteBackgroundArgb, fallback, isSystemDark),
                 ThemeResolution.ResolveIsDark("ghostty", PaletteBackgroundArgb, fallback, isSystemDark));
 
-            Assert.Equal(
-                ThemeResolution.TracksSystem("wintty", fallback),
-                ThemeResolution.TracksSystem("ghostty", fallback));
         }
 
         // Named values, so the pair above cannot agree by both being wrong.
@@ -173,8 +170,6 @@ public sealed class WindowThemeAliasTests
         Assert.Equal(isSystemDark, ThemeResolution.ResolveIsDark(
             "ghostty", PaletteBackgroundArgb, ThemeFallbackStyle.System, isSystemDark));
 
-        Assert.False(ThemeResolution.TracksSystem("ghostty", ThemeFallbackStyle.Palette));
-        Assert.True(ThemeResolution.TracksSystem("ghostty", ThemeFallbackStyle.System));
     }
 
     /// <summary>

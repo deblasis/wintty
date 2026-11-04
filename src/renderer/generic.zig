@@ -792,6 +792,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             cursor_color: ?configpkg.Config.TerminalColor,
             cursor_opacity: f64,
             cursor_text: ?configpkg.Config.TerminalColor,
+            /// Monotonic per renderer, bumped once per accepted config swap.
+            /// The test seam reads it with the pair so a caller can tell a
+            /// freshly committed config from the outgoing one.
+            config_generation: u64,
             background: terminal.color.RGB,
             background_opacity: f64,
             background_opacity_cells: bool,
@@ -868,6 +872,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .cursor_text = config.@"cursor-text",
                     .cursor_opacity = @max(0, @min(1, config.@"cursor-opacity")),
 
+                    .config_generation = 0,
                     .background = config.background.toTerminalRGB(),
                     .foreground = config.foreground.toTerminalRGB(),
                     .bold_color = if (config.@"bold-color") |b| b.toTerminal() else null,
@@ -3276,8 +3281,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 config.background_opacity,
             );
 
+            const generation = self.config.config_generation;
             self.config.deinit();
             self.config = config.*;
+            // The incoming derived config was built on the host thread and
+            // carries the seed value; the renderer owns the generation. Bump
+            // under draw_mutex, the same lock the seam reads it under.
+            self.config.config_generation = generation + 1;
 
             // The swap chain's resize-gap fill tracks the terminal
             // background: a background or background-opacity reload has

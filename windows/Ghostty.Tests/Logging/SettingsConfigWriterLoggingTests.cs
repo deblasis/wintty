@@ -56,6 +56,7 @@ public class SettingsConfigWriterLoggingTests
         public string ConfigFilePath => string.Empty;
         public bool AutoReloadEnabled => false;
         public bool SettingsUiEnabled => false;
+        public bool AppliedDark => false;
         public double BackgroundOpacity => 1.0;
         public bool VerticalTabs => false;
         public int VerticalTabsWidth => 220;

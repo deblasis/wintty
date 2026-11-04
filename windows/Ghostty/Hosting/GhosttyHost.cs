@@ -74,6 +74,14 @@ internal sealed partial class GhosttyHost : IDisposable
     public event EventHandler? ReloadConfigRequested;
 
     /// <summary>
+    /// The same action with <c>soft = true</c>: libghostty is asking the
+    /// host to reapply the current conditional state, not to re-read the
+    /// config file. The two are separate so a soft ask cannot turn into a
+    /// disk reload (and a second applied generation) by mistake.
+    /// </summary>
+    public event EventHandler? SoftReloadRequested;
+
+    /// <summary>
     /// Raised when libghostty requests the terminal inspector be toggled
     /// (the GHOSTTY_ACTION_INSPECTOR apprt action, triggered by the
     /// <c>inspector:toggle</c> keybind/command). <c>MainWindow</c> opens or
@@ -581,9 +589,17 @@ internal sealed partial class GhosttyHost : IDisposable
                         return 1;
 
                     case GhosttyActionTag.ReloadConfig:
+                    {
+                        // Payload byte 0 (offset 8 in the action union) is
+                        // the apprt `reload_config` bool: true = soft.
+                        var soft = Marshal.ReadByte(actionPtr, 8) != 0;
                         _dispatcher.TryEnqueue(() =>
-                            ReloadConfigRequested?.Invoke(this, EventArgs.Empty));
+                        {
+                            if (soft) SoftReloadRequested?.Invoke(this, EventArgs.Empty);
+                            else ReloadConfigRequested?.Invoke(this, EventArgs.Empty);
+                        });
                         return 1;
+                    }
 
                     case GhosttyActionTag.ConfigChange:
                         // App-level config_change fires once per reload after

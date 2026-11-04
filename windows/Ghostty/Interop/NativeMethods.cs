@@ -459,6 +459,18 @@ internal static partial class NativeMethods
     internal static bool ConfigThemeIsBuiltin(GhosttyConfig config)
         => ConfigThemeIsBuiltinNative(config) != 0;
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_foreground_is_explicit")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte ConfigForegroundIsExplicitNative(GhosttyConfig config);
+
+    /// <summary>
+    /// Whether the user's own config wrote <c>foreground</c> (as opposed to
+    /// a theme or the compile-time default). The contrast floor leaves that
+    /// value alone, and this side must classify it the same way.
+    /// </summary>
+    internal static bool ConfigForegroundIsExplicit(GhosttyConfig config)
+        => config.Handle != IntPtr.Zero && ConfigForegroundIsExplicitNative(config) != 0;
+
     /// <summary>
     /// The built-in theme text for a scheme, in config file syntax.
     /// </summary>
@@ -591,6 +603,69 @@ internal static partial class NativeMethods
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_color_scheme")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void SurfaceSetColorScheme(GhosttySurface surface, GhosttyColorScheme scheme);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_background")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceBackgroundNative(GhosttySurface surface, IntPtr outColor);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_foreground")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceForegroundNative(GhosttySurface surface, IntPtr outColor);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_config_generation")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial ulong SurfaceConfigGenerationNative(GhosttySurface surface);
+
+    /// <summary>Mirrors <c>ghostty_surface_colors_s</c>: two 3-byte colours
+    /// then the generation, from one lock acquisition.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GhosttySurfaceColors
+    {
+        public byte BackgroundR, BackgroundG, BackgroundB;
+        public byte ForegroundR, ForegroundG, ForegroundB;
+        public ulong Generation;
+    }
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_colors")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceColorsNative(
+        GhosttySurface surface, out GhosttySurfaceColors colors);
+
+    internal static (uint? Background, uint? Foreground, ulong Generation) SurfaceColors(
+        GhosttySurface surface)
+    {
+        if (surface.Handle == IntPtr.Zero) return (null, null, 0);
+        if (SurfaceColorsNative(surface, out var colors) == 0) return (null, null, 0);
+        return (
+            ((uint)colors.BackgroundR << 16) | ((uint)colors.BackgroundG << 8) | colors.BackgroundB,
+            ((uint)colors.ForegroundR << 16) | ((uint)colors.ForegroundG << 8) | colors.ForegroundB,
+            colors.Generation);
+    }
+
+    /// <summary>
+    /// The config-derived pair the renderer is drawing, or null when the
+    /// surface is gone or a dormant terminal could not be woken. Not a
+    /// terminal OSC override: the test seam asks whether the config swap
+    /// reached the surface.
+    /// </summary>
+    internal static unsafe uint? SurfaceBackground(GhosttySurface surface)
+        => ReadSurfaceColor(surface, background: true);
+
+    internal static unsafe uint? SurfaceForeground(GhosttySurface surface)
+        => ReadSurfaceColor(surface, background: false);
+
+    private static unsafe uint? ReadSurfaceColor(GhosttySurface surface, bool background)
+    {
+        if (surface.Handle == IntPtr.Zero) return null;
+        byte* color = stackalloc byte[3];
+        var found = background
+            ? SurfaceBackgroundNative(surface, (IntPtr)color) != 0
+            : SurfaceForegroundNative(surface, (IntPtr)color) != 0;
+        return found ? ((uint)color[0] << 16) | ((uint)color[1] << 8) | color[2] : null;
+    }
+
+    internal static ulong SurfaceConfigGeneration(GhosttySurface surface)
+        => surface.Handle == IntPtr.Zero ? 0 : SurfaceConfigGenerationNative(surface);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_app_update_config")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]

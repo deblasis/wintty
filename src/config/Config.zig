@@ -4270,6 +4270,23 @@ _command_defaulted: bool = false,
 /// `WorkingDirectoryDefaulted` below.
 _working_directory_defaulted: bool = false,
 
+/// True when a non-theme argument wrote a non-empty `foreground`. Tracked
+/// while loading rather than inferred from `_replay_steps`, because a
+/// replayed theme step is flattened to a plain arg and a re-finalize would
+/// then look user-authored. The contrast floor leaves an explicit value
+/// alone; everything else (theme-derived or never written) is floored.
+/// Copied by clone for the same reason as `_command_defaulted`.
+_foreground_user_set: bool = false,
+
+/// Set while `applyThemeOverlay` loads the theme file into the replacement
+/// config, so the theme's own `foreground` is not recorded as the user's.
+_loading_theme: bool = false,
+
+/// Set by the replay iterator immediately before it yields a theme-derived
+/// conditional arg, so `parseManuallyHook` does not record that arg as the
+/// user's. Cleared after every arg.
+_next_arg_is_theme: bool = false,
+
 pub fn deinit(self: *Config) void {
     if (self._arena) |arena| arena.deinit();
     self.* = undefined;
@@ -6106,12 +6123,11 @@ fn applyBuiltinTheme(self: *Config) !void {
     // memory from self prior to this point is freed.
     try self.loadBuiltinTheme();
 
-    // Same reasoning as the different-light-and-dark themes above: auto
-    // derives the window theme from the terminal background, which now
-    // moves with the desktop, so it would fight the desktop rather than
-    // follow it.
-    if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
-
+    // The built-in pair moves with the scheme, so auto follows it. With an
+    // explicit background, auto follows that ground instead of the desktop,
+    // which is the only way the chrome can agree with the terminal. The
+    // rewrite to system is deliberately not applied here.
+    //
     // Mark that we use a conditional theme.
     self._conditional_set.insert(.theme);
 }
@@ -6157,8 +6173,12 @@ fn applyThemeOverlay(self: *Config, iter: *cli.args.LineIterator) !void {
     var new_config = try self.cloneEmpty(alloc_gpa);
     errdefer new_config.deinit();
 
-    // Load our theme
+    // Load our theme. The flag keeps the theme's own `foreground` out of
+    // `_foreground_user_set`; the replay below sets it again for the user's
+    // steps, which are the only ones that may claim the value as theirs.
+    new_config._loading_theme = true;
     try new_config.loadIter(alloc_gpa, iter);
+    new_config._loading_theme = false;
 
     // Setup our replay to be conditional.
     conditional: for (new_config._replay_steps.items) |*item| {
@@ -6235,19 +6255,26 @@ pub fn finalize(self: *Config) !void {
         // it so all memory from self prior to this point will be freed.
         try self.loadTheme(theme.*);
 
-        // If we have different light vs dark mode themes, disable
-        // window-theme = auto since that breaks it.
+        // Mark that we use a conditional theme, and keep upstream's
+        // auto -> system rewrite on the platforms that share this source
+        // tree. Wintty leaves auto alone: an explicit background means the
+        // only chrome that agrees with the terminal is the one derived from
+        // that ground, and the pair already follows the scheme when the
+        // user has not overridden it.
         if (different) {
-            // This setting doesn't make sense with different light/dark themes
-            // because it'll force the theme based on the Ghostty theme.
-            if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
+            if (comptime !wintty_theme.enabled) {
+                if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
+            }
 
-            // Mark that we use a conditional theme
             self._conditional_set.insert(.theme);
         }
     } else if (comptime wintty_theme.enabled) {
         try self.applyBuiltinTheme();
     }
+
+    // After the theme is in place, make the resolved foreground legible on
+    // the resolved background. An explicit user value is left alone.
+    self.applyContrastFloor();
 
     // Used for a variety of defaults. See the function docs as well the
     // specific variable use sites for more details.
@@ -6475,6 +6502,40 @@ pub fn finalize(self: *Config) !void {
     self._finalized = true;
 }
 
+/// Whether the user wrote a `foreground` value of their own. The contrast
+/// floor and the C API's explicitness answer both read this one field, so
+/// the two cannot disagree.
+pub fn foregroundIsExplicit(self: *const Config) bool {
+    return self._foreground_user_set;
+}
+
+/// Make the resolved foreground clear WCAG AA against the resolved
+/// background. Skipped when the user set `foreground` explicitly: that is
+/// the one opt-out the ruling allows. A theme's own value, and the
+/// compile-time default when no layer wrote one, are both corrected.
+fn applyContrastFloor(self: *Config) void {
+    if (comptime !wintty_theme.enabled) return;
+    if (self._foreground_user_set) return;
+
+    const background: [3]u8 = .{ self.background.r, self.background.g, self.background.b };
+    const foreground: [3]u8 = .{ self.foreground.r, self.foreground.g, self.foreground.b };
+    const readable = wintty_theme.readableForeground(background, foreground);
+    if (std.mem.eql(u8, &foreground, &readable)) return;
+
+    self.foreground = .{
+        .r = readable[0],
+        .g = readable[1],
+        .b = readable[2],
+    };
+    log.info(
+        "foreground floored for contrast background=#{x:0>2}{x:0>2}{x:0>2} foreground=#{x:0>2}{x:0>2}{x:0>2}",
+        .{
+            background[0], background[1], background[2],
+            readable[0],   readable[1],   readable[2],
+        },
+    );
+}
+
 /// Callback for src/cli/args.zig to allow us to handle special cases
 /// like `--help` or `-e`. Returns "false" if the CLI parsing should halt.
 pub fn parseManuallyHook(
@@ -6528,7 +6589,10 @@ pub fn parseManuallyHook(
             }
         }
 
-        // Do not continue, we consumed everything.
+        // Do not continue, we consumed everything. Command argv is not
+        // config, so the generic hook below (which records an explicit
+        // foreground) is deliberately never reached for these.
+        self._next_arg_is_theme = false;
         return false;
     }
 
@@ -6537,6 +6601,18 @@ pub fn parseManuallyHook(
         alloc,
         .{ .arg = try alloc.dupeSentinel(u8, arg, 0) },
     );
+
+    // Record an explicit foreground while the origin is still known. A
+    // theme-derived replay is not the user's choice, and neither is a value
+    // the parser will reject: `Color.parseCLI` failing means the resolved
+    // colour stays at the layer below, so the floor still owns it.
+    if (!self._loading_theme and !self._next_arg_is_theme and
+        std.mem.startsWith(u8, arg, "--foreground="))
+    {
+        const value = arg["--foreground=".len..];
+        self._foreground_user_set = (Color.parseCLI(value) catch null) != null;
+    }
+    self._next_arg_is_theme = false;
 
     // If we didn't find a special case, continue parsing normally
     return true;
@@ -6866,6 +6942,11 @@ pub fn clone(
     // says whether the user wrote one.
     result._working_directory_defaulted = self._working_directory_defaulted;
 
+    // Whether the user wrote `foreground` travels with the resolved value
+    // for the same reason: a re-finalize replays the theme and its steps are
+    // flattened, so the provenance cannot be re-derived.
+    result._foreground_user_set = self._foreground_user_set;
+
     return result;
 }
 
@@ -7120,6 +7201,9 @@ const Replay = struct {
                         if (self.skip_empty_resets and
                             cli.args.isEmptyScalarReset(Config, v.arg)) continue;
 
+                        // Only applyThemeOverlay produces conditional args;
+                        // the parser must not record this as the user's.
+                        self.config._next_arg_is_theme = true;
                         return v.arg;
                     },
 
@@ -7127,9 +7211,13 @@ const Replay = struct {
                         if (self.skip_empty_resets and
                             cli.args.isEmptyScalarReset(Config, arg)) continue;
 
+                        self.config._next_arg_is_theme = false;
                         return arg;
                     },
-                    .@"-e" => return "-e",
+                    .@"-e" => {
+                        self.config._next_arg_is_theme = false;
+                        return "-e";
+                    },
                 }
             }
         }
@@ -13231,7 +13319,13 @@ test "theme specifying light/dark changes window-theme from auto" {
         try cfg.loadIter(alloc, &it);
         try cfg.finalize();
 
-        try testing.expect(cfg.@"window-theme" == .system);
+        // Windows keeps auto so the chrome follows an explicit background;
+        // the upstream platforms keep their auto -> system rewrite.
+        const expected: WindowTheme = if (comptime wintty_theme.enabled)
+            .auto
+        else
+            .system;
+        try testing.expectEqual(expected, cfg.@"window-theme");
     }
 }
 
@@ -13249,7 +13343,11 @@ test "theme specifying light/dark sets theme usage in conditional state" {
         try cfg.loadIter(alloc, &it);
         try cfg.finalize();
 
-        try testing.expect(cfg.@"window-theme" == .system);
+        const expected: WindowTheme = if (comptime wintty_theme.enabled)
+            .auto
+        else
+            .system;
+        try testing.expectEqual(expected, cfg.@"window-theme");
         try testing.expect(cfg._conditional_set.contains(.theme));
     }
 }
@@ -13760,9 +13858,10 @@ test "built-in theme applies when nothing is configured" {
 
         try testing.expectEqual(tc.bg, cfg.background);
 
-        // window-theme must stop deriving itself from the background, which
-        // now moves with the desktop, and follow the desktop directly.
-        try testing.expectEqual(WindowTheme.system, cfg.@"window-theme");
+        // Windows keeps auto: the built-in pair moves with the scheme, so
+        // the chrome follows it (or an explicit background) without the app
+        // rewriting what the user did not set.
+        try testing.expectEqual(WindowTheme.auto, cfg.@"window-theme");
 
         // Registered as conditional, or an OS light/dark flip would not
         // rebuild the config and the pair would never switch.
@@ -13795,6 +13894,287 @@ test "built-in theme loses to an explicit setting" {
         .g = 0x23,
         .b = 0x33,
     }, cfg.foreground);
+}
+
+test "contrast floor: a derived foreground on an explicit background" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // The resize-film shape: an explicit dark background and no
+    // foreground. The built-in light half supplies a dark foreground for a
+    // light ground, so the resolved pair is dark-on-dark unless the floor
+    // runs. This is the red-first repro row.
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{"--background=#141a24"} };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expectEqual(Color{
+        .r = 0x14,
+        .g = 0x1A,
+        .b = 0x24,
+    }, cfg.background);
+    try testing.expect(wintty_theme.contrast(
+        .{ cfg.background.r, cfg.background.g, cfg.background.b },
+        .{ cfg.foreground.r, cfg.foreground.g, cfg.foreground.b },
+    ) >= wintty_theme.aa_text);
+}
+
+test "contrast floor: an unwritten foreground is not an exemption" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const alloc_arena = arena.allocator();
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile(testing.io, "only_background", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
+        try writer.interface.writeAll("background = #f4f6fb\n");
+        try writer.end();
+    }
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = path_buf[0..try td.dir.realPathFile(testing.io, "only_background", &path_buf)];
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{
+        try alloc_arena.print("--theme={s}", .{path}),
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expect(!cfg.foregroundIsExplicit());
+    try testing.expect(wintty_theme.contrast(
+        .{ cfg.background.r, cfg.background.g, cfg.background.b },
+        .{ cfg.foreground.r, cfg.foreground.g, cfg.foreground.b },
+    ) >= wintty_theme.aa_text);
+}
+
+test "contrast floor: an explicit foreground is left alone" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{
+        "--background=#141a24",
+        "--foreground=#151515",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expect(cfg.foregroundIsExplicit());
+    try testing.expectEqual(Color{ .r = 0x15, .g = 0x15, .b = 0x15 }, cfg.foreground);
+}
+
+test "contrast floor: command argv after -e is not a config writer" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{
+        "--background=#141a24",
+        "-e",
+        "tool",
+        "--foreground=#1e2333",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expect(!cfg.foregroundIsExplicit());
+    try testing.expect(wintty_theme.contrast(
+        .{ cfg.background.r, cfg.background.g, cfg.background.b },
+        .{ cfg.foreground.r, cfg.foreground.g, cfg.foreground.b },
+    ) >= wintty_theme.aa_text);
+}
+
+test "contrast floor: explicit config before -e stays explicit" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{
+        "--background=#000000",
+        "--foreground=#151515",
+        "-e",
+        "tool",
+        "--foreground=#ff0000",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expect(cfg.foregroundIsExplicit());
+    try testing.expectEqual(Color{ .r = 0x15, .g = 0x15, .b = 0x15 }, cfg.foreground);
+}
+
+test "contrast floor: an empty reset is not explicit" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{
+        "--background=#141a24",
+        "--foreground=",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expect(!cfg.foregroundIsExplicit());
+    try testing.expect(wintty_theme.contrast(
+        .{ cfg.background.r, cfg.background.g, cfg.background.b },
+        .{ cfg.foreground.r, cfg.foreground.g, cfg.foreground.b },
+    ) >= wintty_theme.aa_text);
+}
+
+test "contrast floor: a config-file foreground is explicit" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile(testing.io, "config", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
+        try writer.interface.writeAll("background = #141a24\nforeground = #151515\n");
+        try writer.end();
+    }
+    var cfg_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cfg_path = cfg_buf[0..try td.dir.realPathFile(testing.io, "config", &cfg_buf)];
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, cfg_path);
+    try cfg.finalize();
+
+    try testing.expect(cfg.foregroundIsExplicit());
+    try testing.expectEqual(Color{ .r = 0x15, .g = 0x15, .b = 0x15 }, cfg.foreground);
+}
+
+test "contrast floor: a malformed foreground is not an exemption" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{
+        "--background=#141a24",
+        "--foreground=bogus",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expect(!cfg.foregroundIsExplicit());
+    try testing.expect(wintty_theme.contrast(
+        .{ cfg.background.r, cfg.background.g, cfg.background.b },
+        .{ cfg.foreground.r, cfg.foreground.g, cfg.foreground.b },
+    ) >= wintty_theme.aa_text);
+}
+
+test "contrast floor: a user foreground after a theme stays explicit" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{
+        "--theme=Adwaita Dark",
+        "--foreground=#151515",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expect(cfg.foregroundIsExplicit());
+    try testing.expectEqual(Color{ .r = 0x15, .g = 0x15, .b = 0x15 }, cfg.foreground);
+}
+
+test "contrast floor: an already readable pair is unchanged" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{"--background=#F4F6FB"} };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expectEqual(Color{ .r = 0x1E, .g = 0x23, .b = 0x33 }, cfg.foreground);
+}
+
+test "contrast floor: clone keeps the floored pair" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{"--background=#141a24"} };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    var copy = try cfg.clone(alloc);
+    defer copy.deinit();
+    try copy.finalize();
+
+    try testing.expect(wintty_theme.contrast(
+        .{ copy.background.r, copy.background.g, copy.background.b },
+        .{ copy.foreground.r, copy.foreground.g, copy.foreground.b },
+    ) >= wintty_theme.aa_text);
+}
+
+test "contrast floor: changeConditionalState still floors" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{"--background=#141a24"} };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    var dark = (try cfg.changeConditionalState(.{ .theme = .dark })) orelse
+        try cfg.clone(alloc);
+    defer dark.deinit();
+
+    try testing.expect(wintty_theme.contrast(
+        .{ dark.background.r, dark.background.g, dark.background.b },
+        .{ dark.foreground.r, dark.foreground.g, dark.foreground.b },
+    ) >= wintty_theme.aa_text);
+}
+
+test "contrast floor: the explicitness field is not a config key" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{"--foreground_user_set=true"} };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expect(!cfg.foregroundIsExplicit());
+    try testing.expect(cfg._diagnostics.list.items.len > 0);
 }
 
 test "issue 228: empty foreground via real config file defers to theme" {

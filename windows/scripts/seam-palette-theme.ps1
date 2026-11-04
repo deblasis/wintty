@@ -261,6 +261,30 @@ function Is-DarkHex([string]$hex) {
     return ((0.2126 * $b[0] + 0.7152 * $b[1] + 0.0722 * $b[2]) / 255.0) -lt 0.5
 }
 
+# WCAG relative luminance/contrast, the same rule the native floor applies.
+function Get-WcagRatio([string]$a, [string]$b) {
+    function Lin([int]$c) {
+        $s = $c / 255.0
+        if ($s -le 0.03928) { return $s / 12.92 }
+        return [Math]::Pow(($s + 0.055) / 1.055, 2.4)
+    }
+    $pa = [Convert]::FromHexString($a.TrimStart('#'))
+    $pb = [Convert]::FromHexString($b.TrimStart('#'))
+    $la = 0.2126 * (Lin $pa[0]) + 0.7152 * (Lin $pa[1]) + 0.0722 * (Lin $pa[2])
+    $lb = 0.2126 * (Lin $pb[0]) + 0.7152 * (Lin $pb[1]) + 0.0722 * (Lin $pb[2])
+    return ([Math]::Max($la, $lb) + 0.05) / ([Math]::Min($la, $lb) + 0.05)
+}
+
+# The live native config's foreground after the contrast floor. The row
+# swatch still shows the theme file's own value; only live reads use this.
+function Effective-Fg($t) {
+    if ((Get-WcagRatio $t.bg $t.fg) -ge 4.5) { return $t.fg }
+    if ((Get-WcagRatio $t.bg '#FFFFFF') -ge (Get-WcagRatio $t.bg '#000000')) {
+        return '#FFFFFF'
+    }
+    return '#000000'
+}
+
 # The renderer repaints on its own frame after the config lands, so the
 # pixel oracle polls briefly rather than sampling once. The terminal rect
 # is fetched once and reused for the whole poll (the window is pinned and
@@ -784,7 +808,7 @@ try {
         $t = $Themes[$step.want]
         Check "browse/$($step.key)->$($step.want)/highlight" ($r.paletteUi.selectedTheme -eq $step.want) "'$($r.paletteUi.selectedTheme)'"
         Check "browse/$($step.want)/previewing" ($r.previewing -and $r.previewTheme -eq $step.want) "previewTheme '$($r.previewTheme)'"
-        Check "browse/$($step.want)/terminal" ($r.nativeBackground -eq $t.bg -and $r.nativeForeground -eq $t.fg) "native $($r.nativeBackground)/$($r.nativeForeground)"
+        Check "browse/$($step.want)/terminal" ($r.nativeBackground -eq $t.bg -and $r.nativeForeground -eq (Effective-Fg $t)) "native $($r.nativeBackground)/$($r.nativeForeground), want $($t.bg)/$(Effective-Fg $t)"
         Check "browse/$($step.want)/chrome" ($r.background -eq $t.bg -and $r.palette[0] -eq $t.p[0]) "chrome $($r.background) palette0 $($r.palette[0])"
         # The strip in the SAME readout as the terminal: the selected tab is
         # painted with the terminal background, so one preview step has to

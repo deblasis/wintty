@@ -1364,6 +1364,10 @@ GHOSTTY_API void ghostty_config_load_recursive_files(ghostty_config_t);
 GHOSTTY_API bool ghostty_config_set_color_scheme(ghostty_config_t,
                                                  ghostty_color_scheme_e);
 GHOSTTY_API bool ghostty_config_theme_is_builtin(ghostty_config_t);
+// Whether the user's own config wrote `foreground`, as opposed to the value
+// coming from a theme or the compile-time default. The contrast floor leaves
+// an explicit value alone.
+GHOSTTY_API bool ghostty_config_foreground_is_explicit(ghostty_config_t);
 // Static storage: do NOT pass the result to ghostty_string_free. The ptr is
 // NULL on a build with no built-in theme.
 GHOSTTY_API ghostty_string_s ghostty_config_builtin_theme(ghostty_color_scheme_e);
@@ -1556,6 +1560,25 @@ GHOSTTY_API bool ghostty_surface_get_last_frame_texture(
     ghostty_surface_last_frame_texture_s* out);
 
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
+// The config-derived pair the renderer is drawing, not an OSC override.
+// Returns false when a dormant terminal could not be woken.
+GHOSTTY_API bool ghostty_surface_background(ghostty_surface_t,
+                                            ghostty_config_color_s*);
+GHOSTTY_API bool ghostty_surface_foreground(ghostty_surface_t,
+                                            ghostty_config_color_s*);
+// Monotonic per-surface renderer config generation, bumped under the same
+// lock as the pair.
+GHOSTTY_API uint64_t ghostty_surface_config_generation(ghostty_surface_t);
+
+typedef struct {
+  ghostty_config_color_s background;
+  ghostty_config_color_s foreground;
+  uint64_t generation;
+} ghostty_surface_colors_s;
+
+// The pair and generation from one lock acquisition.
+GHOSTTY_API bool ghostty_surface_colors(ghostty_surface_t,
+                                        ghostty_surface_colors_s*);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_color_scheme(ghostty_surface_t,

@@ -479,10 +479,10 @@ public class ThemeFlipWiringTests
         // swap that invokes first would push the outgoing polarity's ground
         // exactly when the handler exists to fix that.
         var method = Manager().Method("ResolveAndNotifyIfChanged");
-        var resolve = Assert.Single(method.Calls("Resolve"));
+        var resolve = Assert.Single(method.Calls("ResolveNow"));
         var announce = Assert.Single(method.CallsEndingWith("ThemeChanged?.Invoke"));
         Assert.True(resolve.Span.Start < announce.Span.Start,
-            "ThemeChanged is invoked before Resolve()");
+            "ThemeChanged is invoked before ResolveNow()");
     }
 
     [Fact]

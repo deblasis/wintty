@@ -316,6 +316,18 @@ public partial class App : Application
         return false;
     }
 
+    /// <summary>
+    /// Move every live surface onto a conditional scheme. The transaction
+    /// that commits a scheme change uses this, so a window other than the
+    /// one that observed the event cannot keep its surfaces on the outgoing
+    /// state while the app and chrome move.
+    /// </summary>
+    internal static void NotifyAllSurfacesColorScheme(Ghostty.Core.Interop.GhosttyColorScheme scheme)
+    {
+        foreach (var host in _hostBySurface.Values.Distinct())
+            host.NotifyColorSchemeChanged(scheme);
+    }
+
     internal static void UnregisterHostSurfaces(GhosttyHost host)
     {
         // Drain every entry whose value equals `host`. Called from
@@ -1083,6 +1095,7 @@ public partial class App : Application
         // the teardown below can take them back.
         _bootstrapHost.OpenConfigRequested += OnAppOpenConfigRequested;
         _bootstrapHost.ReloadConfigRequested += OnAppReloadConfigRequested;
+        _bootstrapHost.SoftReloadRequested += OnAppSoftReloadRequested;
 
         // The +list-themes server, one for the process. The pipe name it
         // claims carries the process id and it is created with
@@ -1568,6 +1581,17 @@ public partial class App : Application
             // existing priority in the arm above. With no profile named, the
             // pane follows the same rules a cold start's does (#1136).
 
+            // A --working-directory the secondary asked for on its own
+            // command line is an explicit choice a cold start honors through
+            // its config; the primary cannot borrow that config, so it reads
+            // the flag off the argv the request already carries. The wire's
+            // working-directory field stays what it was: the inherited
+            // process cwd, which the launch policy keeps dropping for
+            // command-less launches.
+            var requestedDirectory = Ghostty.Core.SingleInstance.LaunchDirectoryOverride.Resolve(
+                Ghostty.Core.SingleInstance.LaunchDirectoryOverride.FromArgs(req.Args),
+                req.WorkingDirectory);
+
             // The first plain launch into a -e process restores the session
             // that process held back, instead of opening a default window.
             if (forwardedCommand is null && launch.ProfileId is null && RestoreHeldSession())
@@ -1576,7 +1600,8 @@ public partial class App : Application
             OpenJumpListWindow(
                 launch.ProfileId,
                 req.WorkingDirectory,
-                command: forwardedCommand);
+                command: forwardedCommand,
+                requestedDirectory: requestedDirectory);
         }
         else
         {
@@ -1982,13 +2007,16 @@ public partial class App : Application
     private void OpenJumpListWindow(
         string? profileId,
         string workingDirectory,
-        string? command = null)
+        string? command = null,
+        string? requestedDirectory = null)
     {
         // A window other than the cold -e one ends the hold (#1136).
         RestoreHeldSession();
 
-        // The caller's directory goes with a -e command only, as on a cold start.
-        var directory = Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory(command, workingDirectory);
+        // A directory the launch asked for wins outright; the INHERITED cwd
+        // still goes with a -e command only, as on a cold start.
+        var directory = requestedDirectory
+            ?? Ghostty.Core.Profiles.PaneCommandPolicy.LaunchDirectory(command, workingDirectory);
 
         Ghostty.Core.Profiles.ProfileSnapshot? snapshot;
         if (profileId is null)
@@ -2169,6 +2197,15 @@ public partial class App : Application
     /// </summary>
     private void OnAppReloadConfigRequested(object? sender, EventArgs e) =>
         _configService?.Reload();
+
+    /// <summary>
+    /// A soft reload action is libghostty asking for the current conditional
+    /// state to be reapplied. The transaction that moved it already built
+    /// the config, so this is a no-op then; after a decline it is suppressed
+    /// until a new observation or an explicit reload.
+    /// </summary>
+    private void OnAppSoftReloadRequested(object? sender, EventArgs e) =>
+        _configService?.ReloadFromSoftAction();
 
     /// <summary>
     /// A LIST_THEMES arriving on the preview pipe. The picker is drawn by
@@ -2652,6 +2689,7 @@ public partial class App : Application
                 {
                     _bootstrapHost.OpenConfigRequested -= OnAppOpenConfigRequested;
                     _bootstrapHost.ReloadConfigRequested -= OnAppReloadConfigRequested;
+                    _bootstrapHost.SoftReloadRequested -= OnAppSoftReloadRequested;
                 }
 
                 // Bootstrap host is the LAST host. Its Dispose drains

@@ -22,21 +22,19 @@ public sealed class RootGridBackgroundWiringTests
             p => p.Identifier.ValueText == name);
 
     [Fact]
-    public void The_root_grid_asks_the_desktop_for_its_polarity()
+    public void The_root_grid_asks_the_resolved_window_theme()
     {
         var call = ShellSource.Load("MainWindow.xaml.cs")
             .Method("ApplyRootGridBackground")
             .Call("RootBackgroundResolver.Resolve");
 
-        // Asserted on the node: a substring match here reads the same
-        // against `!OsTheme.IsDark(...)`, so it would have passed the whole
-        // resolution through inverted and reported the wiring intact.
-        var polarity = call.ArgExpression(3).AssertCallTo("OsTheme.IsDark");
-
-        // The window already holds a UISettings and subscribes to it. A
-        // freshly activated one answers for a different moment, which is
-        // the drift OsTheme's overload exists to prevent.
-        Assert.Equal("_systemUiSettings", polarity.Arg(0));
+        // The painted ground follows the resolved window theme, not a
+        // second desktop sample: the manager is the one source the fill and
+        // the ink are both scored against. The desktop is only the fallback
+        // for the constructor pass before the manager exists.
+        var polarity = call.ArgExpression(3).ToString();
+        Assert.Contains("_themeManager.IsDarkMode", polarity);
+        Assert.Contains("OsTheme.IsDark", polarity);
     }
 
     /// <summary>
@@ -67,23 +65,14 @@ public sealed class RootGridBackgroundWiringTests
         var estimate = Assert.Single(
             source.Root.Calls("Core.Shell.BackdropGround.Estimate"));
 
-        // The polarity argument is conditional on the frame's ground style.
-        // Node-level, as before: a negated polarity, a swapped ternary or a
-        // flat single-source read all pass a substring assertion just as
-        // happily, so assert the conditional's exact shape.
-        var polarity = Assert.IsType<ConditionalExpressionSyntax>(
-            estimate.ArgExpression(1));
-        Assert.Equal(
-            "ChromeGroundStyle == BackdropStyles.Solid",
-            polarity.Condition.ToString());
-
-        // The solid arm reads the desktop, the window's live UISettings --
-        // the same read the fill paints from.
-        var desktop = polarity.WhenTrue.AssertCallTo("OsTheme.IsDark");
-        Assert.Equal("_systemUiSettings", desktop.Arg(0));
-
-        // The frosted/crystal arm reads the window's resolved theme.
-        Assert.Equal("_themeManager.IsDarkMode", polarity.WhenFalse.ToString());
+        // The polarity argument is the window theme manager's read, for
+        // every ground style: the manager holds the explicit window-theme
+        // when there is one, follows the system when the config does, and
+        // resolves from the previewed background's luminance under auto.
+        // Node-level: a conditional read or a desktop read must not slip
+        // back in for either arm.
+        var polarity = estimate.ArgExpression(1);
+        Assert.Equal("_themeManager.IsDarkMode", polarity.ToString());
 
         var core = ShellSource.Load("Core.Shell.BackdropGround.cs");
         Assert.DoesNotContain(
@@ -104,24 +93,25 @@ public sealed class RootGridBackgroundWiringTests
     /// painted.
     /// </summary>
     [Fact]
-    public void The_solid_ground_scores_the_ink_against_the_desktop_read_that_paints_the_fill()
+    public void The_solid_ground_scores_the_ink_against_the_window_theme_that_paints_the_fill()
     {
         var source = ShellSource.Load("MainWindow.xaml.cs");
 
         var fill = Property(source, "ChromeFillArgb")
             .Call("RootBackgroundResolver.Resolve");
-        var fillPolarity = fill.ArgExpression(3).AssertCallTo("OsTheme.IsDark");
-
         var estimate = Property(source, "EstimatedBackdropGround")
             .Call("Core.Shell.BackdropGround.Estimate");
-        var solidArm = Assert.IsType<ConditionalExpressionSyntax>(
-            estimate.ArgExpression(1)).WhenTrue;
-        var inkPolarity = solidArm.AssertCallTo("OsTheme.IsDark");
 
-        // The same read, not merely the same helper: both name the window's
-        // live UISettings rather than a fresh one that answers for another
-        // moment.
-        Assert.Equal("_systemUiSettings", fillPolarity.Arg(0));
-        Assert.Equal("_systemUiSettings", inkPolarity.Arg(0));
+        // One source for both, whatever the frame style: the fill paints
+        // from the window theme manager and the ink is scored against the
+        // same read. The desktop read previously sat under one arm only,
+        // and each fill/score disagreement shipped its own wrong-colour
+        // frame (#936 and its mirror image).
+        Assert.Equal(
+            "_themeManager.IsDarkMode",
+            fill.ArgExpression(3).ToString());
+        Assert.Equal(
+            "_themeManager.IsDarkMode",
+            estimate.ArgExpression(1).ToString());
     }
 }

@@ -184,6 +184,14 @@ export fn ghostty_config_theme_is_builtin(self: *Config) bool {
     return self.theme == null;
 }
 
+/// Whether the user's own config wrote `foreground`, as opposed to the
+/// resolved value coming from a theme or the compile-time default. The
+/// contrast floor leaves an explicit value alone; an embedder reading the
+/// pair for chrome needs the same classification so the two do not disagree.
+export fn ghostty_config_foreground_is_explicit(self: *Config) bool {
+    return self.foregroundIsExplicit();
+}
+
 /// The built-in theme applied when no theme is configured, in config file
 /// syntax, or an empty string on a build that has no built-in theme.
 ///
