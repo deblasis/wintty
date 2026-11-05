@@ -41,6 +41,8 @@ pub fn build(b: *std.Build) !void {
     // Zig 0.13 bug: https://github.com/ziglang/zig/issues/20414
     // (See root Ghostty build.zig on why we do this)
     try flags.append(b.allocator, "-DSIMDUTF_IMPLEMENTATION_ICELAKE=0");
+    // MSVC 14.42+ STL rejects Zig's Clang 18 (STL1000).
+    try flags.append(b.allocator, "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
 
     // Undefined behaviour checks stay off in every mode. Only Debug can
     // leave __ubsan_handle_* unresolved for someone linking our archive,

@@ -86,6 +86,8 @@ pub fn build(b: *std.Build) !void {
         try all_flags.appendSlice(b.allocator, &.{
             "-fno-sanitize=undefined",
             "-fno-sanitize-trap=undefined",
+            // MSVC 14.42+ STL rejects Zig's Clang 18 (STL1000).
+            "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
         });
     }
     // The DX12 backend gate rides both lists: define_flags feeds the
