@@ -9,15 +9,18 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// A hidden tab's placeholder arrange is not a measurement. The tab host
-/// realizes content behind the active tab and sizes it to a default slot
-/// (800x600 in the birth-coverage record), so a hidden pane's panel reads
-/// a nonzero size that is not the pane's eventual one -- and every
-/// creation driver that trusts the panel's current read (the first-layout
-/// settle gate, the Loaded fallback, the retry tick) then births the pty
-/// at that placeholder grid: the shell formats its startup output for a
-/// size the pane never shows, and the #1159 equality reds on a tab that
-/// was born behind another one (`pty 79x28 (800x600 px), pane 255x46`).
+/// A hidden pane's arrange is not a measurement. Two live shapes make
+/// that true. A restored background tab enters the tree collapsed and
+/// never arranges at all, so its panel reads zero until it is first
+/// shown; and a pane that was arranged while visible and collapsed again
+/// keeps that stale arrange as its positive read -- a size the pane is
+/// not showing in that era. Every creation driver that trusts the
+/// panel's current read (the first-layout settle gate, the Loaded
+/// fallback, the retry tick) births the pty at the wrong grid in the
+/// second shape: the shell formats its startup output for a size the
+/// pane never shows, and the #1159 equality reds on a tab that was born
+/// behind another one (`pty 79x28 (800x600 px), pane 255x46` in the
+/// birth-coverage record).
 ///
 /// The zero-size gate cannot see this class: the placeholder arrange is
 /// positive, so SurfacePixelSize.Initial accepts it. What refuses it is
@@ -125,6 +128,26 @@ public class HiddenTabMeasureWiringTests
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// An if whose condition compares the surface handle against
+    /// IntPtr.Zero, matched on the parsed shape so the operand order
+    /// cannot decide the verdict.
+    /// </summary>
+    private static bool RefusesZeroHandle(IfStatementSyntax s)
+    {
+        if (s.Condition is not BinaryExpressionSyntax
+            {
+                RawKind: (int)SyntaxKind.EqualsExpression,
+            } eq)
+        {
+            return false;
+        }
+
+        var operands = new[] { eq.Left.ToString(), eq.Right.ToString() };
+        return operands.Any(o => o.Contains("_surface", StringComparison.Ordinal))
+            && operands.Any(o => o.Contains("IntPtr.Zero", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -336,6 +359,42 @@ public class HiddenTabMeasureWiringTests
     }
 
     /// <summary>
+    /// The zero-handle refusal: the re-push hands the surface pointer to
+    /// the native side twice (scale, then size), and a surface whose
+    /// handle reads IntPtr.Zero is a surface the renderer lost or the
+    /// teardown already freed - re-pushing onto it dereferences a dead
+    /// pointer native side. The refusal must exist in the watch, must
+    /// TERMINATE, and must precede BOTH pushes; deleting it leaves every
+    /// other fact in this file green while the app dies behind it.
+    /// </summary>
+    [Fact]
+    public void ShowWatch_RefusesToRePushOntoAZeroedSurface()
+    {
+        var watch = Terminal().Method("OnLayoutShowWatch");
+
+        // Non-vacuity: both halves of the pair are still pushed here.
+        var scale = Assert.Single(watch.Body!.DescendantNodesAndSelf()
+            .OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "NativeMethods.SurfaceSetContentScale");
+        var size = Assert.Single(watch.Body!.DescendantNodesAndSelf()
+            .OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "NativeMethods.SurfaceSetSize");
+
+        var zeroGate = Assert.Single(watch.Body!.DescendantNodesAndSelf()
+            .OfType<IfStatementSyntax>(), RefusesZeroHandle);
+        Assert.True(zeroGate.Statement is ReturnStatementSyntax
+                    || (zeroGate.Statement is BlockSyntax zb
+                        && zb.Statements.OfType<ReturnStatementSyntax>().Any()),
+            "the zero-handle refusal must RETURN: a check that falls "
+                + "through re-pushes onto the freed surface anyway");
+        Assert.True(zeroGate.SpanStart < scale.SpanStart
+                    && zeroGate.SpanStart < size.SpanStart,
+            "the zero-handle refusal must precede BOTH pushes of the pair: "
+                + "a scale or size push onto a zeroed handle is a native "
+                + "dereference of a surface that no longer exists");
+    }
+
+    /// <summary>
     /// The flip settles a still-pending creation at the first visible
     /// pass. The settle attempt must sit INSIDE the still-pending branch
     /// (`if (!_surfaceCreated)`): containment, not order -- an attempt
@@ -354,7 +413,7 @@ public class HiddenTabMeasureWiringTests
         var settle = Assert.Single(watch.Body!.DescendantNodesAndSelf()
             .OfType<InvocationExpressionSyntax>(),
             i => i.CalleeText() == "TrySettleSurfaceCreation");
-        Assert.Single(watch.Body!.AssignsTo("_creationStarvedByHiddenEra"),
+        var arming = Assert.Single(watch.Body!.AssignsTo("_creationStarvedByHiddenEra"),
             a => a.Right.ToString() == "true");
 
         var guard = GuardBefore(watch, "TrySettleSurfaceCreation");
@@ -363,18 +422,41 @@ public class HiddenTabMeasureWiringTests
                 + "invisible pane's arrange is still the placeholder");
         AssertGuardReturns(guard!, "OnLayoutShowWatch's invisible-pass guard");
 
-        // Containment: the attempt belongs to the still-pending branch.
+        // Containment: the third producer of the starved flag - the
+        // watch's own invisible branch - records INSIDE the guard and
+        // before its return, the same shape the other two producers are
+        // pinned with. Hoisted above the guard it arms the backstop on a
+        // visible pass too, and every visible pane re-runs the flip body.
+        Assert.True(guard.Contains(arming),
+            "the invisible-pass arming must sit INSIDE the invisible-pass "
+                + "guard's branch: hoisted above the guard it arms the "
+                + "backstop on a visible pass too, and every visible pane "
+                + "re-runs the flip body");
+        var armingReturn = guard.Statement is ReturnStatementSyntax ar
+            ? ar
+            : guard.Statement is BlockSyntax ab
+                ? ab.Statements.OfType<ReturnStatementSyntax>().First()
+                : null;
+        Assert.True(armingReturn is not null && arming.SpanStart < armingReturn.SpanStart,
+            "the invisible-pass arming must precede the branch's return: a "
+                + "record placed after an unconditional return never runs");
+
+        // Containment: the attempt belongs to the still-pending branch's
+        // OWN statement, not merely somewhere inside the if's full span -
+        // an else clause is part of that span, and a settle moved into it
+        // runs only for panes that already have a surface.
         var pendingBranch = watch.Body!.DescendantNodesAndSelf()
             .OfType<IfStatementSyntax>()
             .FirstOrDefault(s => s.Condition.ToString().Contains("_surfaceCreated"));
         Assert.True(pendingBranch is not null,
             "the watch needs a `!_surfaceCreated` branch that owns the "
                 + "settle attempt");
-        Assert.True(pendingBranch!.Contains(settle),
+        Assert.True(pendingBranch!.Statement.Contains(settle),
             "the settle attempt must sit INSIDE the `if (!_surfaceCreated)` "
-                + "branch: moved below the branch, a pending pane never "
-                + "settles (the show-path backstop is dead) and a created "
-                + "pane creates its surface a second time");
+                + "branch's own statement: moved out of the branch - below "
+                + "it, or into its else - a pending pane never settles (the "
+                + "show-path backstop is dead) and a created pane creates "
+                + "its surface a second time");
 
         var consume = Assert.Single(watch.Body!.AssignsTo("_creationStarvedByHiddenEra"),
             a => a.Right.ToString() == "false");
@@ -521,6 +603,13 @@ public class HiddenTabMeasureWiringTests
     /// the expected set does not carry. A fourth push site, an unguarded
     /// one, or a second creation caller is a new path around the guards
     /// this class pins.
+    ///
+    /// One blind spot the parse itself creates: the corpus is parsed with
+    /// DEMO, DEBUG and TESTSEAM defined, so regions disabled under those
+    /// symbols are invisible to the call census. The disabled-text check
+    /// below refuses any push callee found in one, which turns "add a
+    /// push behind an #if" into a decision this fact participates in
+    /// rather than a silent escape.
     /// </summary>
     [Fact]
     public void CreationFunnel_SurfacePushesAreGuardedAcrossEveryShellSource()
@@ -542,7 +631,8 @@ public class HiddenTabMeasureWiringTests
         var seenScale = new HashSet<string>(StringComparer.Ordinal);
         var creators = new List<(string File, InvocationExpressionSyntax Call)>();
 
-        foreach (var file in ShellSource.AllFiles())
+        var files = ShellSource.AllFiles();
+        foreach (var file in files)
         {
             foreach (var call in file.Root.CallsEndingWith("SurfaceSetSize"))
             {
@@ -570,21 +660,49 @@ public class HiddenTabMeasureWiringTests
             }
         }
 
-        // Both halves, guarded site by site. GuardBefore needs the method
-        // declaration the site lives in, which the census just proved.
-        foreach (var site in seenSize.Concat(seenScale))
+        // The parse defines DEMO, DEBUG and TESTSEAM, so a region disabled
+        // under those symbols is invisible to the call census above: a
+        // push compiled only in a configuration this parse cannot see
+        // (inside `#if !DEBUG`, say) would slip it while shipping in the
+        // configurations that matter. Disabled regions survive as trivia,
+        // so refuse any push-shaped callee that appears in one: the push
+        // must live in a visible region, or this census has to be taught
+        // the symbol deliberately, out loud.
+        foreach (var file in files)
+        {
+            foreach (var disabled in file.Root.DescendantTrivia()
+                         .Where(t => t.IsKind(SyntaxKind.DisabledTextTrivia)))
+            {
+                var text = disabled.ToString();
+                Assert.False(text.Contains("SurfaceSetSize(", StringComparison.Ordinal),
+                    $"{file.Name} disables a preprocessor region containing a " +
+                        "'SurfaceSetSize(' call: the census cannot see it, but a " +
+                        "build without this parse's symbols compiles it");
+                Assert.False(text.Contains("SurfaceSetContentScale(", StringComparison.Ordinal),
+                    $"{file.Name} disables a preprocessor region containing a " +
+                        "'SurfaceSetContentScale(' call: the census cannot see it, " +
+                        "but a build without this parse's symbols compiles it");
+            }
+        }
+
+        // Both halves, guarded SITE BY CALLEE: the two methods that host
+        // both halves are dual-listed, so a site's guard must be proven
+        // for each callee it pushes - a scale hoisted above the guard
+        // survives a check that only asks where the size push sits.
+        foreach (var (site, callee) in seenSize
+                     .Select(s => (s, "SurfaceSetSize"))
+                     .Concat(seenScale.Select(s => (s, "SurfaceSetContentScale"))))
         {
             var (tail, method) = site.Split("::", 2) is { Length: 2 } parts
                 ? (parts[0], parts[1])
                 : throw new InvalidOperationException("unparseable census site " + site);
             var source = ShellSource.Load(tail);
             var declared = source.Method(method);
-            var callee = seenSize.Contains(site) ? "SurfaceSetSize" : "SurfaceSetContentScale";
             var guard = GuardBefore(declared, callee);
             Assert.True(guard is not null,
                 $"{site} pushes {callee} without an `!IsEffectivelyVisible()` " +
                     "refusal before it");
-            AssertGuardReturns(guard!, site);
+            AssertGuardReturns(guard!, site + "::" + callee);
         }
 
         // Exhaustiveness the other way: a vanished site is a lost push
