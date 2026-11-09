@@ -101,13 +101,13 @@ Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.ShowWatch_RePushesTheScaleAndSi
 Mutation: in `OnLoaded`'s fallback tick, `_creationStarvedByHiddenEra =
 true;` moved above the `if (!IsEffectivelyVisible())` guard. A visible
 tick now arms the backstop too, and every later visible pass re-runs the
-flip body.
+flip body. Re-run after the containment asserts were added; still red.
 
-Red (facts ran, 1 failed):
+Red (filter `~LoadedFallback`, 2 facts ran, 1 failed):
 
 ```
-Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.LoadedFallback_RecordsTheHiddenEraInsteadOfSettling (13ms): Error Message: the fallback's hidden branch needs the visibility refusal around its starvation record: a hidden tick must record and return, never settle at the placeholder
-   at Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.LoadedFallback_RecordsTheHiddenEraInsteadOfSettling() in C:\...\windows\Ghostty.Tests\Wiring\HiddenTabMeasureWiringTests.cs:line 489
+Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.LoadedFallback_RecordsTheHiddenEraInsteadOfSettling (635ms): Error Message: the fallback's hidden branch needs the visibility refusal around its starvation record: a hidden tick must record and return, never settle at the placeholder
+   at Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.LoadedFallback_RecordsTheHiddenEraInsteadOfSettling() in C:\...\windows\Ghostty.Tests\Wiring\HiddenTabMeasureWiringTests.cs
 ```
 
 ## M5: an unguarded SurfaceSetSize call site hidden behind a using alias
@@ -171,12 +171,13 @@ Mutation: `if (_surface.Handle == IntPtr.Zero) return;` removed from the
 watch's re-push path (after the pending branch, before the scale/size
 pair). A zeroed handle - a renderer failure, or a freed surface re-hidden
 before its teardown - is then handed to the native side twice; no other
-fact in the file notices.
+fact in the file notices. Re-run after the matcher rework (N1-N3 below);
+still red.
 
-Red (13 facts ran, 1 failed):
+Red (filter `~ShowWatch_RefusesToRePush`, 1 fact ran, 1 failed):
 
 ```
-Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.ShowWatch_RefusesToRePushOntoAZeroedSurface (533ms): Error Message: Assert.Single() Failure: The collection did not contain any matching items
+Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.ShowWatch_RefusesToRePushOntoAZeroedSurface (646ms): Error Message: Assert.Single() Failure: The collection did not contain any matching items
 Expected:   (predicate expression)
 Collection: [if (_surfaceDisposed) return;, if (!IsEffectivelyVisible()) { ... }, if (!_surfaceCreated) { ... }, ...]
 ```
@@ -233,14 +234,15 @@ Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.CreationFunnel_SurfacePushesAre
 
 Mutation: `|| !IsEffectivelyVisible()` removed from the measured gate's
 condition in `TryCreateSurface`. The gate still refuses unmeasured panes;
-an invisible pane with a positive placeholder read now passes it.
+an invisible pane with a positive placeholder read now passes it. Re-run
+after the refusal assert was upgraded from a substring to a top-level
+disjunct match; still red.
 
 Red (filter `~CreationGate`, 1 fact ran, 1 failed):
 
 ```
-Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.CreationGate_RefusesAnInvisiblePaneArrange (582ms): Error Message: Assert.Contains() Failure: Sub-string not found
-String:    "SurfacePixelSize.Initial(\n               "···
-Not found: "!IsEffectivelyVisible()"
+Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.CreationGate_RefusesAnInvisiblePaneArrange (770ms): Error Message: the visibility refusal must be a top-level disjunct of the measured gate's condition: nested under `&&` it is false for exactly the hidden pane with a positive placeholder read the gate exists to refuse
+   at Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.CreationGate_RefusesAnInvisiblePaneArrange() in C:\...\windows\Ghostty.Tests\Wiring\HiddenTabMeasureWiringTests.cs
 ```
 
 ## M14: the watch's constructor arming deleted
@@ -293,22 +295,126 @@ Red (filter `~ScaleChange_RefusesWhileHidden`, 1 fact ran, 1 failed):
 Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.ScaleChange_RefusesWhileHidden (576ms): Error Message: OnCompositionScaleChanged needs an `!IsEffectivelyVisible()` return before the scale push: the pair moves together or not at all, and the show pass is what re-pushes both
 ```
 
+## N1: a decoy field replaces the checked handle at the zero-handle gate
+
+Mutation: a `private IntPtr _surfaceSnapshot;` field added, and the
+watch's gate replaced with `if (_surfaceSnapshot == IntPtr.Zero)
+return;`. The pushed surface's own handle is no longer checked at all.
+The gate's name-root still contains `_surface`, which is what the
+pre-rework matcher keyed on: this exact plant was 13/13 GREEN against it
+(run recorded before the rework: `Test summary: total: 13, failed: 0,
+succeeded: 13`). The reworked matcher binds the checked operand to the
+pushes' own first argument, so the decoy is no longer the gate.
+
+Red (filter `~ShowWatch_RefusesToRePush`, 1 fact ran, 1 failed):
+
+```
+Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.ShowWatch_RefusesToRePushOntoAZeroedSurface (576ms): Error Message: Assert.Single() Failure: The collection did not contain any matching items
+Expected:   (predicate expression)
+Collection: [if (_surfaceDisposed) return;, if (!IsEffectivelyVisible()) { ... }, ...]
+```
+
+## N2: the house spelling folds the handle test into a disjunction (GREEN, by design)
+
+Mutation: the watch's gate replaced with the file's house spelling
+`if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return;` -
+behavior-identical to the bare test, and the shape nine-plus existing
+sites in this file already use. This receipt is deliberately GREEN: a
+matcher that false-reds the house spelling would force every one of
+those sites out of shape for nothing. The reworked matcher recurses
+LogicalOr operands, so the folded test still counts.
+
+Green (13 facts ran, 0 failed):
+
+```
+Test summary: total: 13, failed: 0, succeeded: 13, skipped: 0, duration: 11.9s
+```
+
+## N4: the starved flag's consume moved inside the pending branch
+
+Mutation: in `OnLayoutShowWatch`, `_creationStarvedByHiddenEra = false;`
+moved from the flip body into the `if (!_surfaceCreated)` branch, before
+the settle attempt. A pending pane still settles, but a pane whose
+surface already exists never takes the branch: its flag stays set
+forever, and every later visible pass re-runs the re-push and re-arms
+the startup resize grace. Both touching facts' ORDER asserts stay
+satisfied; the containment assert is what refuses it.
+
+Red (filter `~ShowWatch_SettlesPendingCreation`, 1 fact ran, 1 failed):
+
+```
+Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.ShowWatch_SettlesPendingCreationAtTheFirstVisiblePass (537ms): Error Message: the starved flag's consume must sit OUTSIDE the `if (!_surfaceCreated)` branch: a consume inside it leaves a created pane's flag set forever, and every later visible pass re-runs the re-push and re-arms the startup resize grace
+```
+
+## N5: a guard conjunct-weakened under an `&&`
+
+Mutation: PushSurfaceSize's refusal changed to `if (!IsEffectivelyVisible()
+&& Panel.ActualWidth == 0) return;`. The substring
+`!IsEffectivelyVisible()` is still present, but as a CONJUNCT: the
+condition is false for exactly the hidden pane with a positive
+placeholder read that the guard exists to refuse, so the pane falls
+through and the placeholder is pushed. GuardBefore now demands the term
+as a top-level disjunct, so every guard in this file refuses this shape.
+
+Red (13 facts ran, 2 failed - the guard's own fact and the census):
+
+```
+Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.CreationFunnel_SurfacePushesAreGuardedAcrossEveryShellSource (4234ms): Error Message: Controls.TerminalControl.xaml.cs::PushSurfaceSize pushes SurfaceSetSize without an `!IsEffectivelyVisible()` refusal before it
+
+Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.PushSurfaceSize_RefusesWhileHidden [FAIL] (same plant: GuardBefore finds no guard carrying the term as a disjunct)
+```
+
+## N6: a second, deferred push of the same callee in a dual-listed site
+
+Mutation: in `OnFirstLayoutUpdated`'s created tail,
+`DispatcherQueue.TryEnqueue(() => NativeMethods.SurfaceSetSize(_surface,
+1, 1));` added beside the existing push. The site census sees one site
+either way and the guard check reads one token; the deferred call
+skips the guard evaluation entirely. The census now counts CALLS per
+(site, callee) and demands exactly one.
+
+Red (filter `~CreationFunnel`, 1 fact ran, 1 failed):
+
+```
+Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.CreationFunnel_SurfacePushesAreGuardedAcrossEveryShellSource (3786ms): Error Message: Assert.Distinct() Failure: Duplicate item found
+Collection: ["Controls.TerminalControl.xaml.cs::OnFirstLayoutUpd"···, "Controls.TerminalControl.xaml.cs::OnFirstLayoutUpd"···, "Controls.TerminalControl.xaml.cs::OnLayoutShowWatc"···, "Controls.TerminalControl.xaml.cs::PushSurfa ceSize"]
+Item:       "Controls.TerminalControl.xaml.cs::OnFirstLayoutUpd"·
+```
+
+## N7: a disabled-region push spelled with whitespace before the argument list
+
+Mutation: in `MainWindow.AddPaneHost`, inside `#if !DEBUG ... #endif`:
+
+```
+NativeMethods.SurfaceSetSize (default, 2, 2);
+```
+
+The space before `(` is legal C# and stepped around the previous
+`SurfaceSetSize(` needle. The disabled-text check now matches with all
+whitespace removed.
+
+Red (filter `~CreationFunnel`, 1 fact ran, 1 failed):
+
+```
+Ghostty.Tests.Wiring.HiddenTabMeasureWiringTests.CreationFunnel_SurfacePushesAreGuardedAcrossEveryShellSource (5065ms): Error Message: MainWindow.xaml.cs disables a preprocessor region containing a 'SurfaceSetSize(' call: the census cannot see it, but a build without this parse's symbols compiles it
+```
+
 ## Fact-to-receipt index
 
 | Fact | Killing mutant(s) |
 | --- | --- |
 | CreationGate_RefusesAnInvisiblePaneArrange | M13 |
 | FirstLayoutHandler_IgnoresPassesWhileHidden | M0 |
-| PushSurfaceSize_RefusesWhileHidden | M16 |
+| PushSurfaceSize_RefusesWhileHidden | M16, N5 |
 | RetryTick_SkipsWithoutSpendingWhileHidden | M15 |
 | ShowWatch_IsArmedForTheControlsLifetime | M14 |
 | ShowWatch_TheFlipBodyRunsOnlyAfterAHiddenEra | M1 |
-| ShowWatch_RefusesToRePushOntoAZeroedSurface | M9 |
-| ShowWatch_SettlesPendingCreationAtTheFirstVisiblePass | M2, M3, M8, M11 |
+| ShowWatch_RefusesToRePushOntoAZeroedSurface | M9, N1 (N2 green by design) |
+| ShowWatch_SettlesPendingCreationAtTheFirstVisiblePass | M2, M3, M8, M11, N4 |
 | ShowWatch_RePushesTheScaleAndSizePairTogether | M3 |
 | ScaleChange_RefusesWhileHidden | M17 |
 | LoadedFallback_RecordsTheHiddenEraInsteadOfSettling | M4 |
-| CreationFunnel_SurfacePushesAreGuardedAcrossEveryShellSource | M3, M5, M6, M10, M12 |
+| CreationFunnel_SurfacePushesAreGuardedAcrossEveryShellSource | M3, M5, M6, M10, M12, N5, N6, N7 |
 | TabHost_CollapsesInactiveHostsAndFlipsTheActiveOne | M7 |
 
 ## Green counterparts

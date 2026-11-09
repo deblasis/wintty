@@ -69,8 +69,49 @@ public class HiddenTabMeasureWiringTests
         MethodDeclarationSyntax method, string later) =>
         method.Body!.DescendantNodesAndSelf()
             .OfType<IfStatementSyntax>()
-            .Where(s => s.Condition.ToString().Contains("!IsEffectivelyVisible()"))
+            .Where(s => CarriesTopLevelDisjunct(s.Condition, "!IsEffectivelyVisible()"))
             .FirstOrDefault(s => s.SpanStart < SpanOf(method, later));
+
+    /// <summary>
+    /// The condition carries <paramref name="term"/> as a top-level
+    /// DISJUNCT: the term itself, or an operand of the condition's `||`
+    /// chain. A term nested under `&&` weakens the guard it appears to
+    /// carry - `!IsEffectivelyVisible() &amp;&amp; Panel.ActualWidth == 0`
+    /// is false for exactly the hidden pane with a positive placeholder
+    /// read that the guards exist to refuse - so matching the term as a
+    /// substring of the condition is not enough: the parse has to see it
+    /// standing on its own. Parentheses directly around the term are
+    /// unwrapped; anything deeper is not the term.
+    /// </summary>
+    private static bool CarriesTopLevelDisjunct(
+        ExpressionSyntax condition, string term) =>
+        DisjunctionOperands(condition)
+            .Any(o => UnwrapParens(o).ToString() == term);
+
+    private static IEnumerable<ExpressionSyntax> DisjunctionOperands(
+        ExpressionSyntax expr)
+    {
+        if (expr is BinaryExpressionSyntax
+            {
+                RawKind: (int)SyntaxKind.LogicalOrExpression,
+            } or)
+        {
+            foreach (var operand in DisjunctionOperands(or.Left))
+                yield return operand;
+            foreach (var operand in DisjunctionOperands(or.Right))
+                yield return operand;
+        }
+        else
+        {
+            yield return expr;
+        }
+    }
+
+    private static ExpressionSyntax UnwrapParens(ExpressionSyntax e)
+    {
+        while (e is ParenthesizedExpressionSyntax p) e = p.Expression;
+        return e;
+    }
 
     private static int SpanOf(MethodDeclarationSyntax method, string text)
     {
@@ -131,23 +172,42 @@ public class HiddenTabMeasureWiringTests
     }
 
     /// <summary>
-    /// An if whose condition compares the surface handle against
-    /// IntPtr.Zero, matched on the parsed shape so the operand order
-    /// cannot decide the verdict.
+    /// A comparison of the PUSHED surface's own handle against
+    /// IntPtr.Zero or nint.Zero, matched on exact sides the
+    /// WindowTeardownWiringTests.TestsSurfaceHandleAgainstZero way. The
+    /// checked operand is bound to the pushes this gate exists to
+    /// protect: it must read <c>{pushedSurface}.Handle</c>, where
+    /// <paramref name="pushedSurface"/> is exactly the expression the
+    /// pushes pass as their first argument - so a field RENAME travels
+    /// with the pushes and stays green, while a decoy field or local
+    /// whose name merely CONTAINS the surface's never matches. The
+    /// comparison may sit anywhere in the condition's top-level `||`
+    /// chain: the file's house spelling folds it beside an unrelated
+    /// latch, which is behavior-identical and must not false-red.
     /// </summary>
-    private static bool RefusesZeroHandle(IfStatementSyntax s)
+    private static bool TestsThePushedSurfaceHandle(
+        ExpressionSyntax condition, string pushedSurface)
     {
-        if (s.Condition is not BinaryExpressionSyntax
-            {
-                RawKind: (int)SyntaxKind.EqualsExpression,
-            } eq)
+        switch (condition)
         {
-            return false;
+            case BinaryExpressionSyntax
+                {
+                    RawKind: (int)SyntaxKind.LogicalOrExpression,
+                } or:
+                return TestsThePushedSurfaceHandle(or.Left, pushedSurface)
+                    || TestsThePushedSurfaceHandle(or.Right, pushedSurface);
+            case BinaryExpressionSyntax
+                {
+                    RawKind: (int)SyntaxKind.EqualsExpression,
+                } eq:
+            {
+                var sides = new[] { eq.Left.ToString(), eq.Right.ToString() };
+                return sides.Contains(pushedSurface + ".Handle")
+                    && (sides.Contains("IntPtr.Zero") || sides.Contains("nint.Zero"));
+            }
+            default:
+                return false;
         }
-
-        var operands = new[] { eq.Left.ToString(), eq.Right.ToString() };
-        return operands.Any(o => o.Contains("_surface", StringComparison.Ordinal))
-            && operands.Any(o => o.Contains("IntPtr.Zero", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -168,8 +228,12 @@ public class HiddenTabMeasureWiringTests
             .OfType<IfStatementSyntax>(),
             s => s.Condition.ToString().Contains("SurfacePixelSize.Initial"));
 
-        Assert.Contains("!IsEffectivelyVisible()",
-            measuredGate.Condition.ToString());
+        Assert.True(
+            CarriesTopLevelDisjunct(measuredGate.Condition, "!IsEffectivelyVisible()"),
+            "the visibility refusal must be a top-level disjunct of the measured "
+                + "gate's condition: nested under `&&` it is false for exactly the "
+                + "hidden pane with a positive placeholder read the gate exists to "
+                + "refuse");
         Assert.True(measuredGate.Condition is BinaryExpressionSyntax,
             "the visibility refusal must sit IN the measured gate's condition "
                 + "(`|| !IsEffectivelyVisible()`), not in a statement of its own");
@@ -364,24 +428,31 @@ public class HiddenTabMeasureWiringTests
     /// handle reads IntPtr.Zero is a surface the renderer lost or the
     /// teardown already freed - re-pushing onto it dereferences a dead
     /// pointer native side. The refusal must exist in the watch, must
-    /// TERMINATE, and must precede BOTH pushes; deleting it leaves every
-    /// other fact in this file green while the app dies behind it.
+    /// TERMINATE, must precede BOTH pushes, and must test THE PUSHED
+    /// SURFACE's own handle: a gate comparing some other field that
+    /// merely shares its name root leaves the real handle unchecked with
+    /// every assert above green.
     /// </summary>
     [Fact]
     public void ShowWatch_RefusesToRePushOntoAZeroedSurface()
     {
         var watch = Terminal().Method("OnLayoutShowWatch");
 
-        // Non-vacuity: both halves of the pair are still pushed here.
+        // Non-vacuity: both halves of the pair are still pushed here,
+        // and both push the same surface expression - the gate is bound
+        // to that expression, not to a name copied into this test.
         var scale = Assert.Single(watch.Body!.DescendantNodesAndSelf()
             .OfType<InvocationExpressionSyntax>(),
             i => i.CalleeText() == "NativeMethods.SurfaceSetContentScale");
         var size = Assert.Single(watch.Body!.DescendantNodesAndSelf()
             .OfType<InvocationExpressionSyntax>(),
             i => i.CalleeText() == "NativeMethods.SurfaceSetSize");
+        var pushedSurface = scale.Arg(0);
+        Assert.Equal(pushedSurface, size.Arg(0));
 
         var zeroGate = Assert.Single(watch.Body!.DescendantNodesAndSelf()
-            .OfType<IfStatementSyntax>(), RefusesZeroHandle);
+            .OfType<IfStatementSyntax>(),
+            s => TestsThePushedSurfaceHandle(s.Condition, pushedSurface));
         Assert.True(zeroGate.Statement is ReturnStatementSyntax
                     || (zeroGate.Statement is BlockSyntax zb
                         && zb.Statements.OfType<ReturnStatementSyntax>().Any()),
@@ -460,6 +531,17 @@ public class HiddenTabMeasureWiringTests
 
         var consume = Assert.Single(watch.Body!.AssignsTo("_creationStarvedByHiddenEra"),
             a => a.Right.ToString() == "false");
+        // Containment: the consume belongs to the flip body, not to the
+        // pending branch. A consume inside the branch still precedes the
+        // settle for a pending pane, but a pane whose surface already
+        // exists never takes the branch: its flag stays set forever, and
+        // every later visible pass re-runs the re-push and re-arms the
+        // startup resize grace.
+        Assert.False(pendingBranch.Contains(consume),
+            "the starved flag's consume must sit OUTSIDE the `if (!_surfaceCreated)` "
+                + "branch: a consume inside it leaves a created pane's flag set "
+                + "forever, and every later visible pass re-runs the re-push and "
+                + "re-arms the startup resize grace");
         Assert.True(consume.SpanStart < settle.SpanStart,
             "the starved flag must be consumed before the attempt: a flag "
                 + "left set makes every later visible pass re-run the flip");
@@ -627,8 +709,8 @@ public class HiddenTabMeasureWiringTests
             "Controls.TerminalControl.xaml.cs::OnCompositionScaleChanged",
         };
 
-        var seenSize = new HashSet<string>(StringComparer.Ordinal);
-        var seenScale = new HashSet<string>(StringComparer.Ordinal);
+        var sizeSites = new List<string>();
+        var scaleSites = new List<string>();
         var creators = new List<(string File, InvocationExpressionSyntax Call)>();
 
         var files = ShellSource.AllFiles();
@@ -641,7 +723,7 @@ public class HiddenTabMeasureWiringTests
                     $"unexpected SurfaceSetSize call site '{site}' (callee matched by " +
                         "tail, aliases included): every pane-size push must sit in a " +
                         "guarded TerminalControl method");
-                seenSize.Add(site);
+                sizeSites.Add(site);
             }
 
             foreach (var call in file.Root.CallsEndingWith("SurfaceSetContentScale"))
@@ -651,7 +733,7 @@ public class HiddenTabMeasureWiringTests
                     $"unexpected SurfaceSetContentScale call site '{site}' (callee " +
                         "matched by tail, aliases included): every pane-scale push " +
                         "must sit in a guarded TerminalControl method");
-                seenScale.Add(site);
+                scaleSites.Add(site);
             }
 
             foreach (var call in file.Root.CallsEndingWith("TryCreateSurface"))
@@ -660,6 +742,15 @@ public class HiddenTabMeasureWiringTests
             }
         }
 
+        // One CALL per expected (site, callee), not merely one site: a
+        // second push of the same callee in the same method - a lambda
+        // deferred onto the dispatcher, a copy of the call - is invisible
+        // to a site census and to a first-token guard check, and each
+        // extra one is another push the guards have not been proven to
+        // cover.
+        Assert.Distinct(sizeSites);
+        Assert.Distinct(scaleSites);
+
         // The parse defines DEMO, DEBUG and TESTSEAM, so a region disabled
         // under those symbols is invisible to the call census above: a
         // push compiled only in a configuration this parse cannot see
@@ -667,18 +758,21 @@ public class HiddenTabMeasureWiringTests
         // configurations that matter. Disabled regions survive as trivia,
         // so refuse any push-shaped callee that appears in one: the push
         // must live in a visible region, or this census has to be taught
-        // the symbol deliberately, out loud.
+        // the symbol deliberately, out loud. The text is matched with all
+        // whitespace removed, so a legal `SurfaceSetSize (  )` spelling
+        // cannot step around the needle.
         foreach (var file in files)
         {
             foreach (var disabled in file.Root.DescendantTrivia()
                          .Where(t => t.IsKind(SyntaxKind.DisabledTextTrivia)))
             {
-                var text = disabled.ToString();
-                Assert.False(text.Contains("SurfaceSetSize(", StringComparison.Ordinal),
+                var flattened = string.Concat(
+                    disabled.ToString().Where(c => !char.IsWhiteSpace(c)));
+                Assert.False(flattened.Contains("SurfaceSetSize(", StringComparison.Ordinal),
                     $"{file.Name} disables a preprocessor region containing a " +
                         "'SurfaceSetSize(' call: the census cannot see it, but a " +
                         "build without this parse's symbols compiles it");
-                Assert.False(text.Contains("SurfaceSetContentScale(", StringComparison.Ordinal),
+                Assert.False(flattened.Contains("SurfaceSetContentScale(", StringComparison.Ordinal),
                     $"{file.Name} disables a preprocessor region containing a " +
                         "'SurfaceSetContentScale(' call: the census cannot see it, " +
                         "but a build without this parse's symbols compiles it");
@@ -689,9 +783,9 @@ public class HiddenTabMeasureWiringTests
         // both halves are dual-listed, so a site's guard must be proven
         // for each callee it pushes - a scale hoisted above the guard
         // survives a check that only asks where the size push sits.
-        foreach (var (site, callee) in seenSize
+        foreach (var (site, callee) in sizeSites
                      .Select(s => (s, "SurfaceSetSize"))
-                     .Concat(seenScale.Select(s => (s, "SurfaceSetContentScale"))))
+                     .Concat(scaleSites.Select(s => (s, "SurfaceSetContentScale"))))
         {
             var (tail, method) = site.Split("::", 2) is { Length: 2 } parts
                 ? (parts[0], parts[1])
@@ -707,6 +801,8 @@ public class HiddenTabMeasureWiringTests
 
         // Exhaustiveness the other way: a vanished site is a lost push
         // path, not a smaller funnel to maintain.
+        var seenSize = sizeSites.ToHashSet(StringComparer.Ordinal);
+        var seenScale = scaleSites.ToHashSet(StringComparer.Ordinal);
         Assert.True(expectedSize.SetEquals(seenSize),
             "SurfaceSetSize sites missing from the shell: "
                 + string.Join(", ", expectedSize.Except(seenSize)));
