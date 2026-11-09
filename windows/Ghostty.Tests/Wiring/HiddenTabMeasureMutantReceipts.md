@@ -171,8 +171,8 @@ Mutation: `if (_surface.Handle == IntPtr.Zero) return;` removed from the
 watch's re-push path (after the pending branch, before the scale/size
 pair). A zeroed handle - a renderer failure, or a freed surface re-hidden
 before its teardown - is then handed to the native side twice; no other
-fact in the file notices. Re-run after the matcher rework (N1-N3 below);
-still red.
+fact in the file notices. Re-run after the matcher rework (see N1 and
+N2 below); still red.
 
 Red (filter `~ShowWatch_RefusesToRePush`, 1 fact ran, 1 failed):
 
