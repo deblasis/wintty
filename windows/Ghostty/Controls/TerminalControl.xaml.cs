@@ -154,6 +154,17 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private Windows.Foundation.Size _lastCreationMeasure;
     private bool _hasCreationMeasure;
 
+    // A hidden era starves every creation driver in turn: layout passes
+    // return at the visibility guard (so they settle no measure), the
+    // one-shot 250 ms Loaded fallback is consumed while the pane is
+    // invisible, and the retry timer arms only on a real renderer
+    // refusal. This flag records that such an era was observed while the
+    // surface was still pending, and the first effectively-visible layout
+    // pass after it - the show-path backstop, OnLayoutShowWatch - drives
+    // the stalled work instead of waiting on a second visible pass
+    // nothing guarantees.
+    private bool _creationStarvedByHiddenEra;
+
     // A surface that libghostty could not create (renderer device init
     // failed: a GPU-less machine or a cold-composition boot window) is a
     // "not yet", not a verdict. The creation retries on this timer and, if
@@ -1258,6 +1269,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // -=/+= pair) keeps reparent size pushes exactly as they were.
         Panel.LayoutUpdated += OnFirstLayoutUpdated;
 
+        // The show-path backstop, armed beside the creation subscription
+        // for the control's whole lifetime (it survives every removal of
+        // the creation handler): it watches layout passes for the
+        // effectively-invisible -> visible flip and finishes whatever a
+        // hidden era stalled - the pending creation, or the size/scale
+        // pair a hidden pane refuses to push. See OnLayoutShowWatch.
+        Panel.LayoutUpdated += OnLayoutShowWatch;
+
         ApplyGutterBrush();
     }
 
@@ -1353,6 +1372,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             // runs DisposeSurface. The traced dead pane is attached, so
             // this refusal costs the defect nothing.
             if (XamlRoot is null) return;
+            // Consumed by a hidden era: the one-shot fallback is spent and
+            // created nothing, because the creation gate refuses the
+            // placeholder an invisible pane still reads. Record the era
+            // for the show-path backstop (OnLayoutShowWatch), which
+            // settles at the pane's first effectively-visible pass.
+            if (!IsEffectivelyVisible())
+            {
+                _creationStarvedByHiddenEra = true;
+                return;
+            }
             // Attribution the event path cannot give: this pane missed
             // its first layout event.
             Ghostty.Logging.StaticLoggers.App.LogInformation(
@@ -1412,15 +1441,22 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// a height the first layout pass then settles a few pixels lower, and a
     /// hidden tab is not measured at all until it is first shown. Starting
     /// earlier means starting at a size the shell formats its startup output
-    /// for and the pane never has. (The Loaded fallback and the retry timer
-    /// are the two documented exceptions: both settle at the panel's own
-    /// tick-time read, which a still-attached hidden pane retains from its
-    /// last arrangement - the same read the retry timer has always trusted.)
+    /// for and the pane never has.
+    ///
+    /// A positive read is not by itself a measurement: the tab host
+    /// realizes content behind the active tab and arranges it into a
+    /// default slot, so a still-attached hidden pane carries a positive
+    /// placeholder (800x600 px in the birth-coverage record) that no pass
+    /// the pane will show has produced. The gate below refuses such a pane
+    /// outright through IsEffectivelyVisible, and because every driver
+    /// funnels through this gate - the first-layout settle path, the Loaded
+    /// fallback, the retry timer - none of them can create at the
+    /// placeholder either.
     ///
     /// Returns false, having done nothing, while the panel has no measured
-    /// size; the caller tries again on the next layout pass. A hidden or
-    /// restored background tab therefore starts its shell when it is first
-    /// shown. Also returns false when libghostty could not build the surface
+    /// size or the pane is not effectively visible; the caller tries again
+    /// on the next layout pass. A hidden or restored background tab
+    /// therefore starts its shell when it is first shown. Also returns false when libghostty could not build the surface
     /// (renderer device init failed): that attempt is released and the
     /// creation retries on a timer, degrading to a surface-less pane if the
     /// budget runs out. The app stays up either way; this method never
@@ -1430,7 +1466,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (SurfacePixelSize.Initial(
                 Panel.ActualWidth, Panel.ActualHeight,
-                Panel.CompositionScaleX, Panel.CompositionScaleY) is not (uint initialWidth, uint initialHeight))
+                Panel.CompositionScaleX, Panel.CompositionScaleY) is not (uint initialWidth, uint initialHeight)
+            || !IsEffectivelyVisible())
         {
             return false;
         }
@@ -1659,11 +1696,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         }
         // The budget counts attempts, not ticks: an unmeasured pane cannot
         // attempt (the size gate in TryCreateSurface would refuse), so the
-        // tick is skipped without spending. A pane the user hid mid-retry
-        // keeps its budget for when it is shown again.
+        // tick is skipped without spending. The same holds for a pane that
+        // is not effectively visible: its panel still reads the placeholder
+        // slot it was arranged into behind the active tab, the visibility
+        // gate in TryCreateSurface would refuse, and a pane the user hid
+        // mid-retry keeps its budget for when it is shown again.
         if (SurfacePixelSize.Initial(
                 Panel.ActualWidth, Panel.ActualHeight,
-                Panel.CompositionScaleX, Panel.CompositionScaleY) is null)
+                Panel.CompositionScaleX, Panel.CompositionScaleY) is null
+            || !IsEffectivelyVisible())
         {
             return;
         }
@@ -1813,6 +1854,19 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnFirstLayoutUpdated(object? sender, object e)
     {
+        // A pass while the pane is effectively invisible counts for
+        // nothing: behind the active tab the arrange carries the
+        // placeholder slot, which is positive but is not the size the pane
+        // will show. It must not settle the creation measure, push a size,
+        // or retire this one-shot handler; the pane's first visible pass
+        // does that work. Each such pass also tells the show-path backstop
+        // (OnLayoutShowWatch) that a hidden era is consuming the drivers.
+        if (!IsEffectivelyVisible())
+        {
+            _creationStarvedByHiddenEra = true;
+            return;
+        }
+
         if (!_surfaceCreated)
         {
             // Nothing to size yet: create the surface at a measurement the
@@ -1850,6 +1904,80 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // Start the resize-overlay startup grace from this first settled
         // layout (and again after any reparent that re-arms this handler),
         // so the initial layout passes do not flash the cols x rows pill.
+        ArmResizeOverlayGrace();
+    }
+
+    /// <summary>
+    /// The show-path backstop: the effectively-invisible -> visible flip,
+    /// observed on a layout pass. Every ordinary driver of surface work
+    /// can be consumed by a hidden era without accomplishing anything -
+    /// this handler's sibling returns at the visibility guard, the 250 ms
+    /// Loaded fallback is one-shot and its tick lands while the pane is
+    /// hidden, and the retry timer arms only on a real renderer refusal -
+    /// and the pass that shows the pane is not guaranteed a successor, so
+    /// waiting on the two-pass settle there starves the pane. The flip
+    /// instead settles the pending creation directly at that pass's
+    /// arranged size, the same trust the Loaded fallback and the retry
+    /// timer already place in the arranged size: a pane re-entering layout
+    /// after a collapsed era is re-arranged (its slot is committed, not a
+    /// launch-settle transient), which is the re-entry difference from
+    /// the unchanged-size InvalidateMeasure case OnLoaded describes.
+    ///
+    /// The flip is also the one hook for the size/scale pair as a unit.
+    /// While the pane is hidden neither half is pushed - PushSurfaceSize
+    /// refuses, and OnCompositionScaleChanged refuses for the same reason,
+    /// because a scale pushed alone re-derives the grid from a size the
+    /// pane is not showing - so a surface that already exists gets both
+    /// halves re-pushed together here.
+    ///
+    /// Creation focus is not suppressed at this flip, unlike the Loaded
+    /// fallback: a pane arriving at its first visible pass is being shown
+    /// to somebody, and the creation-focus path's own IsEffectivelyVisible
+    /// gate is what keeps hidden creations from stealing focus.
+    ///
+    /// The hidden era this watches has a concrete producer, not folklore:
+    /// MainWindow.AddPaneHost parents every tab's PaneHost collapsed and
+    /// only SwapActivePane flips the active one visible, while the
+    /// TabAdded handler calls SwapActivePane per restored tab - so during
+    /// session restore each tab passes through visible at whatever size
+    /// the window then has (a fresh WinUI 3 window's default 800x600
+    /// client slot before its persisted size applies, the birth-coverage
+    /// record's placeholder), is arranged there, and keeps that arrange as
+    /// its positive read once collapsed.
+    /// </summary>
+    private void OnLayoutShowWatch(object? sender, object e)
+    {
+        if (_surfaceDisposed) return;
+        if (!IsEffectivelyVisible())
+        {
+            // Any invisible pass (re)arms the backstop, including passes
+            // of an already-created surface whose creation handler retired
+            // long ago: a pane hidden again re-enters the class, because
+            // the size/scale re-push below is owed on every show.
+            _creationStarvedByHiddenEra = true;
+            return;
+        }
+        if (!_creationStarvedByHiddenEra) return;
+        _creationStarvedByHiddenEra = false;
+
+        // A measure settled on hidden-era passes is stale by construction:
+        // drop it so the post-show passes re-baseline the comparison.
+        _hasCreationMeasure = false;
+
+        if (!_surfaceCreated)
+        {
+            // The one-shot re-arm: this showing pass's own arrange is the
+            // measurement; a renderer refusal inside arms the bounded
+            // retry, exactly as any failed attempt does.
+            TrySettleSurfaceCreation();
+            return;
+        }
+        if (_surface.Handle == IntPtr.Zero) return;
+        var sx = Panel.CompositionScaleX > 0 ? Panel.CompositionScaleX : 1f;
+        var sy = Panel.CompositionScaleY > 0 ? Panel.CompositionScaleY : 1f;
+        NativeMethods.SurfaceSetContentScale(_surface, sx, sy);
+        var (pw, ph) = SurfacePixelSize.FromDips(Panel.ActualWidth, Panel.ActualHeight, sx, sy);
+        NativeMethods.SurfaceSetSize(_surface, pw, ph);
         ArmResizeOverlayGrace();
     }
 
@@ -2131,6 +2259,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void PushSurfaceSize()
     {
+        // While the pane is effectively invisible its panel carries the
+        // placeholder slot rather than a size the pane will display, and
+        // pushing that would resize the grid to a size the pane never
+        // shows. The refusal sits here rather than at the callers, which
+        // multiply; the first visible pass pushes the real size again.
+        if (!IsEffectivelyVisible()) return;
+
         // Read the panel's own layout bounds rather than the
         // SizeChangedEventArgs value. DPI rounding and any padding in
         // the visual tree can make the two differ by a pixel, which
@@ -2158,6 +2293,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private void OnCompositionScaleChanged(SwapChainPanel sender, object args)
     {
         if (_surface.Handle == IntPtr.Zero) return;
+        // While the pane is effectively invisible the scale is not pushed
+        // either, the same refusal its companion size push makes: a scale
+        // pushed alone re-derives the grid from a size the pane is not
+        // showing, and the pane's first visible pass re-pushes the pair
+        // together (OnLayoutShowWatch). Pushing the halves separately only
+        // while visible would still leave a hidden pane's scale change
+        // half-applied at show time with nothing re-reading it.
+        if (!IsEffectivelyVisible()) return;
         // Push the new scale to libghostty, then recompute pixel
         // dimensions: a DPI change (e.g. moving the window between
         // monitors) shifts the pixel size even though the DIP size is
