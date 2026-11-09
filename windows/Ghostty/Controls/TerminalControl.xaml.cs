@@ -1937,13 +1937,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     ///
     /// The hidden era this watches has a concrete producer, not folklore:
     /// MainWindow.AddPaneHost parents every tab's PaneHost collapsed and
-    /// only SwapActivePane flips the active one visible, while the
-    /// TabAdded handler calls SwapActivePane per restored tab - so during
-    /// session restore each tab passes through visible at whatever size
-    /// the window then has (a fresh WinUI 3 window's default 800x600
-    /// client slot before its persisted size applies, the birth-coverage
-    /// record's placeholder), is arranged there, and keeps that arrange as
-    /// its positive read once collapsed.
+    /// only SwapActivePane flips the active one visible, so every
+    /// non-active pane is effectively invisible from the moment it enters
+    /// the tree. Restored background tabs never pass through visible at
+    /// all (the restore seeds and adopts its tabs in the constructor,
+    /// before the TabAdded subscription exists, and one SwapActivePane
+    /// flips only the saved-active tab); the stale positive read the
+    /// creation gate refuses comes from a pane arranged while visible and
+    /// collapsed again afterwards, which keeps that arrange as its read
+    /// until the next show.
     /// </summary>
     private void OnLayoutShowWatch(object? sender, object e)
     {
