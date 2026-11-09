@@ -134,9 +134,12 @@ public sealed class CollapsedAncestorLayoutDeliveryTests
 
                 window = new Window();
                 // Offscreen and never activated: Show(false) does not take
-                // the foreground, and -32000,-32000 is on no monitor.
+                // the foreground, -32000,-32000 is on no monitor, and the
+                // switcher flag keeps it out of the taskbar for the test's
+                // duration.
                 window.AppWindow.MoveAndResize(
                     new global::Windows.Graphics.RectInt32(-32000, -32000, 800, 600));
+                window.AppWindow.IsShownInSwitchers = false;
                 window.AppWindow.Show(activateWindow: false);
 
                 var root = new Grid();
