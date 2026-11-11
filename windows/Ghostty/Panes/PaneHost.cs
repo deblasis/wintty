@@ -991,7 +991,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // returns, the hold settles at the tail below - the layout never
         // rests anywhere the model does not say.
         var splitGeometryHold = newSubSplit is not null
-            ? TryHoldSplitBirthGeometry(newSubSplit)
+            ? TryHoldSplitGeometry(newSubSplit)
             : null;
         UpdateLayout();
         InvalidateMeasure();
