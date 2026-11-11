@@ -41,6 +41,10 @@ internal sealed class SplitGeometryTransition
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _boundTimer;
     private double _lastWritten = double.NaN;
 
+    /// <summary>The split this transition holds (the overlay's claim
+    /// check: the hold must parent the born leaf it is claimed for).</summary>
+    internal SplitPane Split => _split;
+
     internal SplitGeometryTransition(PaneHost host, SplitPane split)
     {
         _host = host;
@@ -227,6 +231,11 @@ internal sealed partial class PaneHost
 {
     private SplitGeometryTransition? _splitGeometryHold;
 
+    /// <summary>The hold currently standing on this host, or null. The
+    /// motion coordinator's adapter reads this in its Split report to
+    /// claim the hold for the birth it parents.</summary>
+    internal SplitGeometryTransition? CurrentSplitGeometryHold => _splitGeometryHold;
+
     /// <summary>
     /// The split-geometry hold's arm point, called from Split after the
     /// splice and BEFORE the synchronous layout settle: under a
@@ -240,7 +249,7 @@ internal sealed partial class PaneHost
     /// coordinator that resolved Full but never armed from leaving the
     /// newborn invisible.
     /// </summary>
-    internal SplitGeometryTransition? TryHoldSplitBirthGeometry(SplitPane newSplit)
+    internal SplitGeometryTransition? TryHoldSplitGeometry(SplitPane newSplit)
     {
         if (!PaneMotion.Active
             || PaneMotion.Current!.ResolvePolicy(MotionSurfaceClass.PaneGeometry)
@@ -280,7 +289,7 @@ internal sealed partial class PaneHost
     /// own bound) and the field is cleared. Extension point the motion
     /// coordinator's adapter subscribes through its own partial; the
     /// pin side has nothing to observe.</summary>
-    private void SplitGeometrySettled(SplitGeometryTransition hold, string reason)
+    internal void SplitGeometrySettled(SplitGeometryTransition hold, string reason)
     {
         if (ReferenceEquals(_splitGeometryHold, hold))
         {
