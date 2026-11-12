@@ -77,15 +77,18 @@ pub const LogFn = *const fn (
 
 /// C: GhosttySysOption
 pub const Option = enum(c_int) {
-    userdata = 0,
-    decode_png = 1,
-    log = 2,
-    random_secure = 3,
-    // 4/5, not 3/4: upstream took 3 for random_secure in the same window
-    // these landed; the fork renumbers its own additions to the next free
-    // slots.
-    decode_jpeg = 4,
-    decode_gif = 5,
+    invalid = 0,
+    userdata = 1,
+    decode_png = 2,
+    log = 3,
+    random_secure = 4,
+    // 5/6, not 4/5: upstream inserted `invalid = 0` and shifted the shared
+    // entries in the same window these landed; the fork renumbers its own
+    // additions to the next free slots.
+    decode_jpeg = 5,
+    decode_gif = 6,
+
+    _,
 
     pub fn InType(comptime self: Option) type {
         return switch (self) {
@@ -95,6 +98,7 @@ pub const Option = enum(c_int) {
             .random_secure => ?RandomSecureFn,
             .decode_jpeg => ?DecodeJpegFn,
             .decode_gif => ?DecodeGifFn,
+            .invalid, _ => void,
         };
     }
 };
@@ -192,13 +196,9 @@ pub fn set(
     option: Option,
     value: ?*const anyopaque,
 ) callconv(lib.calling_conv) Result {
-    if (comptime std.debug.runtime_safety) {
-        _ = std.enums.fromInt(Option, @backingInt(option)) orelse {
-            return .invalid_value;
-        };
-    }
-
     return switch (option) {
+        .invalid => .invalid_value,
+        _ => .unsupported,
         inline else => |comptime_option| setTyped(
             comptime_option,
             @ptrCast(@alignCast(value)),
@@ -229,6 +229,7 @@ fn setTyped(
             global.random_secure = value;
             terminal_sys.random_secure = if (value != null) &randomSecureWrapper else null;
         },
+        .invalid, _ => comptime unreachable,
     }
     return .success;
 }

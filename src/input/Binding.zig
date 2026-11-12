@@ -738,6 +738,23 @@ pub const Action = union(enum) {
     /// Note that not all changes can be applied at runtime.
     reload_config,
 
+    /// Set the application window theme for this session.
+    ///
+    /// This does not modify the configuration. The selected theme remains in
+    /// effect across configuration reloads, including changes to `window-theme`,
+    /// until another `set_window_theme` action or the application restarts.
+    ///
+    /// Valid values:
+    ///
+    ///   * `config` - Return to the configured `window-theme`.
+    ///   * `system` - Use the system theme.
+    ///   * `light` - Use the light theme.
+    ///   * `dark` - Use the dark theme.
+    ///
+    /// On macOS, the `transparent` and `tabs` values of `macos-titlebar-style`
+    /// match the titlebar to the terminal background color instead.
+    set_window_theme: WindowTheme,
+
     /// Close the current "surface", whether that is a window, tab, split, etc.
     ///
     /// This might trigger a close confirmation popup, depending on the value
@@ -1234,6 +1251,13 @@ pub const Action = union(enum) {
         pub const default: OpenConfig = .os_open;
     };
 
+    pub const WindowTheme = enum {
+        config,
+        system,
+        light,
+        dark,
+    };
+
     fn parseEnum(comptime T: type, value: []const u8) !T {
         return std.meta.stringToEnum(T, value) orelse return Error.InvalidFormat;
     }
@@ -1488,6 +1512,7 @@ pub const Action = union(enum) {
             .deactivate_key_table,
             .deactivate_all_key_tables,
             .crash,
+            .set_window_theme,
             => false,
         };
     }
@@ -1528,6 +1553,7 @@ pub const Action = union(enum) {
             // Obviously app actions.
             .open_config,
             .reload_config,
+            .set_window_theme,
             .close_all_windows,
             .quit,
             .toggle_quick_terminal,

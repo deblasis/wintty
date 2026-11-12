@@ -8,8 +8,8 @@ short_hash: []const u8,
 /// True if there was a diff at build time.
 changes: bool,
 
-/// The tag -- if any -- that this commit is a part of.
-tag: ?[]const u8,
+/// Every tag on the latest commit, such as `tip`, `v1.4.1`, and `vt-0.1.0`.
+tags: []const []const u8,
 
 /// The branch that was checked out at the time of the build.
 branch: []const u8,
@@ -54,35 +54,26 @@ pub fn detect(b: *std.Build) !Version {
         break :short_hash std.mem.trim(u8, output, &std.ascii.whitespace);
     };
 
-    // Only a release tag names a version. With no filter this returns whatever
-    // tag happens to sit on HEAD, and Config.init panics on a tag it does not
-    // recognise -- so a tag in an unrelated namespace makes the commit
-    // unbuildable. The retired sync flow left series/vN tags on the remote,
-    // and a checkout at one lands on exactly such a commit.
-    //
-    // --match globs the tag name with refs/tags/ stripped, and it does NOT
-    // stop at a slash: `v*` rejects series/v2 only because that name starts
-    // with `s`, and would accept vendor/v2 or v-old/v2 just fine. So --exclude
-    // carries the namespace rule and --match carries the name rule; drop
-    // either and a tag that is not a release can name a version again.
-    //
-    // They filter; they do not validate. Whether a v* tag is one Config.init
-    // accepts stays Config.init's call.
-    var tag_code: u8 = 0;
-    const tag = b.runAllowFail(
-        &[_][]const u8{ "git", "-C", b.root.subPathOrDot(), "describe", "--exact-match", "--tags", "--match", "v*", "--match", "tip", "--exclude", "*/*" },
-        &tag_code,
-        .ignore,
-    ) catch |err| switch (err) {
-        error.FileNotFound => return error.GitNotFound,
-        error.ExitCodeFailure => "", // expected
-        else => return err,
+    const tags: []const []const u8 = tags: {
+        var tag_code: u8 = 0;
+        const output = b.runAllowFail(
+            &[_][]const u8{ "git", "-C", b.root.subPathOrDot(), "tag", "--points-at", "HEAD" },
+            &tag_code,
+            .ignore,
+        ) catch |err| switch (err) {
+            error.FileNotFound => return error.GitNotFound,
+            else => return err,
+        };
+
+        var list: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.tokenizeAny(u8, output, "\r\n ");
+        while (it.next()) |tag| try list.append(b.allocator, tag);
+        break :tags list.items;
     };
 
-    // Its own out-param: runAllowFail writes a code only when the child fails,
-    // so sharing one would leave the describe failure above still sitting in it
-    // -- 128 whenever HEAD carries no v* or tip tag -- and report a clean
-    // tree as dirty.
+    // Its own out-param: runAllowFail writes a code only when the child
+    // fails, so sharing one would leave an earlier failure's code sitting in
+    // it and report a clean tree as dirty.
     var diff_code: u8 = 0;
     _ = b.runAllowFail(&[_][]const u8{
         "git",
@@ -101,7 +92,7 @@ pub fn detect(b: *std.Build) !Version {
     return .{
         .short_hash = short_hash,
         .changes = changes,
-        .tag = if (tag.len > 0) std.mem.trimEnd(u8, tag, "\r\n ") else null,
+        .tags = tags,
         .branch = branch,
     };
 }

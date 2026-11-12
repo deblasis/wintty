@@ -77,7 +77,7 @@ pub const State = struct {
 
     /// The placements for the Kitty image protocol, sorted by layer and
     /// then by z-index.
-    kitty_placements: std.ArrayListUnmanaged(Placement),
+    kitty_placements: std.ArrayList(Placement),
 
     /// Where the layers of `kitty_placements` end. Placements before
     /// `kitty_bg_end` are drawn below the cell backgrounds. Placements
@@ -100,7 +100,7 @@ pub const State = struct {
     kitty_storage_generation: u64,
 
     /// Overlays
-    overlay_placements: std.ArrayListUnmanaged(Placement),
+    overlay_placements: std.ArrayList(Placement),
 
     /// Per-frame UPLOAD-heap budget for image uploads. State.upload
     /// defers any pending image whose chunked upload would push the

@@ -58,8 +58,10 @@ pub fn expand(
     var it = std.mem.tokenizeScalar(u8, PATH, std.fs.path.delimiter);
     var seen_eacces = false;
     while (it.next()) |search_path| {
-        // First, try the command as-is (literal match, or if it has an
-        // extension).
+        // We need enough space in our path buffer to store this
+        // candidate plus its null terminator.
+        const path_len = search_path.len + cmd.len + 1;
+        if (path_buf.len <= path_len) return error.PathTooLong;
         if (try tryPathImpl(io, alloc, search_path, cmd, &path_buf, &seen_eacces)) |result| {
             return result;
         }
@@ -235,4 +237,21 @@ test "expand: windows extension present bypasses PATHEXT" {
     const path = (try expand(testing.io, testing.allocator, &environ_map, "cmd.exe")).?;
     defer testing.allocator.free(path);
     try testing.expect(std.ascii.endsWithIgnoreCase(path, "cmd.exe"));
+}
+
+test "expand: reject path without room for null terminator" {
+    var environ_map: std.process.Environ.Map =
+        .init(testing.allocator);
+    defer environ_map.deinit();
+
+    // The directory, separator and command exactly fill the buffer,
+    // leaving no room for the null terminator.
+    var search_path: [std.Io.Dir.max_path_bytes - "/x".len]u8 = undefined;
+    @memset(&search_path, 'a');
+    try environ_map.put("PATH", &search_path);
+
+    try testing.expectError(
+        error.PathTooLong,
+        expand(testing.io, testing.allocator, &environ_map, "x"),
+    );
 }
