@@ -157,6 +157,22 @@ reload from the op's answer and later reloads from a change log, and it says
 nothing about the watcher path or a locked file. It launches its own instance
 on a temp config root and private state base, like `contrast-oracle.ps1`.
 
+## Ctrl+letter under non-QWERTY layouts
+
+`seam-ctrl-layout.ps1` checks #1451 end to end through the seam: plain
+Ctrl+letter under Colemak/Dvorak must send the layout letter's C0, not the
+QWERTY position's (Colemak: d on G, s on D, y on O, o on the ; key;
+Dvorak: s on the ; key, e on D). Each scenario runs the echo pane from
+`seam-keyboard-protocol.ps1` under one protocol (none, kitty disambiguate,
+modifyOtherKeys 2) and injects one vk+char pair through the pane's real
+WM_KEYDOWN + WM_CHAR handlers - the exact pair a press on that physical key
+delivers under the named layout, with no OS layout installed - then asserts
+the exact pty hex. Ctrl+Alt pins the path outside the fix's gate: AltGr
+arrives as ctrl+alt and is covered by that same gate exclusion, and two
+QWERTY scenarios pin the unchanged behavior. It synthesizes no OS input;
+`just seam-ctrl-layout` holds the desktop lane for it, exit 0/2/1 like every
+harness here.
+
 ## Not in the suite
 
 | script | why |

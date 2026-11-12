@@ -472,6 +472,24 @@ _seam-theme-resolution-in-lane args="":
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/seam-theme-resolution {{args}}; exit ($LASTEXITCODE ?? 1)
 
+# The Ctrl+letter keyboard-layout matrix (#1451): plain Ctrl+letter under
+# Colemak/Dvorak sent the QWERTY position's C0 instead of the layout
+# letter's. Seam-injected vk+char pairs (what a real press on each layout
+# delivers) through the pane's real handlers, asserted against the exact
+# pty hex under no protocol, kitty disambiguate and modifyOtherKeys 2.
+# Zero OS input synthesized. Exit 0 clean, 2 product finding, 1 harness miss.
+#
+# Pass extra args through, e.g. `just seam-ctrl-layout "-Only *ctrl-d"`.
+[windows]
+seam-ctrl-layout args="": _no-wintty-from (_build-in-lane "seam-ctrl-layout" "build-dll" "build-win")
+    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("seam-ctrl-layout {{replace(args, '\"', '\"\"')}}".Trim()) -- just _seam-ctrl-layout-in-lane "{{replace(args, '\"', '\"\"')}}"; exit ($LASTEXITCODE ?? 1)
+
+[windows]
+_seam-ctrl-layout-in-lane args="":
+    pwsh -NoProfile -File windows/scripts/seam-ctrl-layout.ps1 \
+        -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
+        -OutDir windows/scripts/seam-ctrl-layout {{args}}; exit ($LASTEXITCODE ?? 1)
+
 # The desktop phase of `just frame-style-fuzz`, inside the lane it took.
 [windows]
 _frame-style-fuzz-in-lane args="":

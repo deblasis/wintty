@@ -233,6 +233,56 @@ pub fn windowsKeyOwnText(keycode: u32, text: []const u8) bool {
     return text[0] == '[' and keycode == 0x1A;
 }
 
+/// Windows delivers the C0 byte itself as WM_CHAR text for plain
+/// Ctrl+letter (0x04 for the key that types "d"), unlike GTK/macOS which
+/// deliver the printable letter. Recover the letter so encoding follows
+/// the active layout instead of the scancode's QWERTY position. Plain
+/// ctrl only: ctrl+shift keeps its CSI u distinction and AltGr
+/// (ctrl+alt) keeps its existing path.
+///
+/// Backspace (0x0E), Tab (0x0F), Enter (0x1C) and keypad Enter (0xE01C,
+/// extended prefix) are excluded: with ctrl held some hosts deliver an
+/// in-range C0 byte for them too (Ctrl+Backspace 0x08, Ctrl+Tab 0x09,
+/// Ctrl+Enter 0x0A or 0x0D) and they are not letters, so attaching a letter
+/// would reroute their encoding. These four are every key that can
+/// arrive as 0x01-0x1A with ctrl held besides letters; every other
+/// functional key's ctrl translation (0x00, 0x1B, 0x1C-0x1F, 0x7F)
+/// falls outside the byte range below. The Ctrl+I and Ctrl+M letters
+/// ARE recovered by design and encode as CSI u, matching the text the
+/// GTK and macOS apprts attach.
+///
+/// `unshifted_codepoint` must be ASCII (<= 0x7F): it comes from the
+/// pending KeyDown, whose unshifted codepoint reflects the live layout
+/// (MapVirtualKeyW). A non-ASCII value means the key's own letter is
+/// not a Latin one -- a non-Latin layout (Cyrillic, Greek, ...) where
+/// the C0 byte is the Latin letter of the key's position, or a Latin
+/// layout with non-ASCII base letters (Turkish). Either way the C0
+/// byte is not that layout's letter, and the logical-key fallback
+/// already encodes the position byte there, which is what the OS
+/// itself delivers (#1451 keeps that behavior).
+pub fn windowsCtrlLetter(
+    keycode: u32,
+    unshifted_codepoint: u32,
+    text: []const u8,
+    mods: key.Mods,
+) ?u21 {
+    if (keycode == 0x0E or
+        keycode == 0x0F or
+        keycode == 0x1C or
+        keycode == 0xE01C)
+    {
+        return null;
+    }
+    if (unshifted_codepoint > 0x7F) return null;
+    if (text.len != 1) return null;
+    if (text[0] < 0x01 or text[0] > 0x1A) return null;
+
+    const ctrl_only = comptime (key.Mods{ .ctrl = true }).int();
+    if (mods.binding().int() != ctrl_only) return null;
+
+    return @as(u21, text[0]) + 'a' - 1;
+}
+
 /// Perform Kitty keyboard protocol encoding of the key event.
 fn kitty(
     writer: *std.Io.Writer,
@@ -3450,6 +3500,327 @@ test "win32 input: escape and ctrl+bracket keep legacy and kitty encodings" {
         var buf: [128]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         try encode(&writer, case.event, case.options);
+        try testing.expectEqualStrings(case.expected, writer.buffered());
+    }
+}
+
+test "win32 input: plain ctrl+letter recovers the layout letter from C0" {
+    const Case = struct {
+        keycode: u32 = 0x22,
+        unshifted: u32 = 0,
+        text: []const u8,
+        mods: key.Mods,
+        expected: ?u21,
+    };
+    const cases = [_]Case{
+        .{ .text = "\x04", .mods = .{ .ctrl = true }, .expected = 'd' },
+        .{ .text = "\x0f", .mods = .{ .ctrl = true }, .expected = 'o' },
+        .{ .text = "\x13", .mods = .{ .ctrl = true }, .expected = 's' },
+        .{ .text = "\x19", .mods = .{ .ctrl = true }, .expected = 'y' },
+        .{ .text = "\x01", .mods = .{ .ctrl = true }, .expected = 'a' },
+        .{ .text = "\x1a", .mods = .{ .ctrl = true }, .expected = 'z' },
+        .{ .text = "\x03", .mods = .{ .ctrl = true }, .expected = 'c' },
+        // Locks are not binding mods and must not block recovery.
+        .{
+            .text = "\x04",
+            .mods = .{ .ctrl = true, .caps_lock = true },
+            .expected = 'd',
+        },
+        .{
+            .text = "\x04",
+            .mods = .{ .ctrl = true, .num_lock = true },
+            .expected = 'd',
+        },
+        .{
+            .text = "\x04",
+            .mods = .{ .ctrl = true, .sides = .{ .ctrl = .right } },
+            .expected = 'd',
+        },
+        // Other modifier combos must not recover a letter.
+        .{
+            .text = "\x04",
+            .mods = .{ .ctrl = true, .shift = true },
+            .expected = null,
+        },
+        .{
+            .text = "\x04",
+            .mods = .{ .ctrl = true, .alt = true },
+            .expected = null,
+        },
+        .{
+            .text = "\x04",
+            .mods = .{ .ctrl = true, .alt = true, .shift = true },
+            .expected = null,
+        },
+        .{
+            .text = "\x04",
+            .mods = .{ .ctrl = true, .super = true },
+            .expected = null,
+        },
+        .{ .text = "\x04", .mods = .{ .shift = true }, .expected = null },
+        .{ .text = "\x04", .mods = .{ .alt = true }, .expected = null },
+        .{ .text = "\x04", .mods = .{}, .expected = null },
+        // Text outside the Ctrl+letter C0 range never recovers.
+        .{ .text = "\x00", .mods = .{ .ctrl = true }, .expected = null },
+        .{ .text = "\x1b", .mods = .{ .ctrl = true }, .expected = null },
+        .{ .text = "\x1c", .mods = .{ .ctrl = true }, .expected = null },
+        .{ .text = "\x7f", .mods = .{ .ctrl = true }, .expected = null },
+        .{ .text = "d", .mods = .{ .ctrl = true }, .expected = null },
+        .{ .text = "", .mods = .{ .ctrl = true }, .expected = null },
+        .{ .text = "ab", .mods = .{ .ctrl = true }, .expected = null },
+        // Tab and Enter also deliver in-range C0 bytes with ctrl held
+        // but are not letters; keypad Enter arrives with the extended
+        // prefix in the scancode.
+        .{ .keycode = 0x1C, .unshifted = 0, .text = "\x0d", .mods = .{ .ctrl = true }, .expected = null },
+        .{ .keycode = 0x0F, .unshifted = 0, .text = "\x09", .mods = .{ .ctrl = true }, .expected = null },
+        .{ .keycode = 0xE01C, .unshifted = 0, .text = "\x0d", .mods = .{ .ctrl = true }, .expected = null },
+        .{ .keycode = 0x0E, .unshifted = 0, .text = "\x08", .mods = .{ .ctrl = true }, .expected = null },
+        // A non-ASCII unshifted codepoint means a non-Latin layout:
+        // the byte is the position's Latin C0, not that layout's letter.
+        .{ .keycode = 0x22, .unshifted = 0x0430, .text = "\x01", .mods = .{ .ctrl = true }, .expected = null },
+        // Ctrl+I and Ctrl+M are letters and are recovered by design.
+        .{ .keycode = 0x22, .unshifted = 0, .text = "\x09", .mods = .{ .ctrl = true }, .expected = 'i' },
+        .{ .keycode = 0x22, .unshifted = 0, .text = "\x0d", .mods = .{ .ctrl = true }, .expected = 'm' },
+        // The letter on the semicolon scancode (Colemak O, Dvorak S).
+        .{ .keycode = 0x27, .unshifted = 's', .text = "\x13", .mods = .{ .ctrl = true }, .expected = 's' },
+        // AltGr-sided ctrl+alt is outside the gate.
+        .{
+            .keycode = 0x22,
+            .unshifted = 0,
+            .text = "\x04",
+            .mods = .{ .ctrl = true, .alt = true, .sides = .{ .ctrl = .right, .alt = .right } },
+            .expected = null,
+        },
+    };
+
+    for (cases) |case| {
+        try testing.expectEqual(
+            case.expected,
+            windowsCtrlLetter(case.keycode, case.unshifted, case.text, case.mods),
+        );
+    }
+}
+
+test "win32 input: ctrl+letter encodes the layout letter, not the scancode key" {
+    const Case = struct {
+        event: key.KeyEvent,
+        expected: []const u8,
+        opts: Options = .{},
+    };
+    const cases = [_]Case{
+        // Colemak: the scancode keys sit at QWERTY positions but the
+        // attached letter is what the user typed.
+        .{
+            .event = .{
+                .key = .key_g,
+                .mods = .{ .ctrl = true },
+                .utf8 = "d",
+                .unshifted_codepoint = 'd',
+            },
+            .expected = "\x04",
+        },
+        .{
+            .event = .{
+                .key = .key_y,
+                .mods = .{ .ctrl = true },
+                .utf8 = "o",
+                .unshifted_codepoint = 'o',
+            },
+            .expected = "\x0f",
+        },
+        .{
+            .event = .{
+                .key = .key_d,
+                .mods = .{ .ctrl = true },
+                .utf8 = "s",
+                .unshifted_codepoint = 's',
+            },
+            .expected = "\x13",
+        },
+        .{
+            .event = .{
+                .key = .key_o,
+                .mods = .{ .ctrl = true },
+                .utf8 = "y",
+                .unshifted_codepoint = 'y',
+            },
+            .expected = "\x19",
+        },
+        // Dvorak likewise: S lives on the semicolon key.
+        .{
+            .event = .{
+                .key = .semicolon,
+                .mods = .{ .ctrl = true },
+                .utf8 = "s",
+                .unshifted_codepoint = 's',
+            },
+            .expected = "\x13",
+        },
+        // Colemak O also lives on the semicolon key.
+        .{
+            .event = .{
+                .key = .semicolon,
+                .mods = .{ .ctrl = true },
+                .utf8 = "o",
+                .unshifted_codepoint = 'o',
+            },
+            .expected = "\x0f",
+        },
+        // Ctrl+I and Ctrl+M encode as CSI u once the letter is
+        // recovered, matching what the GTK and macOS apprts attach.
+        .{
+            .event = .{
+                .key = .key_i,
+                .mods = .{ .ctrl = true },
+                .utf8 = "i",
+                .unshifted_codepoint = 'i',
+            },
+            .expected = "\x1b[105;5u",
+        },
+        .{
+            .event = .{
+                .key = .key_m,
+                .mods = .{ .ctrl = true },
+                .utf8 = "m",
+                .unshifted_codepoint = 'm',
+            },
+            .expected = "\x1b[109;5u",
+        },
+        // Cyrillic: no letter is attached, so the logical-key fallback
+        // keeps the position's C0 byte.
+        .{
+            .event = .{
+                .key = .key_a,
+                .mods = .{ .ctrl = true },
+                .utf8 = "",
+                .unshifted_codepoint = 0x0430,
+            },
+            .expected = "\x01",
+        },
+        .{
+            .event = .{
+                .key = .key_d,
+                .mods = .{ .ctrl = true },
+                .utf8 = "e",
+                .unshifted_codepoint = 'e',
+            },
+            .expected = "\x05",
+        },
+        // QWERTY is unchanged.
+        .{
+            .event = .{
+                .key = .key_d,
+                .mods = .{ .ctrl = true },
+                .utf8 = "d",
+                .unshifted_codepoint = 'd',
+            },
+            .expected = "\x04",
+        },
+        .{
+            .event = .{
+                .key = .key_c,
+                .mods = .{ .ctrl = true },
+                .utf8 = "c",
+                .unshifted_codepoint = 'c',
+            },
+            .expected = "\x03",
+        },
+        // Combos outside the gate attach no letter and keep today's bytes.
+        .{
+            .event = .{
+                .key = .key_g,
+                .mods = .{ .ctrl = true, .alt = true },
+                .utf8 = "",
+                .unshifted_codepoint = 'g',
+            },
+            .expected = "\x1b\x07",
+        },
+        .{
+            .event = .{
+                .key = .key_g,
+                .mods = .{ .ctrl = true, .shift = true },
+                .utf8 = "",
+                .unshifted_codepoint = 'g',
+            },
+            .expected = "",
+        },
+        // Pins the encoder's DEC 1036 alt-as-esc behavior; not a key
+        // shape the Windows host itself produces.
+        .{
+            .event = .{
+                .key = .key_g,
+                .mods = .{ .alt = true },
+                .utf8 = "",
+                .unshifted_codepoint = 'd',
+            },
+            .expected = "\x1b" ++ "d",
+            .opts = .{ .alt_esc_prefix = true },
+        },
+    };
+
+    for (cases) |case| {
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, case.event, case.opts);
+        try testing.expectEqualStrings(case.expected, writer.buffered());
+    }
+}
+
+test "win32 input: kitty encodes the layout letter for plain ctrl" {
+    const Case = struct {
+        event: key.KeyEvent,
+        expected: []const u8,
+    };
+    const cases = [_]Case{
+        // Colemak Ctrl+D: the scancode key is G but the text is "d".
+        .{
+            .event = .{
+                .key = .key_g,
+                .mods = .{ .ctrl = true },
+                .utf8 = "d",
+                .unshifted_codepoint = 'd',
+            },
+            .expected = "\x1b[100;5u",
+        },
+        // Dvorak Ctrl+S: the scancode key is the semicolon key.
+        .{
+            .event = .{
+                .key = .semicolon,
+                .mods = .{ .ctrl = true },
+                .utf8 = "s",
+                .unshifted_codepoint = 's',
+            },
+            .expected = "\x1b[115;5u",
+        },
+        // Colemak Ctrl+O lives on the semicolon key (111 = 'o').
+        .{
+            .event = .{
+                .key = .semicolon,
+                .mods = .{ .ctrl = true },
+                .utf8 = "o",
+                .unshifted_codepoint = 'o',
+            },
+            .expected = "\x1b[111;5u",
+        },
+        // Cyrillic: no letter attached, so the fallback reports the
+        // logical key (1072 = U+0430).
+        .{
+            .event = .{
+                .key = .key_a,
+                .mods = .{ .ctrl = true },
+                .utf8 = "",
+                .unshifted_codepoint = 0x0430,
+            },
+            .expected = "\x1b[1072;5u",
+        },
+    };
+
+    for (cases) |case| {
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try kitty(&writer, case.event, .{
+            .kitty_flags = .{ .disambiguate = true },
+        });
         try testing.expectEqualStrings(case.expected, writer.buffered());
     }
 }
