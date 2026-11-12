@@ -157,13 +157,10 @@ internal sealed class SplitGeometryTransition
         IsStanding = false;
         SettleReason = reason;
         _boundTimer.Stop();
-        var grid = _host.SplitGridOf(_split);
-        if (grid is not null)
-        {
-            PaneHost.ApplyRatio(grid, _split);
-            _host.UpdateLayout();
-        }
-
+        // The settle writes the MODEL's own weights (ApplyRatio's exact
+        // values, written through this class's own pen: ApplyRatio is
+        // PaneHost-private and this is not a PaneHost method).
+        WriteWeights(_split.Ratio);
         _host.SplitGeometrySettled(this, reason);
     }
 
