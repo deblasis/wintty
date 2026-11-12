@@ -117,6 +117,12 @@ ENV_FOR_LEG = {
 # tests compute, and a green the nightly observed under a random seed is
 # evidence for the fixed-seed digest every branch carries. The self-test
 # holds this table equal to what the test projects actually read.
+# The one file allowed to mention std.testing.random_seed: the sharded test
+# runner parses --seed for it and passes it to the fuzzer ABI. It is build
+# infrastructure, not a test, and no test reads the seed (the check holds
+# that line below).
+SEED_READER = "src/build/test_runner.zig"
+
 ENV_VARS_FOR_LEG = {
     gate_scope.LEG_WIN: ("GHOSTTY_FUZZ_ITERATIONS", "WINTTY_MOTION_FUZZ_SEED", "XDG_CONFIG_HOME", "USERPROFILE"),
 }
@@ -1750,9 +1756,16 @@ def self_test():
     seen = sorted(set(re.findall(r'"([A-Z_]+)"', reads.stdout))) if reads.returncode == 0 else None
     report(seen == sorted(ENV_VARS_FOR_LEG[gate_scope.LEG_WIN]),
            "env-vars-table-matches-the-test-projects", str(seen))
+    # The runner itself is the single permitted reader: it parses --seed
+    # and hands it to std.testing.random_seed and to the fuzzer ABI, which
+    # is upstream's contract and changes nothing a test computes unless a
+    # test reads it. Any OTHER reader - a test, a helper, the root runner -
+    # makes the seed a behavioural input and the digest's exclusion of
+    # WINTTY_TEST_SEED a lie, so it lands here by name.
     seed_users = git(REPO_ROOT, "grep", "-l", "random_seed", "--", "src", "pkg")
-    report(seed_users.returncode == 1 and not seed_users.stdout.strip(),
-           "no-test-reads-the-random-seed", seed_users.stdout.strip()[:200])
+    found = sorted(seed_users.stdout.split())
+    report(seed_users.returncode == 0 and found == [SEED_READER],
+           "no-test-reads-the-random-seed", str(found)[:200])
 
     PROBE = saved_probe
     print("SELF-TEST " + ("FAILED" if failed else "PASSED"))
