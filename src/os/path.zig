@@ -100,7 +100,13 @@ fn tryPathImpl(
     seen_eacces: *bool,
 ) !?[]u8 {
     const path_len = search_path.len + cmd.len + 1;
-    if (path_buf.len < path_len) return error.PathTooLong;
+    // The separator and the NUL both live at or after `search_path.len`, so
+    // the write needs `path_len + 1` bytes: `path_buf[path_len] = 0` is one
+    // past the joined text. Accepting `len == path_len` wrote that NUL out of
+    // bounds, and the PATHEXT loop below calls this without the caller's
+    // stricter pre-check, so a long directory plus a long bare name could
+    // reach it.
+    if (path_buf.len <= path_len) return error.PathTooLong;
 
     // Copy in the full path
     @memcpy(path_buf[0..search_path.len], search_path);
@@ -253,5 +259,23 @@ test "expand: reject path without room for null terminator" {
     try testing.expectError(
         error.PathTooLong,
         expand(testing.io, testing.allocator, &environ_map, "x"),
+    );
+}
+
+test "tryPathImpl: a full path leaves no room for the NUL" {
+    // The join writes a separator and a NUL at or after `search_path.len`, so
+    // `search_path.len + cmd.len + 1 == path_buf.len` has no room for the NUL.
+    // The caller's own pre-check refuses that shape for the literal candidate,
+    // but the Windows PATHEXT loop calls this join without it, so the bound
+    // here has to hold on its own. Calling the join directly is what exercises
+    // that path: through `expand` the oversized path dies inside std's UTF-16
+    // conversion before the bound can decide anything.
+    var search_path: [std.Io.Dir.max_path_bytes - 2]u8 = undefined;
+    @memset(&search_path, 'a');
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var seen_eacces = false;
+    try testing.expectError(
+        error.PathTooLong,
+        tryPathImpl(testing.io, testing.allocator, &search_path, "x", &path_buf, &seen_eacces),
     );
 }

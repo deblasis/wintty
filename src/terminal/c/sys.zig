@@ -161,7 +161,11 @@ fn decodeJpegWrapper(
     const func = global.decode_jpeg orelse return error.InvalidData;
 
     const c_alloc = CAllocator.fromZig(&alloc);
-    var out: Image = undefined;
+
+    // Same guarantee as decodePngWrapper: the header documents that the
+    // output struct starts zeroed, and a callback that returns true without
+    // setting `data` must be caught by the null check below.
+    var out: Image = std.mem.zeroes(Image);
     if (!func(global.userdata, &c_alloc, data.ptr, data.len, &out)) return error.InvalidData;
 
     const result_data = out.data orelse return error.InvalidData;
@@ -180,7 +184,11 @@ fn decodeGifWrapper(
     const func = global.decode_gif orelse return error.InvalidData;
 
     const c_alloc = CAllocator.fromZig(&alloc);
-    var out: Image = undefined;
+
+    // Same guarantee as decodePngWrapper: the header documents that the
+    // output struct starts zeroed, and a callback that returns true without
+    // setting `data` must be caught by the null check below.
+    var out: Image = std.mem.zeroes(Image);
     if (!func(global.userdata, &c_alloc, data.ptr, data.len, &out)) return error.InvalidData;
 
     const result_data = out.data orelse return error.InvalidData;

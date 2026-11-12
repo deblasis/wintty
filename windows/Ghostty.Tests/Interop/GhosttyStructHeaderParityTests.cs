@@ -58,6 +58,17 @@ public class GhosttyStructHeaderParityTests
         @"^\s*(?<type>[A-Za-z_][A-Za-z0-9_ ]*?(\s*\*\s*(const\s*)?)*)\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*;\s*(?://.*)?$",
         RegexOptions.Compiled);
 
+    // The C23 nullability annotations upstream now ships on struct fields
+    // (`const ghostty_x_s *GHOSTTY_NULLABLE contents;`). They are zero-width
+    // for layout and expand to nothing outside an annotating compiler, so
+    // they are stripped before the field is parsed. Stripping keeps the
+    // "unparsed field" assertion meaningful: an annotation form listed here
+    // is the only thing that can make a field parse, not a widened type
+    // grammar that would accept a wrong field silently.
+    private static readonly Regex AnnotationPattern = new(
+        @"\bGHOSTTY_(?:NULLABLE|NONNULL|NULL_UNSPECIFIED)\b\s*",
+        RegexOptions.Compiled);
+
     [Fact]
     public void Scrollbar_Layout_Matches_Header() =>
         AssertLayoutMatchesHeader<GhosttyActionScrollbar>("ghostty_action_scrollbar_s");
@@ -513,7 +524,7 @@ public class GhosttyStructHeaderParityTests
 
         foreach (var raw in body.Split('\n'))
         {
-            var line = raw.Trim();
+            var line = AnnotationPattern.Replace(raw, string.Empty).Trim();
             if (line.Length == 0 || line.StartsWith("//", StringComparison.Ordinal)) continue;
 
             var m = FieldPattern.Match(line);

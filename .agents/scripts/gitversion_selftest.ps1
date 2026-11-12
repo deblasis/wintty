@@ -75,6 +75,48 @@ function Invoke-Git {
     }
 }
 
+# The words of one `&[_][]const u8{ ... }` literal. The path expression is
+# not a quoted literal in the 0.17 build API (`b.root.subPathOrDot()`), so it
+# is represented as <root>; a quoted global option in that slot is still
+# rejected by Get-TagArguments below.
+function Get-ArgumentWords {
+    param([Parameter(Mandatory)][string]$Literal)
+    $body = $Literal.Substring($Literal.IndexOf('{') + 1)
+    $body = $body.Substring(0, $body.LastIndexOf('}'))
+    return , @(
+        foreach ($element in $body -split ',') {
+            $e = $element.Trim()
+            if ($e -match '^"([^"]*)"$') {
+                $Matches[1]
+            } else {
+                '<root>'
+            }
+        }
+    )
+}
+
+# Commands that list refs. The tag list must come from the one
+# `tag --points-at HEAD` invocation and nothing else: a nearest-tag fallback
+# (`git describe --tags --abbrev=0`) added beside it would leave every layout
+# below green while ancestor tags are consumed again, which is the exact
+# release-string bug this harness was written for.
+function Find-SecondRefListing {
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][string]$AllowedLiteral
+    )
+    $listers = @('tag', 'describe', 'for-each-ref', 'show-ref', 'name-rev')
+    $found = @()
+    foreach ($block in [regex]::Matches($Text, '&\[_\]\[\]const u8\{[^}]*\}')) {
+        if ($block.Value -eq $AllowedLiteral) { continue }
+        $words = Get-ArgumentWords $block.Value
+        foreach ($word in $words) {
+            if ($listers -contains $word) { $found += ($words -join ' ') }
+        }
+    }
+    return , $found
+}
+
 # The argument list the product actually runs, taken from the Zig source.
 #
 # Anchored on the array literal rather than on the word "tag", because a
@@ -93,19 +135,7 @@ function Get-TagArguments {
     # a quoted literal in the 0.17 build API (`b.root.subPathOrDot()`), so it
     # is represented as <root>; a quoted global option in that slot is still
     # rejected below.
-    $body = $literals[0].Value
-    $body = $body.Substring($body.IndexOf('{') + 1)
-    $body = $body.Substring(0, $body.LastIndexOf('}'))
-    $words = @(
-        foreach ($element in $body -split ',') {
-            $e = $element.Trim()
-            if ($e -match '^"([^"]*)"$') {
-                $Matches[1]
-            } else {
-                '<root>'
-            }
-        }
-    )
+    $words = Get-ArgumentWords $literals[0].Value
 
     # "git", "-C", <root>, "tag", "--points-at", "HEAD". A different shape
     # would mean the product runs a command this script is not reproducing,
@@ -121,8 +151,26 @@ function Get-TagArguments {
     ) {
         Stop-Harness "unexpected tag invocation in GitVersion.zig: $($words -join ' ')"
     }
+    $extra = Find-SecondRefListing -Text $text -AllowedLiteral $literals[0].Value
+    if ($extra.Count -gt 0) {
+        Stop-Harness "a second ref-listing git invocation can feed GitVersion.detect: $($extra -join '; ')"
+    }
     return , [string[]]$words[3..($words.Count - 1)]
 }
+
+# The guard above has to be able to fail: a describe fallback added beside
+# the tag invocation is the edit it exists to catch, and it must be reported
+# from the same helper the real read uses.
+$mutantText = Get-Content -LiteralPath $SourceFile -Raw
+$mutantText += @'
+const _fallback = &[_][]const u8{ "git", "-C", b.root.subPathOrDot(), "describe", "--tags", "--abbrev=0" };
+'@
+$mutantAllowed = [regex]::Matches($mutantText, '&\[_\]\[\]const u8\{[^}]*"--points-at"[^}]*\}')[0].Value
+$mutantHits = Find-SecondRefListing -Text $mutantText -AllowedLiteral $mutantAllowed
+if ($mutantHits.Count -lt 1 -or ($mutantHits -join ' ') -notmatch 'describe') {
+    Stop-Harness "the second-invocation guard did not catch a describe fallback: $($mutantHits -join '; ')"
+}
+Write-Host 'ok second ref-listing invocation is refused'
 
 function New-FixtureRepo {
     $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("gitversion-selftest-" + [guid]::NewGuid().ToString('N'))
