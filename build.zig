@@ -684,7 +684,6 @@ pub fn build(b: *std.Build) !void {
         // too; -Doptimize and -Dvt-safe must not split the two apart.
         const test_exe_install_step = installTestBinary(b, test_binaries_step, &test_binary_roots, test_exe);
         _ = config.addPatchElf(test_exe, test_exe_install_step);
-        _ = installTestBinary(b, test_binaries_step, &test_binary_roots, valgrind_exe);
 
         // Normal test running
         const test_runs = addShardedTestRuns(b, &config, test_exe, test_step, test_shards);

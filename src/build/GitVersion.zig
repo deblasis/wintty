@@ -97,6 +97,78 @@ pub fn detect(b: *std.Build) !Version {
     };
 }
 
+/// The HEAD tag that may name this build's release version, or null when
+/// none applies.
+///
+/// Only an unnamespaced `v...` tag is a candidate: `vt-*` belongs to
+/// libghostty-vt (`libVersion` reads it), `tip` is a pre-release marker,
+/// namespaced tags (`series/v2`, `backup/v1.0.0`) never name a version, and
+/// a `w...` tag is the fork's own release tag, which the app version string
+/// must not pick up. A candidate that is not exactly `expected` is an error
+/// rather than a skip: a release tag that disagrees with build.zig is a real
+/// defect and must fail the build loudly.
+///
+/// The tag list comes from `git tag --points-at HEAD` (GitVersion.detect),
+/// so this walks every tag on HEAD, and the candidate rule is the whole of
+/// "only a release tag can name a version".
+pub fn releaseTag(
+    tags: []const []const u8,
+    expected: []const u8,
+) error{TagMismatch}!?[]const u8 {
+    for (tags) |tag| {
+        if (!isVersionTagCandidate(tag)) continue;
+        if (!std.mem.eql(u8, tag, expected)) return error.TagMismatch;
+        return tag;
+    }
+    return null;
+}
+
+fn isVersionTagCandidate(tag: []const u8) bool {
+    // libghostty-vt release tags are checked by libVersion.
+    if (std.mem.startsWith(u8, tag, "vt-")) return false;
+
+    // Tip releases behave just like any other pre-release so we skip.
+    if (std.mem.eql(u8, tag, "tip")) return false;
+
+    // Namespaced tags are never release tags. --match globs tag names do not
+    // stop at a slash, so `vendor/v2` and `backup/v1.0.0` sail through a
+    // pattern check; the namespace rule has to be explicit.
+    if (std.mem.indexOfScalar(u8, tag, '/') != null) return false;
+
+    // Only a `v` name can be a release. This is what keeps `w1.0.0-rc.9`
+    // (the fork's release tag) and any stray marker from naming a version
+    // or tripping the mismatch error.
+    return std.mem.startsWith(u8, tag, "v");
+}
+
+test "releaseTag picks an exact release tag" {
+    const tags: []const []const u8 = &.{ "v1.4.0", "tip" };
+    try std.testing.expectEqualStrings("v1.4.0", (try releaseTag(tags, "v1.4.0")).?);
+}
+
+test "releaseTag ignores library, tip, namespaced and fork tags" {
+    const tags: []const []const u8 = &.{
+        "vt-1.0.1",
+        "tip",
+        "series/v2",
+        "vendor/v2",
+        "w1.0.0-rc.9",
+        "pr-1451-assets",
+        "wip-sync-66f7c39f",
+    };
+    try std.testing.expect((try releaseTag(tags, "v9.9.9")) == null);
+}
+
+test "releaseTag rejects a release tag that disagrees with build.zig" {
+    const tags: []const []const u8 = &.{"v1.3.1"};
+    try std.testing.expectError(error.TagMismatch, releaseTag(tags, "v1.4.0"));
+}
+
+test "releaseTag reads through a namespaced tag only to the v tag" {
+    const tags: []const []const u8 = &.{ "series/v2", "v1.3.1" };
+    try std.testing.expectEqualStrings("v1.3.1", (try releaseTag(tags, "v1.3.1")).?);
+}
+
 /// Git's raw `rev-parse --abbrev-ref HEAD` output, rewritten in place into a
 /// name usable as a semantic version pre-release identifier, which only allows
 /// [0-9A-Za-z-]. Slashes would also mess up dist tarball paths.

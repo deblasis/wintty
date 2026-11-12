@@ -1,30 +1,27 @@
 #!/usr/bin/env pwsh
 #
-# Pin that only a release tag can name a version.
+# Pin that the build reads its tags from the HEAD commit only, and that the
+# tag-candidate rule stays where the tests can see it.
 #
-# GitVersion.detect asks git which tag sits on HEAD. With no filter it answers
-# with whatever tag is there, and Config.init panics on a tag that is neither
-# `tip` nor `vX.Y.Z` -- so the retired sync flow, which tagged every published
-# snapshot `series/vN`, made the commit it had just published unbuildable.
+# GitVersion.detect asks git for every tag on HEAD (`git tag --points-at
+# HEAD`) and GitVersion.releaseTag decides which of them may name a version:
+# an unnamespaced `v...` tag that equals the build.zig version, with `vt-*`,
+# `tip`, namespaced tags and the fork's `w...` release tags all skipped.
+# That rule has Zig unit tests (src/build/GitVersion.zig, rooted from
+# src/build/test.zig). What this script guards is the git side: the command
+# the product runs must report exactly the HEAD tags and nothing else.
 #
-# The filter is `--match v* --match tip --exclude */*`, and the reason it needs
-# all three is not obvious. `--match` globs the tag name with refs/tags/
-# stripped and does NOT stop at a slash: `v*` rejects `series/v2` only because
-# that name starts with `s`. `vendor/v2`, `v-old/v2` and `verified/1.0` all sail
-# straight through it. `--exclude */*` is what actually carries the namespace
-# rule, and without it renaming the series namespace to anything starting with
-# `v` silently turns a release build into a pre-release version string.
+# The retired sync flow tagged every published snapshot `series/vN`, and a
+# build that read an ancestor's tag as its own version produced a release
+# string no release had. `--points-at HEAD` is what makes that impossible,
+# so this runs real git against a throwaway repo, with the argument list
+# read out of GitVersion.zig rather than copied here. A copy would keep
+# passing after the source stopped matching it, which is the failure mode
+# the check exists to prevent.
 #
-# So this runs real `git describe` against a throwaway repo, with the argument
-# list read out of GitVersion.zig rather than copied here. A copy would keep
-# passing after the source stopped matching it, which is the failure mode the
-# check exists to prevent.
-#
-# It also runs the same table against three broken argument lists and requires
-# every one to be caught. A check that cannot fail proves nothing, and these
-# are the shapes the regression actually takes: the pre-fix bare `--tags`, the
-# two `--match` patterns collapsed into one permissive pattern, and `--exclude`
-# dropped so a namespaced `v` name gets through.
+# It also runs the same table against broken argument lists (no
+# `--points-at`, and `--points-at HEAD~1`) and requires every one to be
+# caught. A check that cannot fail proves nothing.
 #
 # No network, no desktop, no build. Exit 0 pass, 2 finding, 1 the check itself
 # could not run.
@@ -35,10 +32,9 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Every `describe` in the table below is expected to fail for half the cases.
-# This preference is $false by default today, but if a future pwsh flips it
-# those expected failures become terminating errors and the check reports a
-# harness break for a product that is fine.
+# Every git call here is expected to succeed, but a future pwsh that flips
+# this preference would turn a plain non-zero exit into a terminating error
+# and the check would report a harness break for a repository that is fine.
 $PSNativeCommandUseErrorActionPreference = $false
 
 # `git -C` loses to these. A run that inherited them -- from a git hook, a
@@ -81,17 +77,17 @@ function Invoke-Git {
 
 # The argument list the product actually runs, taken from the Zig source.
 #
-# Anchored on the array literal rather than on the word "describe", because a
-# "describe" in a comment would otherwise hijack the parse and get reported as
+# Anchored on the array literal rather than on the word "tag", because a
+# "tag" in a comment would otherwise hijack the parse and get reported as
 # a product finding rather than as this script failing to read the source.
-function Get-DescribeArguments {
+function Get-TagArguments {
     if (-not (Test-Path -LiteralPath $SourceFile)) {
         Stop-Harness "GitVersion.zig not found at $SourceFile"
     }
     $text = Get-Content -LiteralPath $SourceFile -Raw
-    $literals = @([regex]::Matches($text, '&\[_\]\[\]const u8\{[^}]*"describe"[^}]*\}'))
+    $literals = @([regex]::Matches($text, '&\[_\]\[\]const u8\{[^}]*"--points-at"[^}]*\}'))
     if ($literals.Count -ne 1) {
-        Stop-Harness "expected one describe argument list in GitVersion.zig, found $($literals.Count)"
+        Stop-Harness "expected one --points-at argument list in GitVersion.zig, found $($literals.Count)"
     }
     # Split the array literal into its elements. The path expression is not
     # a quoted literal in the 0.17 build API (`b.root.subPathOrDot()`), so it
@@ -111,21 +107,21 @@ function Get-DescribeArguments {
         }
     )
 
-    # "git", "-C", <root>, "describe", ... A global option slipped in front of
-    # "describe" would mean the product runs a command this script is not
-    # reproducing, and a harness quietly testing a different command is worse
-    # than no harness.
-    $describeAt = [array]::IndexOf($words, 'describe')
-    if ($words.Count -lt 5 -or $words[0] -ne 'git' -or $words[1] -ne '-C' -or $describeAt -ne 3) {
-        Stop-Harness "unexpected describe invocation in GitVersion.zig: $($words -join ' ')"
+    # "git", "-C", <root>, "tag", "--points-at", "HEAD". A different shape
+    # would mean the product runs a command this script is not reproducing,
+    # and a harness quietly testing a different command is worse than none.
+    if (
+        $words.Count -ne 6 -or
+        $words[0] -ne 'git' -or
+        $words[1] -ne '-C' -or
+        $words[2] -ne '<root>' -or
+        $words[3] -ne 'tag' -or
+        $words[4] -ne '--points-at' -or
+        $words[5] -ne 'HEAD'
+    ) {
+        Stop-Harness "unexpected tag invocation in GitVersion.zig: $($words -join ' ')"
     }
-    if ($words[2] -ne '<root>') {
-        Stop-Harness "unexpected token before describe in GitVersion.zig: $($words[2])"
-    }
-    if ($words -notcontains '--exact-match' -or $words -notcontains '--tags') {
-        Stop-Harness "describe no longer runs --exact-match --tags: $($words -join ' ')"
-    }
-    return , [string[]]$words[$describeAt..($words.Count - 1)]
+    return , [string[]]$words[3..($words.Count - 1)]
 }
 
 function New-FixtureRepo {
@@ -159,21 +155,17 @@ function Clear-FixtureTags {
     }
 }
 
-# Expect $null where no tag may name a version: describe must fail rather than
-# hand back a string Config.init would then panic on. `On` selects the commit
-# the tag lands on, so the ancestor case checks --exact-match behaviorally
-# instead of just looking for the flag in the argument list.
+# Expect the exact set of tags the command reports for HEAD. `On` selects the
+# commit the tag lands on, so the ancestor case checks `--points-at HEAD`
+# behaviorally instead of just looking for the flag in the argument list.
 $Cases = @(
-    @{ Name = 'published series snapshot'; Tags = @(@{ Name = 'series/v2'; Annotated = $true; On = 'head' }); Expect = $null }
-    @{ Name = 'series namespace renamed to a v name'; Tags = @(@{ Name = 'vendor/v2'; Annotated = $true; On = 'head' }); Expect = $null }
-    @{ Name = 'lightweight namespaced tag'; Tags = @(@{ Name = 'backup/v1.0.0'; Annotated = $false; On = 'head' }); Expect = $null }
-    @{ Name = 'unnamespaced non-release tag'; Tags = @(@{ Name = 'pre-marker-scrub'; Annotated = $false; On = 'head' }); Expect = $null }
-    @{ Name = 'no tag at all'; Tags = @(); Expect = $null }
-    @{ Name = 'release tag on an ancestor only'; Tags = @(@{ Name = 'v1.0.0'; Annotated = $true; On = 'parent' }); Expect = $null }
-    @{ Name = 'annotated release tag'; Tags = @(@{ Name = 'v1.3.1'; Annotated = $true; On = 'head' }); Expect = 'v1.3.1' }
-    @{ Name = 'lightweight release tag'; Tags = @(@{ Name = 'v1.2.3'; Annotated = $false; On = 'head' }); Expect = 'v1.2.3' }
-    @{ Name = 'tip'; Tags = @(@{ Name = 'tip'; Annotated = $false; On = 'head' }); Expect = 'tip' }
-    @{ Name = 'release and series on one commit'; Tags = @(@{ Name = 'series/v2'; Annotated = $true; On = 'head' }, @{ Name = 'v1.3.1'; Annotated = $true; On = 'head' }); Expect = 'v1.3.1' }
+    @{ Name = 'no tag at all'; Tags = @(); Expect = @() }
+    @{ Name = 'annotated release tag on head'; Tags = @(@{ Name = 'v1.3.1'; Annotated = $true; On = 'head' }); Expect = @('v1.3.1') }
+    @{ Name = 'lightweight release tag on head'; Tags = @(@{ Name = 'v1.2.3'; Annotated = $false; On = 'head' }); Expect = @('v1.2.3') }
+    @{ Name = 'release tag on an ancestor only'; Tags = @(@{ Name = 'v1.0.0'; Annotated = $true; On = 'parent' }); Expect = @() }
+    @{ Name = 'namespaced tag on head is reported'; Tags = @(@{ Name = 'series/v2'; Annotated = $true; On = 'head' }); Expect = @('series/v2') }
+    @{ Name = 'several tags on one commit'; Tags = @(@{ Name = 'series/v2'; Annotated = $true; On = 'head' }, @{ Name = 'v1.3.1'; Annotated = $true; On = 'head' }); Expect = @('series/v2', 'v1.3.1') }
+    @{ Name = 'ancestor tag does not join a head tag'; Tags = @(@{ Name = 'v1.0.0'; Annotated = $true; On = 'parent' }, @{ Name = 'v1.3.1'; Annotated = $true; On = 'head' }); Expect = @('v1.3.1') }
 )
 
 # Every argument list is run against each tag layout while that layout is set
@@ -202,12 +194,11 @@ function Invoke-CaseTable {
 
         foreach ($list in $ArgumentLists) {
             $result = Invoke-Git (@('-C', $Repo) + $list.Arguments)
-            # GitVersion.detect treats a non-zero describe as "no tag";
-            # anything else is the string it hands to Config.init.
-            $got = if ($result.Code -ne 0) { $null } else { $result.Text }
-            if ($got -ne $case.Expect) {
-                $shownGot = if ($null -eq $got) { '<no tag>' } else { $got }
-                $shownWant = if ($null -eq $case.Expect) { '<no tag>' } else { $case.Expect }
+            $got = @($result.Text -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object)
+            $want = @($case.Expect | Sort-Object)
+            if (($got -join '|') -ne ($want -join '|')) {
+                $shownGot = if ($got.Count -eq 0) { '<none>' } else { $got -join ', ' }
+                $shownWant = if ($want.Count -eq 0) { '<none>' } else { $want -join ', ' }
                 $failures[$list.Name].Add("$($case.Name): got $shownGot, want $shownWant")
             }
         }
@@ -219,15 +210,14 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Stop-Harness 'git is not on PATH'
 }
 
-$describeArgs = Get-DescribeArguments
-Write-Host "describe args from GitVersion.zig: git $($describeArgs -join ' ')"
+$tagArgs = Get-TagArguments
+Write-Host "tag args from GitVersion.zig: git $($tagArgs -join ' ')"
 
 $PRODUCT = 'GitVersion.zig'
 $ArgumentLists = @(
-    @{ Name = $PRODUCT; Arguments = $describeArgs }
-    @{ Name = 'no --match filter (the pre-fix form)'; Arguments = [string[]]@('describe', '--exact-match', '--tags') }
-    @{ Name = 'both --match patterns collapsed into one'; Arguments = [string[]]@('describe', '--exact-match', '--tags', '--match', '*') }
-    @{ Name = 'no --exclude (a namespaced v name gets through)'; Arguments = [string[]]@('describe', '--exact-match', '--tags', '--match', 'v*', '--match', 'tip') }
+    @{ Name = $PRODUCT; Arguments = $tagArgs }
+    @{ Name = 'no --points-at (an ancestor tag joins)'; Arguments = [string[]]@('tag', '--list') }
+    @{ Name = '--points-at HEAD~1 (the ancestor commit, not HEAD)'; Arguments = [string[]]@('tag', '--points-at', 'HEAD~1') }
 )
 
 try {
@@ -236,11 +226,11 @@ try {
 
     $real = $failures[$PRODUCT]
     if ($real.Count -gt 0) {
-        Write-Host "FAIL: a tag that is not a release names a version" -ForegroundColor Red
+        Write-Host "FAIL: the tag command does not report exactly the HEAD tags" -ForegroundColor Red
         foreach ($f in $real) { Write-Host "  $f" -ForegroundColor Red }
         exit 2
     }
-    Write-Host "ok   $($Cases.Count) tag layouts resolve as expected"
+    Write-Host "ok   $($Cases.Count) tag layouts report as expected"
 
     $survivors = New-Object System.Collections.Generic.List[string]
     foreach ($list in $ArgumentLists) {
