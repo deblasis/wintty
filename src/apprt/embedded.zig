@@ -3633,9 +3633,15 @@ pub const CAPI = struct {
                     surface.pending_key = null;
                     if (own) return;
                 } else {
-                    // Don't attach C0 control characters. WM_CHAR delivers
-                    // the raw byte (e.g. 0x03 for Ctrl+C) but the key
-                    // encoder wants the printable character. Mirrors GTK.
+                    // Don't attach C0 control characters: WM_CHAR delivers
+                    // the raw byte (e.g. 0x03 for Ctrl+C) but the key encoder
+                    // wants the printable character. Mirrors GTK — except
+                    // plain Ctrl+letter, which is recovered below: the
+                    // recovered letter is the layout's own translation for
+                    // Latin-alphabet layouts, so the letter it encodes is
+                    // authoritative and the encoders then follow the active
+                    // layout. A layout whose unshifted key types a non-ASCII
+                    // letter keeps the logical-key fallback.
                     const is_c0 = text.len == 1 and (text[0] < 0x20 or text[0] == 0x7f);
 
                     var event = pending.event;
@@ -3662,6 +3668,18 @@ pub const CAPI = struct {
                             event.mods,
                             event.consumed_mods,
                         );
+                    } else if (input.key_encode.windowsCtrlLetter(
+                        event.keycode,
+                        event.unshifted_codepoint,
+                        text,
+                        event.mods,
+                    )) |letter| {
+                        // Buffer lives outside the optional so the text
+                        // survives setting pending_key to null, as above.
+                        surface.pending_key_text[0] = @intCast(letter);
+                        surface.pending_key_text[1] = 0;
+                        event.text = surface.pending_key_text[0..1 :0];
+                        event.unshifted_codepoint = letter;
                     }
 
                     surface.pending_key = null;
