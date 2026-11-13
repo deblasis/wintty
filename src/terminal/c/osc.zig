@@ -125,7 +125,7 @@ pub const CommandData = enum(c_int) {
             .prompt_report_shell_str,
             .prompt_report_git_head_str,
             .prompt_report_git_branch_str,
-            => lib.String,
+            => [*:0]const u8,
             .prompt_report_exit_code_i64 => i64,
             .prompt_report_git_dirty_bool => bool,
             .unknown_content => lib.String,
@@ -173,7 +173,7 @@ fn commandDataTyped(
         },
 
         .prompt_report_cwd_str => switch (command.*) {
-            .prompt_report => |v| out.* = .init(@as([]const u8, v.cwd)),
+            .prompt_report => |v| out.* = v.cwd.ptr,
             else => return .no_value,
         },
 
@@ -183,17 +183,17 @@ fn commandDataTyped(
         },
 
         .prompt_report_shell_str => switch (command.*) {
-            .prompt_report => |v| out.* = .init(@as([]const u8, v.shell orelse return .no_value)),
+            .prompt_report => |v| out.* = (v.shell orelse return .no_value).ptr,
             else => return .no_value,
         },
 
         .prompt_report_git_head_str => switch (command.*) {
-            .prompt_report => |v| out.* = .init(@as([]const u8, v.git_head orelse return .no_value)),
+            .prompt_report => |v| out.* = (v.git_head orelse return .no_value).ptr,
             else => return .no_value,
         },
 
         .prompt_report_git_branch_str => switch (command.*) {
-            .prompt_report => |v| out.* = .init(@as([]const u8, v.git_branch orelse return .no_value)),
+            .prompt_report => |v| out.* = (v.git_branch orelse return .no_value).ptr,
             else => return .no_value,
         },
 
@@ -357,9 +357,9 @@ test "prompt report" {
     const cmd = end(p, 0x07);
     try testing.expectEqual(.prompt_report, commandType(cmd));
 
-    var cwd: lib.String = undefined;
+    var cwd: [*:0]const u8 = undefined;
     try testing.expectEqual(Result.success, commandData(cmd, .prompt_report_cwd_str, @ptrCast(&cwd)));
-    try testing.expectEqualStrings("C:\\x", cwd.ptr[0..cwd.len]);
+    try testing.expectEqualStrings("C:\\x", std.mem.span(cwd));
 
     var exit_code: i64 = 0;
     try testing.expectEqual(Result.success, commandData(cmd, .prompt_report_exit_code_i64, @ptrCast(&exit_code)));
@@ -369,7 +369,7 @@ test "prompt report" {
     var dirty: bool = true;
     try testing.expectEqual(Result.no_value, commandData(cmd, .prompt_report_git_dirty_bool, @ptrCast(&dirty)));
 
-    var shell: lib.String = undefined;
+    var shell: [*:0]const u8 = undefined;
     try testing.expectEqual(Result.no_value, commandData(cmd, .prompt_report_shell_str, @ptrCast(&shell)));
 }
 
