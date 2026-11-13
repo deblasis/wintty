@@ -981,6 +981,18 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // guarantees the async pass still comes, once those events have
         // delivered - the same pass the framework would have run without
         // the settle, at the same point in the event order.
+        //
+        // The split-geometry hold (a registered coordinator that resolved
+        // PaneGeometry Full) rides BEFORE the settle: under it the layout
+        // commits at the START geometry (the origin whole in its
+        // pre-split rect, the newborn's cell zero) instead of snapping
+        // to the model ratio, and the owner drives the boundary from
+        // there on its own clock. Unclaimed by the time this method
+        // returns, the hold settles at the tail below - the layout never
+        // rests anywhere the model does not say.
+        var splitGeometryHold = newSubSplit is not null
+            ? TryHoldSplitGeometry(newSubSplit)
+            : null;
         UpdateLayout();
         InvalidateMeasure();
 
@@ -1001,6 +1013,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
                 PaneTreeChangeKind.Split,
                 BeforeLeafId: PaneMotionIds.Of(oldActive),
                 AfterLeafId: PaneMotionIds.Of(newLeaf)));
+        }
+
+        // The split-geometry hold's fail-safe: a coordinator that
+        // resolved Full but did not claim the hold in its Changed report
+        // (this stack) gets the layout snapped here - a hold is only as
+        // long as the owner that asked for it.
+        if (splitGeometryHold is { Claimed: false })
+        {
+            SettleSplitGeometry("unclaimed");
         }
 
         // Defer the highlight + focus until layout settles. The new
@@ -1607,6 +1628,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     private void SettlePaneFades(bool runPendingClose = true)
     {
+        // No held split geometry outlives a tree operation either: the
+        // same rebuild law, one settle point. Runs before the fade
+        // early-return below, so every caller of this choke point
+        // (split, close, equalize, resize, zoom, rehost) lands on a
+        // layout at the model's ratios.
+        SettleSplitGeometry("tree-op");
+
         if (!runPendingClose)
         {
             // The host is going away; a deferred soft cut must not run
