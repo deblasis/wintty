@@ -2308,6 +2308,16 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (_zoomedLeaf is not null) return;
         if (PaneTree.Leaves(_root).Take(2).Count() <= 1) return;
 
+        // A keyboard resize settles any standing split-geometry hold
+        // first: the resize is a user boundary action, so it owns the
+        // boundary - and this is the one ratio-moving tree operation
+        // that raises no tree change, so no other choke point catches
+        // it. Without this the ratio write and the in-place re-apply
+        // below fight a driving hold for the rest of its flight (the
+        // divider snapping to the resized ratio and yanked back onto
+        // the curve once per frame).
+        SettleSplitGeometry("resize");
+
         // Snapshot the pre-resize ratios (clone is independent of the live
         // tree) but only RECORD it if the resize actually moves a divider,
         // so a no-op resize (no matching-orientation ancestor) adds no
