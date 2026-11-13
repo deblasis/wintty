@@ -57,7 +57,19 @@ public static class ConfigServiceProfileParser
         var hidden = ProfileSourceParser.ExtractHiddenIds(configPairs);
         var hiddenMentions = ProfileSourceParser.ExtractHiddenMentionIds(configPairs);
 
-        return BuildView(parsed, hidden, hiddenMentions, fileValueReader);
+        var view = BuildView(parsed, hidden, hiddenMentions, fileValueReader);
+
+        // Saved ssh connections (ssh.<id>.* blocks). Their warnings join
+        // the profile warnings: the settings UI shows one list.
+        var ssh = Ghostty.Core.Ssh.SshConnectionParser.Parse(configPairs);
+        if (ssh.Connections.Count == 0 && ssh.Warnings.Count == 0) return view;
+        return view with
+        {
+            SshConnections = ssh.Connections,
+            ProfileWarnings = ssh.Warnings.Count == 0
+                ? view.ProfileWarnings
+                : [.. view.ProfileWarnings, .. ssh.Warnings],
+        };
     }
 
     private static ProfileView BuildView(
@@ -81,13 +93,20 @@ public static class ConfigServiceProfileParser
         var warnings = SuppressExplainedWarnings(
             parsed.Warnings, parsed.Profiles, hiddenMentions);
 
+        // ssh-hosts-discovery is opt-in: only an explicit true enables it.
+        var sshHostsDiscovery = bool.TryParse(fileValueReader("ssh-hosts-discovery"), out var sshOn) && sshOn;
+        var sshHostsUser = fileValueReader("ssh-hosts-user");
+        if (string.IsNullOrWhiteSpace(sshHostsUser)) sshHostsUser = null;
+
         return new ProfileView(
             ParsedProfiles: parsed.Profiles,
             ProfileOverrides: parsed.Overrides,
             ProfileOrder: profileOrder,
             DefaultProfileId: defaultId,
             HiddenProfileIds: hidden,
-            ProfileWarnings: warnings);
+            ProfileWarnings: warnings,
+            SshHostsDiscovery: sshHostsDiscovery,
+            SshHostsUser: sshHostsUser?.Trim());
     }
 
     /// <summary>
@@ -156,7 +175,7 @@ public static class ConfigServiceProfileParser
 }
 
 /// <summary>
-/// Immutable bundle of the six profile-view values. Matches the
+/// Immutable bundle of the profile-view values. Matches the
 /// member shape of <see cref="IProfileConfigSource"/>.
 /// </summary>
 public sealed record ProfileView(
@@ -165,4 +184,11 @@ public sealed record ProfileView(
     IReadOnlyList<string> ProfileOrder,
     string? DefaultProfileId,
     IReadOnlySet<string> HiddenProfileIds,
-    IReadOnlyList<string> ProfileWarnings);
+    IReadOnlyList<string> ProfileWarnings,
+    bool SshHostsDiscovery = false,
+    string? SshHostsUser = null)
+{
+    /// <summary>Saved connections from <c>ssh.&lt;id&gt;.*</c> blocks.</summary>
+    public IReadOnlyList<Ghostty.Core.Ssh.SshConnection> SshConnections { get; init; }
+        = Array.Empty<Ghostty.Core.Ssh.SshConnection>();
+}
