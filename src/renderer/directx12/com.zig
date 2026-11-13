@@ -11,7 +11,9 @@ pub const E_FAIL = windows_com.E_FAIL;
 pub const IUnknown = windows_com.IUnknown;
 pub const Reserved = windows_com.Reserved;
 
-// DXGI error code used for device-lost / TDR recovery.
+// DXGI error codes: device-lost / TDR recovery, and the creation-path
+// rejection the swap chain legality matrix asserts by value.
+pub const DXGI_ERROR_INVALID_CALL: HRESULT = @bitCast(@as(u32, 0x887A0001));
 pub const DXGI_ERROR_DEVICE_REMOVED: HRESULT = @bitCast(@as(u32, 0x887A0005));
 pub const DXGI_ERROR_DEVICE_HUNG: HRESULT = @bitCast(@as(u32, 0x887A0006));
 pub const DXGI_ERROR_DEVICE_RESET: HRESULT = @bitCast(@as(u32, 0x887A0007));

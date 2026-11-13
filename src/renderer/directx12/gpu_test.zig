@@ -1874,7 +1874,10 @@ test "DXGI: measured swap chain flag/scaling legality matrix (2026-09-26)" {
     // mis-attributed to the waitable flag and to DXGI_SCALING_NONE for
     // two sessions. If one of these pins goes red, the machine's DXGI
     // behavior changed and the flag decisions in device.zig need
-    // re-measuring, not just this test updating.
+    // re-measuring, not just this test updating. Block 4 is the
+    // exception: DXGI_SCALING_NONE on the factory2 entry point is legal
+    // on some drivers and rejected on others, so it records both
+    // measured answers and their contracts instead of one machine's.
     if (!hasInteractiveDesktop()) return error.SkipZigTest;
     // Above the device gate on purpose: the ABI literal is
     // hardware-independent, and this test is the round-1 confound's
@@ -2002,9 +2005,17 @@ test "DXGI: measured swap chain flag/scaling legality matrix (2026-09-26)" {
         defer _ = chain.Release();
     }
 
-    // 4. Factory2 (bare-composition and hwnd-DComp paths) DOES reject
-    //    NONE -- why compositionSwapChainDesc keeps STRETCH for the
-    //    chains it builds through factory2.
+    // 4. Factory2 (the bare-composition and hwnd-DComp paths) and
+    //    DXGI_SCALING_NONE: the one legality in this matrix the driver
+    //    decides. REJECTED with DXGI_ERROR_INVALID_CALL (0x887a0001) on
+    //    2026-09-26, the machine that chose STRETCH for this path;
+    //    ACCEPTED with S_OK on 2026-11-13 on AMD 31.0.21924.61. Both
+    //    answers are legal, so this pins each one's contract instead of
+    //    one machine's answer: a rejection hands back no chain, an
+    //    acceptance a releasable one. Any other HRESULT is a driver
+    //    change that needs re-measuring (the failure prints it), and
+    //    device.zig keeps STRETCH here because NONE is driver-dependent,
+    //    not because it is illegal everywhere.
     {
         const d = descFor(.NONE, 0x40);
         var chain: ?*dxgi.IDXGISwapChain1 = null;
@@ -2014,8 +2025,14 @@ test "DXGI: measured swap chain flag/scaling legality matrix (2026-09-26)" {
             null,
             &chain,
         );
-        try std.testing.expect(com.FAILED(hr));
-        try std.testing.expect(chain == null);
+        if (com.FAILED(hr)) {
+            try std.testing.expectEqual(com.DXGI_ERROR_INVALID_CALL, hr);
+            try std.testing.expect(chain == null);
+        } else {
+            try std.testing.expectEqual(com.S_OK, hr);
+            const accepted = chain orelse return error.NoSwapChain;
+            _ = accepted.Release();
+        }
     }
 }
 

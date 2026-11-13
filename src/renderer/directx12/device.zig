@@ -1199,12 +1199,14 @@ fn compositionSwapChainDesc(width: u32, height: u32, paced: bool) dxgi.DXGI_SWAP
         .SampleDesc = .{ .Count = 1, .Quality = 0 },
         .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
         .BufferCount = frame_count,
-        // STRETCH. Both creation entry points used here accept it, and
+        // STRETCH. Both creation entry points used here accept it. NONE
+        // is the field whose legality the driver decides:
         // IDXGIFactory2 (the bare-composition and hwnd-DComp paths)
-        // rejects DXGI_SCALING_NONE at creation with
-        // DXGI_ERROR_INVALID_CALL (0x887a0001), re-measured 2026-09-26.
-        // The media entry point does accept NONE (measured; Windows
-        // Terminal ships NONE there) -- an earlier investigation's "132
+        // rejected it with DXGI_ERROR_INVALID_CALL (0x887a0001) on
+        // 2026-09-26 and accepted it (S_OK) on 2026-11-13 on AMD
+        // 31.0.21924.61, so this desc cannot depend on it. The media
+        // entry point accepts NONE on both (measured; Windows Terminal
+        // ships NONE there) -- an earlier investigation's "132
         // consecutive creation failures" was attributed to NONE but was
         // in fact the 0x10 flag constant described in the function
         // comment, which fails creation under every scaling. NONE on
@@ -1433,16 +1435,18 @@ test "Device struct fields census" {
 
 test "composition swap chain desc: STRETCH scaling, waitable only when paced" {
     // Pinned where they are set. STRETCH is accepted by both creation
-    // entry points in use (re-measured 2026-09-26), while factory2
-    // rejects DXGI_SCALING_NONE (0x887a0001); NONE on the media entry
-    // point is measured-legal but unfilmed in this tree, so STRETCH
-    // stays everywhere this desc is used. The waitable flag is a CHOICE
-    // here, not a legality split: both entry points accept it (the
-    // measured matrix, with pinned HRESULTs, lives in gpu_test's
-    // legality test), and the panel path passes paced=false so the
-    // shipped binary matches the filmed one. If either half regresses,
-    // the app either fails to create its swap chain or paces a chain
-    // whose entry point rejects its flags.
+    // entry points in use (re-measured 2026-09-26), while factory2's
+    // answer to DXGI_SCALING_NONE is driver-decided: rejected
+    // (0x887a0001) on 2026-09-26, accepted (S_OK) on 2026-11-13 on AMD
+    // 31.0.21924.61, which is why this desc does not depend on it. NONE
+    // on the media entry point is measured-legal but unfilmed in this
+    // tree, so STRETCH stays everywhere this desc is used. The waitable
+    // flag is a CHOICE here, not a legality split: both entry points
+    // accept it (the measured matrix, with pinned HRESULTs, lives in
+    // gpu_test's legality test), and the panel path passes paced=false
+    // so the shipped binary matches the filmed one. If either half
+    // regresses, the app either fails to create its swap chain or paces
+    // a chain whose entry point rejects its flags.
     const paced = compositionSwapChainDesc(640, 480, true);
     try std.testing.expectEqual(dxgi.DXGI_SCALING.STRETCH, paced.Scaling);
     try std.testing.expectEqual(
