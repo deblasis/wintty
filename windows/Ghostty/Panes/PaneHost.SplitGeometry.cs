@@ -40,6 +40,7 @@ internal sealed class SplitGeometryTransition
     private readonly double _startedAtMs;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _boundTimer;
     private double _lastWritten = double.NaN;
+    private double _drivenRatio = double.NaN;
 
     /// <summary>The split this transition holds (the overlay's claim
     /// check: the hold must parent the born leaf it is claimed for).</summary>
@@ -91,6 +92,7 @@ internal sealed class SplitGeometryTransition
     {
         WriteWeights(1.0);
         _lastWritten = 1.0;
+        _drivenRatio = _split.Ratio;
         _boundTimer.Start();
     }
 
@@ -102,9 +104,13 @@ internal sealed class SplitGeometryTransition
     /// measured (and presented) before the next frame. Answers false
     /// when the transition is gone (settled, or its grid left the
     /// tree) - the owner stands down, never drives into a dead hold.
-    /// A weight the owner did not write since the last drive (a divider
-    /// drag landed between frames) settles the transition: the drag
-    /// owns the boundary now.
+    /// A divider drag that landed between drives settles the
+    /// transition: the drag owns the boundary now. Every product path
+    /// that moves a boundary under a hold writes the MODEL ratio first
+    /// and the weights second (the Splitter's pointer move, a keyboard
+    /// resize, an equalize), so the drag is detected on the model
+    /// ratio's own move - a weight-only check exempts exactly those
+    /// writers, because their weight is always the model's own.
     /// </summary>
     internal bool Drive(double progress)
     {
@@ -117,6 +123,12 @@ internal sealed class SplitGeometryTransition
         if (grid is null)
         {
             Settle("grid-gone");
+            return false;
+        }
+
+        if (ForeignModelRatio())
+        {
+            Settle("drag");
             return false;
         }
 
@@ -135,6 +147,7 @@ internal sealed class SplitGeometryTransition
         var weight = 1.0 + System.Math.Clamp(progress, 0.0, 1.0) * (_split.Ratio - 1.0);
         WriteWeights(weight);
         _lastWritten = weight;
+        _drivenRatio = _split.Ratio;
         Drives++;
         _boundTimer.Stop();
         _boundTimer.Start();
@@ -166,9 +179,24 @@ internal sealed class SplitGeometryTransition
 
     private bool PastBound() => NowMs() - _startedAtMs > SettleBoundMs;
 
+    /// <summary>Whether the model ratio moved since this transition
+    /// last drove toward it: a divider drag or a keyboard resize
+    /// rewrites the model FIRST and re-applies the weights second
+    /// (Splitter.OnPointerMoved, ResizeSplit, EqualizeSplits), so the
+    /// move is visible on the ratio before anywhere else - and a
+    /// foreign ratio means a foreign hand owns the boundary: settle,
+    /// and let the settle write whatever the model now says.</summary>
+    private bool ForeignModelRatio()
+        => !double.IsNaN(_drivenRatio)
+            && System.Math.Abs(_split.Ratio - _drivenRatio) > 1e-4;
+
     /// <summary>Whether the grid's boundary weight is one this
-    /// transition did not write (and is not the model's own): someone
-    /// else - a divider drag - owns the boundary.</summary>
+    /// transition did not write: someone else owns the boundary. The
+    /// model-equal exemption this check used to carry exempted every
+    /// real writer (all of them write the model's own value - the
+    /// ForeignModelRatio check above catches those); what remains here
+    /// is the belt for a weight write with no model move behind it, an
+    /// in-place ratio re-apply that stomps the held grid's weights.</summary>
     private bool ForeignWeight(Grid grid)
     {
         var current = BoundaryWeightOf(grid);
@@ -177,8 +205,7 @@ internal sealed class SplitGeometryTransition
             return false;
         }
 
-        return System.Math.Abs(current - _lastWritten) > 1e-4
-            && System.Math.Abs(current - _split.Ratio) > 1e-4;
+        return System.Math.Abs(current - _lastWritten) > 1e-4;
     }
 
     private double BoundaryWeightOf(Grid grid)
@@ -318,13 +345,10 @@ internal sealed partial class PaneHost
 
     private static Grid? FindSplitGrid(FrameworkElement visual, SplitPane split)
     {
-        if (visual is Splitter splitter)
-        {
-            return ReferenceEquals(splitter.Split, split)
-                ? splitter.Parent as Grid
-                : null;
-        }
-
+        // The root of the walk is BuildVisual's answer (a terminal or a
+        // split Grid, never a bare Splitter), and a matching Splitter is
+        // answered by the loop below before it could recurse into one -
+        // so this needs no splitter case of its own.
         if (visual is not Grid grid)
         {
             return null;
