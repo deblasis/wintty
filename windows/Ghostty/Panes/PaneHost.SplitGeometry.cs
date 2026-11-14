@@ -10,8 +10,16 @@ namespace Ghostty.Panes;
 /// A held split-geometry transition: the layout-side capability the
 /// unified split choreography (a registered motion coordinator) drives.
 /// Motion-neutral on purpose - this file knows curves exist only as a
-/// [0, 1] progress the OWNER samples; it never names an easing family,
-/// a duration, or a policy itself.
+/// progress the OWNER samples; it never names an easing family, a
+/// duration, or an amplitude policy itself. The progress domain is
+/// geometry, not taste: 1 is the model's final ratio, and values ABOVE 1
+/// (the owner's own overshoot past the final boundary) are legal up to
+/// the ratio-derived bound <c>1 / (1 - ratio)</c> - the largest progress
+/// at which both star weights are still non-negative (the origin's cell
+/// is exactly zero at the bound; past it a NEGATIVE star weight
+/// degenerates the grid). The bound is computed from the model's own
+/// ratio; the authored amplitude that stays well inside it is the
+/// owner's business, never this file's.
 ///
 /// The contract, in one paragraph: a split's commit can be HELD at its
 /// start geometry (the origin pane whole in its pre-split rect, the
@@ -97,13 +105,22 @@ internal sealed class SplitGeometryTransition
     }
 
     /// <summary>
-    /// Drive the boundary to <paramref name="progress"/> in [0, 1]
-    /// along the hold's own axis (0 = the start geometry, 1 = the
-    /// model's final ratio): write the interpolated star weights and
-    /// settle the layout synchronously, so the drive's geometry is
-    /// measured (and presented) before the next frame. Answers false
-    /// when the transition is gone (settled, or its grid left the
-    /// tree) - the owner stands down, never drives into a dead hold.
+    /// Drive the boundary to <paramref name="progress"/> along the
+    /// hold's own axis (0 = the start geometry, 1 = the model's final
+    /// ratio; values above 1 - an overshoot past the final boundary,
+    /// the owner's own policy - are legal up to the ratio-derived bound
+    /// <c>1 / (1 - ratio)</c>, clamped there): write the interpolated
+    /// star weights and settle the layout synchronously, so the drive's
+    /// geometry is measured (and presented) before the next frame. The
+    /// upper clamp is pure geometry, not taste: at the bound the
+    /// origin's star weight reaches exactly zero (its cell collapsed -
+    /// legal), and any progress past it would write a NEGATIVE star
+    /// weight, which a WinUI Grid distributes as degenerate layout.
+    /// The owner's sampler is expected to stay far below the bound (a
+    /// few percent past 1); the clamp is the net that keeps a runaway
+    /// sampler from breaking the grid. Answers false when the
+    /// transition is gone (settled, or its grid left the tree) - the
+    /// owner stands down, never drives into a dead hold.
     /// A divider drag that landed between drives settles the
     /// transition: the drag owns the boundary now. Every product path
     /// that moves a boundary under a hold writes the MODEL ratio first
@@ -144,7 +161,10 @@ internal sealed class SplitGeometryTransition
             return false;
         }
 
-        var weight = 1.0 + System.Math.Clamp(progress, 0.0, 1.0) * (_split.Ratio - 1.0);
+        // 1 / (1 - ratio) is finite for every model ratio (PaneNode
+        // clamps writers to [0.1, 0.9], so the bound is in [1.11, 10]).
+        var maxProgress = 1.0 / (1.0 - _split.Ratio);
+        var weight = 1.0 + System.Math.Clamp(progress, 0.0, maxProgress) * (_split.Ratio - 1.0);
         WriteWeights(weight);
         _lastWritten = weight;
         _drivenRatio = _split.Ratio;
