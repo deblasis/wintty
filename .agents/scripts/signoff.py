@@ -89,20 +89,92 @@ def _just_blob(rev):
 
 
 # Keys just's JSON dump may carry that name where the file was read from,
-# not what it means. `source` is the path of the file that was dumped; the
-# position keys are not in today's dump but cost nothing to drop if a
-# future just adds them.
-_WHERE_KEYS = {"source"}
+# not what it means: `source` is the path of the file that was dumped, and
+# the top-level `doc` is the comment above the default recipe. The position
+# keys are not in today's dump but cost nothing to drop if a future just
+# adds them.
+_WHERE_KEYS = {"source", "doc"}
 _POSITION_KEYS = {"line", "col", "position", "offset"}
+# Dump sections keyed by author-chosen names, where a recipe or a variable
+# may legitimately be called `line`: the position keys are stripped from
+# the values inside these maps, never from their keys.
+_NAME_KEYED = {"assignments", "aliases", "recipes", "groups", "modules", "unexports"}
 
 
-def _strip_where(value, top=False):
+def _strip_where(value, name_keyed=False):
     if isinstance(value, dict):
-        drop = _WHERE_KEYS if top else _POSITION_KEYS
-        return {k: _strip_where(v) for k, v in value.items() if k not in drop}
+        out = {}
+        for k, v in value.items():
+            if not name_keyed and k in _POSITION_KEYS:
+                continue
+            out[k] = _strip_where(v, name_keyed=k in _NAME_KEYED)
+        return out
     if isinstance(value, list):
         return [_strip_where(v) for v in value]
     return value
+
+
+def _recipe_semantics(recipe):
+    """A recipe's dump with comment-bearing fields removed: `doc` (the doc
+    comment above the recipe) and body lines that are nothing but a
+    comment. The `shebang` flag and any script body are untouched: a `#`
+    line at the head of a script names the interpreter, and inside a script
+    the body is text an interpreter reads, where a `#` line may not be a
+    comment at all."""
+    if not isinstance(recipe, dict):
+        return recipe
+    r = {k: v for k, v in recipe.items() if k != "doc"}
+    body = r.get("body")
+    if isinstance(body, list) and not r.get("shebang"):
+        r["body"] = [line for line in body
+                     if not (isinstance(line, list) and len(line) == 1
+                             and isinstance(line[0], str)
+                             and line[0].lstrip().startswith("#"))]
+    return r
+
+
+_PLATFORM_ATTR = re.compile(r"^\[(windows|unix|linux|macos)\]\s*$")
+
+
+def _variant_regions(text):
+    """{recipe name: [region text, ...]} for the platform-attribute regions
+    of a justfile: from a column-0 [windows]/[unix]/[linux]/[macos] line
+    through the recipe header and body that follow it.
+
+    just's dump shows each recipe in the definition valid on the host that
+    dumped it, so these regions are the one part of the file that reading
+    cannot see. The scan is lexical and deliberately dumb; comments inside
+    a region count as changes, because nothing else can see the region at
+    all."""
+    regions = {}
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        if not _PLATFORM_ATTR.match(lines[i]):
+            i += 1
+            continue
+        start = i
+        i += 1
+        header = None
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith("["):
+                i += 1
+                continue
+            if line and not line[0].isspace():
+                m = gate_scope.RECIPE_HEADER.match(line)
+                header = m.group(1) if m else None
+                i += 1
+            break
+        if header is None:
+            continue
+        while i < len(lines) and (not lines[i] or lines[i][0].isspace()):
+            i += 1
+        region = lines[start:i]
+        while region and not region[-1]:
+            region.pop()
+        regions.setdefault(header, []).append("\n".join(region))
+    return regions
 
 
 def _just_semantics(path):
@@ -123,27 +195,39 @@ def _just_semantics(path):
         return None
 
 
+def _compared_semantics(sem):
+    """A dump reduced to what a change in meaning can touch: where-keys and
+    position keys gone, comment fields gone, per recipe."""
+    sem = {k: _strip_where(v, name_keyed=k in _NAME_KEYED)
+           for k, v in sem.items() if k not in _WHERE_KEYS}
+    recipes = sem.get("recipes")
+    if isinstance(recipes, dict):
+        sem["recipes"] = {name: _recipe_semantics(r) for name, r in recipes.items()}
+    return sem
+
+
 def justfile_legs(base):
     """Legs whose meaning a justfile edit could have changed.
 
     Editing the recipe a leg runs through invalidates that leg only; a
     change outside every recipe (a setting, an assignment) can reach any
     of them and forces all. Adding an unrelated recipe forces nothing.
-    Comment-only and blank-line changes never count, since a guard that
+    Changes that only alter comments never count, since a guard that
     demands an hour of tests for a typo fix is the kind that gets
     switched off.
 
     Both versions are read by just itself (`--dump`, which parses without
-    executing) and compared as JSON. Every earlier miss of this function
-    came from a private reading of the file: `git diff` output shaped by
-    the reader's config, line numbers mapped back onto the file, comments
-    treated as inert when just's grammar gives some of them meaning. just
-    is the definition of what the file means, so just is the parser.
+    executing) and compared as JSON, comment fields stripped first. Every
+    earlier miss of this function came from a private reading of the file:
+    `git diff` output shaped by the reader's config, line numbers mapped
+    back onto the file, comments treated as inert when just's grammar
+    gives some of them meaning. just is the definition of what the file
+    means, so just is the parser.
 
-    The reading is the one valid on the host running the signoff: a recipe
-    defined once per platform appears here in this platform's definition,
-    which is also the only definition the legs can run. A missing justfile
-    on either side, or one just cannot load, forces every leg.
+    The one part of the file the dump cannot see is a recipe defined once
+    per platform, which appears in the definition valid on this host only;
+    those regions are compared from the raw text. A missing justfile on
+    either side, or one just cannot load, forces every leg.
     """
     every = set(gate_scope.ALL_LEGS)
     old_blob = _just_blob(base)
@@ -151,30 +235,37 @@ def justfile_legs(base):
     if old_blob is None or new_blob is None:
         return every
     with tempfile.TemporaryDirectory() as td:
-        old_path = os.path.join(td, "old.justfile")
-        new_path = os.path.join(td, "new.justfile")
-        with open(old_path, "wb") as f:
-            f.write(old_blob)
-        with open(new_path, "wb") as f:
-            f.write(new_blob)
+        # Separate subdirectories, so an import in one version cannot
+        # resolve the other version's file.
+        old_path = os.path.join(td, "old", "justfile")
+        new_path = os.path.join(td, "new", "justfile")
+        for path, blob in ((old_path, old_blob), (new_path, new_blob)):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(blob)
         old_sem = _just_semantics(old_path)
         new_sem = _just_semantics(new_path)
     if old_sem is None or new_sem is None:
         return every
-    old_sem = _strip_where(old_sem, top=True)
-    new_sem = _strip_where(new_sem, top=True)
-    if old_sem == new_sem:
-        return set()
-    for key in (set(old_sem) | set(new_sem)) - {"recipes"}:
-        if old_sem.get(key) != new_sem.get(key):
-            return every
-    old_recipes = old_sem.get("recipes") or {}
-    new_recipes = new_sem.get("recipes") or {}
+    old_sem = _compared_semantics(old_sem)
+    new_sem = _compared_semantics(new_sem)
     legs = set()
-    for name in set(old_recipes) | set(new_recipes):
-        if old_recipes.get(name) != new_recipes.get(name):
+    if old_sem != new_sem:
+        for key in (set(old_sem) | set(new_sem)) - {"recipes"}:
+            if old_sem.get(key) != new_sem.get(key):
+                return every
+        old_recipes = old_sem.get("recipes") or {}
+        new_recipes = new_sem.get("recipes") or {}
+        for name in set(old_recipes) | set(new_recipes):
+            if old_recipes.get(name) != new_recipes.get(name):
+                legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
+    old_regions = _variant_regions(old_blob.decode("utf-8", "surrogateescape"))
+    new_regions = _variant_regions(new_blob.decode("utf-8", "surrogateescape"))
+    for name in set(old_regions) | set(new_regions):
+        if old_regions.get(name) != new_regions.get(name):
             legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
     return legs
+
 
 def scoped_legs(base, paths):
     """(legs, justfile_legs) a path list needs against `base`. The single
@@ -720,7 +811,10 @@ def self_test():
         ("assignment-change", b"x", b"y", sem(), sem(assignments={"a": 1}), every),
         ("default-recipe-change", b"x", b"y", sem(), sem(first="other"), every),
         ("recipe-body", b"x", b"y", sem({"test": {"body": ["a"]}, "hello": {}}), sem({"test": {"body": ["b"]}, "hello": {}}), zig),
-        ("doc-comment-change", b"x", b"y", sem({"test": {"doc": "a"}}), sem({"test": {"doc": "b"}}), zig),
+        ("doc-comment-change", b"x", b"y", sem({"test": {"doc": "a"}}), sem({"test": {"doc": "b"}}), set()),
+        ("body-comment-change", b"x", b"y", sem({"test": {"body": [["# note"], ["zig build test"]]}}), sem({"test": {"body": [["zig build test"]]}}), set()),
+        ("shebang-flip", b"x", b"y", sem({"test": {"shebang": True, "body": [["#!/bin/sh"]]}}), sem({"test": {"shebang": False, "body": [["#!/bin/sh"]]}}), zig),
+        ("assignment-named-line", b"x", b"y", sem(assignments={"line": "1"}), sem(assignments={"line": "2"}), every),
         ("recipe-added", b"x", b"y", sem({"hello": {}}), sem({"hello": {}, "test-win": {}}), win),
         ("recipe-removed", b"x", b"y", sem({"test": {}, "hello": {}}), sem({"hello": {}}), zig),
         ("unrelated-recipe-only", b"x", b"y", sem({"hello": {"body": ["a"]}}), sem({"hello": {"body": ["b"]}}), set()),
@@ -729,6 +823,21 @@ def self_test():
     for label, ob, nb, os_, ns_, expect in oracle_cases:
         got = with_justfile_reading(ob, nb, os_, ns_)
         report(got == expect, f"justfile-oracle-{label}", str(sorted(got)))
+
+    # Platform regions are compared from the raw text, because the host's
+    # dump shows only this host's definition of a recipe defined once per
+    # platform. Same dumps, different blobs.
+    same_sem = sem({"test": {"body": ["a"]}})
+    variant_blobs = [
+        ("variant-body-edited", b"no regions", b"[unix]\ntest-win:\n    echo a\n", win),
+        ("variant-added", b"no regions", b"[linux]\ntest:\n    echo a\n", zig),
+        ("variant-unmapped", b"no regions", b"[unix]\nhello:\n    echo a\n", set()),
+        ("variant-comment-counts", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    # note\n    echo a\n", win),
+        ("variant-indent-noise-ignored", b"[unix]\ntest-win:\n    echo a\n\n", b"[unix]\ntest-win:\n    echo a\n", set()),
+    ]
+    for label, ob, nb, expect in variant_blobs:
+        got = with_justfile_reading(ob, nb, same_sem, sem({"test": {"body": ["a"]}}))
+        report(got == expect, f"justfile-variant-{label}", str(sorted(got)))
     # The record must carry the window it was taken against: the merge guard
     # reads `base` next to `sha` to measure what moved on the branch. A None
     # base must still be PRESENT in the payload, so a reader distinguishing
