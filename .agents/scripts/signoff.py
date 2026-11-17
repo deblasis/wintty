@@ -117,17 +117,19 @@ def _strip_where(value, name_keyed=False):
 def _recipe_semantics(recipe):
     """A recipe's dump with comment-bearing fields removed: `doc` (the doc
     comment above the recipe) and body lines that are nothing but a
-    comment. The `shebang` flag and any script body are untouched: a `#`
-    line at the head of a script names the interpreter, and inside a script
-    the body is text an interpreter reads, where a `#` line may not be a
-    comment at all."""
+    comment, in a script recipe every line but the first, which names the
+    interpreter. A `#` line elsewhere in a script is a comment to the
+    interpreter that reads it; one hidden inside a quoted string is the
+    residual risk of this strip, and it over-selects nothing."""
     if not isinstance(recipe, dict):
         return recipe
     r = {k: v for k, v in recipe.items() if k != "doc"}
     body = r.get("body")
-    if isinstance(body, list) and not r.get("shebang"):
-        r["body"] = [line for line in body
-                     if not (isinstance(line, list) and len(line) == 1
+    if isinstance(body, list):
+        keep_first = bool(r.get("shebang"))
+        r["body"] = [line for i, line in enumerate(body)
+                     if (keep_first and i == 0)
+                     or not (isinstance(line, list) and len(line) == 1
                              and isinstance(line[0], str)
                              and line[0].lstrip().startswith("#"))]
     return r
