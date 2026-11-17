@@ -49,6 +49,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -74,81 +75,106 @@ def changed_paths(base):
     return sorted(p.strip().replace("\\", "/") for p in out.stdout.splitlines() if p.strip())
 
 
-def _justfile_shape(text):
-    """(top_level, recipes): the parts of a justfile's text that decide what
-    it does, with comments and blank lines dropped.
-
-    top_level is every non-comment line at column 0 that is not a recipe
-    header (settings, assignments, imports, attributes such as [windows])
-    plus any indented line before the first recipe, in file order.
-    recipes maps a recipe name to one body per definition, since a recipe
-    can be defined once per platform; a body is its header line and its
-    indented lines. A comment inside a body is dropped, except a shebang as
-    the first body line, which turns the recipe into a script.
-    """
-    header = gate_scope.RECIPE_HEADER
-    top, recipes, cur = [], {}, None
-    for raw in text.split("\n"):
-        line = raw.rstrip("\r")
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if not line[0].isspace():
-            if stripped.startswith("#"):
-                continue
-            m = header.match(line)
-            if m:
-                cur = [line]
-                recipes.setdefault(m.group(1), []).append(cur)
-            else:
-                cur = None
-                top.append(line)
-            continue
-        if stripped.startswith("#") and not (cur is not None and len(cur) == 1
-                                             and stripped.startswith("#!")):
-            continue
-        (top if cur is None else cur).append(line)
-    return top, recipes
+def _just_blob(rev):
+    """The justfile's exact bytes at `rev`, or None. Direct subprocess
+    rather than run(): run() decodes as text, and a lone carriage return
+    must survive into the file just reads, because just's lexer treats it
+    differently from a newline."""
+    try:
+        p = subprocess.run(["git", "-C", REPO_ROOT, "show", f"{rev}:justfile"],
+                           capture_output=True, timeout=leg_cache.GIT_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return p.stdout if p.returncode == 0 else None
 
 
-def justfile_shape_legs(old_text, new_text):
-    """Legs whose meaning an edit from old_text to new_text could change.
-    Any top-level difference can reach every recipe and forces every leg;
-    otherwise each recipe whose bodies differ, including one that was
-    added, removed or cut short by a header inserted into it, contributes
-    the legs that run through it."""
-    old_top, old_recipes = _justfile_shape(old_text)
-    new_top, new_recipes = _justfile_shape(new_text)
-    if old_top != new_top:
-        return set(gate_scope.ALL_LEGS)
-    legs = set()
-    for name in set(old_recipes) | set(new_recipes):
-        if old_recipes.get(name) != new_recipes.get(name):
-            legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
-    return legs
+# Keys just's JSON dump may carry that name where the file was read from,
+# not what it means. `source` is the path of the file that was dumped; the
+# position keys are not in today's dump but cost nothing to drop if a
+# future just adds them.
+_WHERE_KEYS = {"source"}
+_POSITION_KEYS = {"line", "col", "position", "offset"}
+
+
+def _strip_where(value, top=False):
+    if isinstance(value, dict):
+        drop = _WHERE_KEYS if top else _POSITION_KEYS
+        return {k: _strip_where(v) for k, v in value.items() if k not in drop}
+    if isinstance(value, list):
+        return [_strip_where(v) for v in value]
+    return value
+
+
+def _just_semantics(path):
+    """just's own reading of the justfile at `path`, or None when just
+    cannot load it. `--dump` parses the file without executing any of it,
+    so a justfile that just refuses to load, or a comment that changes
+    what a recipe is (a shebang no longer first, a continuation split),
+    is a difference this sees and a line reader cannot."""
+    try:
+        out = run(["just", f"--justfile={path}", "--dump", "--dump-format", "json"])
+    except Exception:  # noqa: BLE001 - no just on PATH, or it could not spawn
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        return json.loads(out.stdout)
+    except ValueError:
+        return None
 
 
 def justfile_legs(base):
     """Legs whose meaning a justfile edit could have changed.
 
     Editing the recipe a leg runs through invalidates that leg only; a
-    change outside every recipe (a setting, a variable, an attribute) can
-    reach any of them and forces all. Adding an unrelated recipe forces
-    nothing. Comment-only and blank-line changes never count, since a guard
-    that demands an hour of tests for a typo fix is the kind that gets
+    change outside every recipe (a setting, an assignment) can reach any
+    of them and forces all. Adding an unrelated recipe forces nothing.
+    Comment-only and blank-line changes never count, since a guard that
+    demands an hour of tests for a typo fix is the kind that gets
     switched off.
 
-    Both versions are read as raw blobs and compared by their parsed shape,
-    not through `git diff`: a diff's text depends on the reader's git
-    config (colour, external drivers, textconv, attributes), and mapping
-    its line numbers back onto the file is where every miss of this
-    function came from. A justfile missing on either side forces every leg.
+    Both versions are read by just itself (`--dump`, which parses without
+    executing) and compared as JSON. Every earlier miss of this function
+    came from a private reading of the file: `git diff` output shaped by
+    the reader's config, line numbers mapped back onto the file, comments
+    treated as inert when just's grammar gives some of them meaning. just
+    is the definition of what the file means, so just is the parser.
+
+    The reading is the one valid on the host running the signoff: a recipe
+    defined once per platform appears here in this platform's definition,
+    which is also the only definition the legs can run. A missing justfile
+    on either side, or one just cannot load, forces every leg.
     """
-    new_content = run(["git", "show", "HEAD:justfile"])
-    old_content = run(["git", "show", f"{base}:justfile"])
-    if new_content.returncode != 0 or old_content.returncode != 0:
-        return set(gate_scope.ALL_LEGS)
-    return justfile_shape_legs(old_content.stdout, new_content.stdout)
+    every = set(gate_scope.ALL_LEGS)
+    old_blob = _just_blob(f"{base}:justfile")
+    new_blob = _just_blob("HEAD:justfile")
+    if old_blob is None or new_blob is None:
+        return every
+    with tempfile.TemporaryDirectory() as td:
+        old_path = os.path.join(td, "old.justfile")
+        new_path = os.path.join(td, "new.justfile")
+        with open(old_path, "wb") as f:
+            f.write(old_blob)
+        with open(new_path, "wb") as f:
+            f.write(new_blob)
+        old_sem = _just_semantics(old_path)
+        new_sem = _just_semantics(new_path)
+    if old_sem is None or new_sem is None:
+        return every
+    old_sem = _strip_where(old_sem, top=True)
+    new_sem = _strip_where(new_sem, top=True)
+    if old_sem == new_sem:
+        return set()
+    for key in (set(old_sem) | set(new_sem)) - {"recipes"}:
+        if old_sem.get(key) != new_sem.get(key):
+            return every
+    old_recipes = old_sem.get("recipes") or {}
+    new_recipes = new_sem.get("recipes") or {}
+    legs = set()
+    for name in set(old_recipes) | set(new_recipes):
+        if old_recipes.get(name) != new_recipes.get(name):
+            legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
+    return legs
 
 def scoped_legs(base, paths):
     """(legs, justfile_legs) a path list needs against `base`. The single
@@ -653,51 +679,56 @@ def self_test():
             failed = True
         print(f"{'ok ' if ok else 'FAIL'} {label}{': ' + detail if detail else ''}")
 
-    # justfile_shape_legs: what an edit costs, read from the parsed shape of
-    # both versions. Each case is an edit someone can actually make.
-    base_jf = "\n".join([
-        "# preamble comment",
-        'set windows-shell := ["pwsh.exe"]',
-        "",
-        "test: test-lib-vt",
-        "    zig build test",
-        "    zig build test-lib-vt",
-        "",
-        "[windows]",
-        "test-win:",
-        "    dotnet test windows/Ghostty.sln",
-        "",
-        "[unix]",
-        "test-win:",
-        "    echo windows only",
-        "",
-        "pr-gate pr:",
-        "    python .agents/scripts/pr_gate.py",
-        "",
-    ])
+    # justfile_legs: just's own dump of both versions decides. The seam is
+    # faked (_just_blob / _just_semantics), so these cases pin the decision
+    # rules; the real oracle is exercised against real git and real just
+    # outside the self-test. A None on either side is a justfile just
+    # cannot load, and that selects every leg.
     every = set(gate_scope.ALL_LEGS)
-    zig, win = set(gate_scope.RECIPE_LEGS["test"]), set(gate_scope.RECIPE_LEGS["test-win"])
-    shape_cases = [
-        ("unchanged", base_jf, set()),
-        ("comment-only", base_jf.replace("# preamble comment", "# reworded comment"), set()),
-        ("blank-line", base_jf.replace("pr-gate pr:", "\npr-gate pr:"), set()),
-        ("crlf-only", base_jf.replace("\n", "\r\n"), set()),
-        ("form-feed-in-comment", base_jf.replace("# preamble comment", "# pre\x0camble"), set()),
-        ("body-comment", base_jf.replace("    zig build test\n", "    # note\n    zig build test\n"), set()),
-        ("added-unrelated-recipe", base_jf + "\nhello:\n    echo hi\n", set()),
-        ("recipe-body", base_jf.replace("zig build test-lib-vt", "zig build test-lib-vt -Dx"), zig),
-        ("one-platform-body", base_jf.replace("echo windows only", "echo changed"), win),
-        ("recipe-deleted", base_jf.replace("test: test-lib-vt\n    zig build test\n    zig build test-lib-vt\n", ""), zig),
-        ("recipe-cut-short", base_jf.replace("    zig build test\n", "    zig build test\nsplit-here:\n"), zig),
-        ("shebang-first-body-line", base_jf.replace("test: test-lib-vt\n", "test: test-lib-vt\n    #!/usr/bin/env python3\n"), zig),
-        ("header-deps", base_jf.replace("test: test-lib-vt", "test:"), zig),
-        ("setting", base_jf.replace('set windows-shell := ["pwsh.exe"]', 'set windows-shell := ["cmd.exe"]'), every),
-        ("setting-after-form-feed", base_jf.replace("# preamble comment", "# pre\x0camble\nset dotenv-load"), every),
-        ("attribute", base_jf.replace("[unix]\n", "[unix]\n[no-cd]\n"), every),
+    zig = set(gate_scope.RECIPE_LEGS["test"])
+    win = set(gate_scope.RECIPE_LEGS["test-win"])
+
+    def sem(recipes=None, **top):
+        base = {"source": "somewhere", "settings": {}, "assignments": {},
+                "recipes": recipes if recipes is not None else {}}
+        base.update(top)
+        return base
+
+    def with_justfile_reading(old_blob, new_blob, old_sem, new_sem):
+        saved_blob, saved_sem = globals()["_just_blob"], globals()["_just_semantics"]
+
+        def fake_blob(rev):
+            return new_blob if rev.startswith("HEAD") else old_blob
+
+        def fake_sem(path):
+            return {"old": old_sem, "new": new_sem}["old" if "old" in path else "new"]
+        try:
+            globals()["_just_blob"], globals()["_just_semantics"] = fake_blob, fake_sem
+            return justfile_legs("b" * 40)
+        finally:
+            globals()["_just_blob"], globals()["_just_semantics"] = saved_blob, saved_sem
+
+    same = sem({"test": {"body": ["a"]}, "hello": {}})
+    oracle_cases = [
+        ("old-blob-missing", None, b"x", None, None, every),
+        ("new-blob-missing", b"x", None, None, None, every),
+        ("unparsable-old", b"x", b"y", None, sem(), every),
+        ("unparsable-new", b"x", b"y", sem(), None, every),
+        ("equal", b"x", b"y", same, sem({"test": {"body": ["a"]}, "hello": {}}), set()),
+        ("source-path-stripped", b"x", b"y", same, sem({"test": {"body": ["a"]}, "hello": {}}), set()),
+        ("settings-change", b"x", b"y", sem(), sem(settings={"x": 1}), every),
+        ("assignment-change", b"x", b"y", sem(), sem(assignments={"a": 1}), every),
+        ("default-recipe-change", b"x", b"y", sem(), sem(first="other"), every),
+        ("recipe-body", b"x", b"y", sem({"test": {"body": ["a"]}, "hello": {}}), sem({"test": {"body": ["b"]}, "hello": {}}), zig),
+        ("doc-comment-change", b"x", b"y", sem({"test": {"doc": "a"}}), sem({"test": {"doc": "b"}}), zig),
+        ("recipe-added", b"x", b"y", sem({"hello": {}}), sem({"hello": {}, "test-win": {}}), win),
+        ("recipe-removed", b"x", b"y", sem({"test": {}, "hello": {}}), sem({"hello": {}}), zig),
+        ("unrelated-recipe-only", b"x", b"y", sem({"hello": {"body": ["a"]}}), sem({"hello": {"body": ["b"]}}), set()),
+        ("position-keys-stripped", b"x", b"y", sem({"test": {"body": ["a"], "line": 1}}), sem({"test": {"body": ["a"], "line": 9}}), set()),
     ]
-    for label, new_text, expect in shape_cases:
-        got = justfile_shape_legs(base_jf, new_text)
-        report(got == expect, f"justfile-shape-{label}", str(sorted(got)))
+    for label, ob, nb, os_, ns_, expect in oracle_cases:
+        got = with_justfile_reading(ob, nb, os_, ns_)
+        report(got == expect, f"justfile-oracle-{label}", str(sorted(got)))
     # The record must carry the window it was taken against: the merge guard
     # reads `base` next to `sha` to measure what moved on the branch. A None
     # base must still be PRESENT in the payload, so a reader distinguishing
@@ -820,21 +851,6 @@ def self_test():
             records = os.listdir(os.path.join(td, "pr-signoff")) if os.path.isdir(os.path.join(td, "pr-signoff")) else []
         return rc, state, records
 
-    # justfile_legs reads the two blobs with `git show` and nothing else, so
-    # no diff setting can change its answer; a blob git cannot produce (a
-    # justfile renamed or deleted on either side) forces every leg.
-    seen = []
-
-    def fake_show(cmd, **kw):
-        seen.append(cmd[:2])
-        return _types.SimpleNamespace(returncode=128 if cmd[2].startswith("HEAD:") else 0, stdout="")
-    try:
-        mod.run = fake_show
-        missing = justfile_legs("b" * 40)
-    finally:
-        mod.run = saved["run"]
-    report(missing == set(gate_scope.ALL_LEGS) and all(c == ["git", "show"] for c in seen),
-           "justfile-legs-reads-blobs-only", f"legs={sorted(missing)} calls={seen}")
     head = "f" * 40
     rc, st, recs = drive(["gates-selftest"], ["README.md"], [head])
     report(rc == 3 and st["legs_calls"] == 0 and st["ctx"] == 0 and not recs,

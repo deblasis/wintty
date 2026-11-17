@@ -46,7 +46,7 @@ LEG_COMMANDS = {
     LEG_RELEASE_GATE: ("just", "release-gate-check"),
 }
 
-# A justfile recipe header, as both parsers of the file must see it:
+# A justfile recipe header, as the hasher of each recipe's text must see
 # signoff.py maps a changed line to the recipe that owns it, leg_cache.py
 # hashes each recipe's text. Parameters may be bare (`pr-gate pr:`),
 # defaulted (`splash-race args="":`) or variadic (`+args`), and the
@@ -61,9 +61,9 @@ RECIPE_HEADER = re.compile(
 # The justfile defines the legs themselves, so editing a recipe a leg runs
 # through invalidates what that leg proves. The mapping is per recipe rather
 # than all-or-nothing: gutting `test-win` says nothing about the Zig suite,
-# and adding an unrelated recipe says nothing about either. A changed line
-# outside every recipe (the shell preamble, a variable) forces everything,
-# since it can reach any of them.
+# and adding an unrelated recipe says nothing about either. A change outside
+# every recipe (a setting, an assignment) forces everything, since it can
+# reach any of them.
 RECIPE_LEGS = {
     "test": (LEG_ZIG,),
     "test-lib-vt": (LEG_ZIG,),
