@@ -479,6 +479,54 @@ def no_legs_refusal(legs):
             '--reason "..." -- just signoff')
 
 
+def legs_without_renames(base, jf):
+    """Legs the change needs when every rename counts as a delete of its
+    old path plus an add of its new one, or None if git cannot say.
+
+    `git diff --name-only` (and GitHub's PR file list, which the merge gate
+    compares against) report a rename by its new path only, so moving a
+    file out of src/ into docs/ plans no leg even though src/ lost a file.
+    The lane-free path refuses on that too; the record itself keeps the
+    regular path list, so it stays identical to what `just signoff` writes.
+    """
+    out = run(["git", "diff", "--no-renames", "--name-only", f"{base}...HEAD"])
+    if out.returncode != 0:
+        return None
+    paths = sorted(p.strip().replace("\\", "/") for p in out.stdout.splitlines() if p.strip())
+    return gate_scope.required_legs(paths, justfile_legs=jf)
+
+
+def no_legs_gate(head, legs, base, jf):
+    """Every refusal of the lane-free path, in order, or None to proceed:
+    a plan with legs, a rename whose old side needs legs, a split diff git
+    cannot produce, and a HEAD that moved while the plan was computed."""
+    refused = no_legs_refusal(legs)
+    if refused:
+        return refused
+    both_sides = legs_without_renames(base, jf)
+    if both_sides is None:
+        return "could not list the changed paths with renames split; run `just signoff` in the build lane"
+    if both_sides:
+        return "counting each rename's old path, " + no_legs_refusal(both_sides)
+    now = run(["git", "rev-parse", "HEAD"]).stdout.strip()
+    if now != head:
+        return f"HEAD moved from {head[:10]} to {now[:10]} while planning; rerun"
+    return None
+
+
+# Flags whose handling exits before main() is reached, plus --full, which
+# selects every leg. None of them combines with the lane-free path.
+NO_LEGS_CONFLICTS = ("--full", "--plan", "--debt", "--post", "--defer", "--settle")
+
+
+def no_legs_conflict(argv):
+    """The first flag in argv that cannot be combined with --no-legs-only,
+    or None."""
+    if "--no-legs-only" not in argv:
+        return None
+    return next((f for f in NO_LEGS_CONFLICTS if f in argv), None)
+
+
 def main(argv):
     full = "--full" in argv
     no_cache = "--no-cache" in argv
@@ -495,7 +543,7 @@ def main(argv):
     print(f"signoff: legs: {', '.join(legs) if legs else '(none needed)'}")
 
     if no_legs_only:
-        refused = no_legs_refusal(legs)
+        refused = no_legs_gate(head, legs, base, jf)
         if refused:
             print(f"signoff: NOT recorded: {refused}")
             return 3
@@ -708,6 +756,71 @@ def self_test():
     report(no_legs_refusal(sorted(gate_scope.ALL_LEGS)) is not None,
            "no-legs-refuses-full-ladder", "the fail-closed every-leg plan refuses")
 
+    # main() --no-legs-only: the refusal must come before the leg cache, the
+    # legs and the record. plan, git, the runner, the status post and the
+    # record dir are stubbed, so this exercises main's ordering, not git.
+    import tempfile
+    import types as _types
+    mod = sys.modules[__name__]
+    stubbed = ("plan", "run", "run_legs", "post_github_status", "report_debt")
+    saved = {n: getattr(mod, n) for n in stubbed}
+    saved_common, saved_ctx = leg_cache.common_dir, leg_cache.Context
+
+    def drive(legs, split_paths, heads, argv=("--no-legs-only",)):
+        state = {"legs_calls": 0, "ctx": 0, "heads": list(heads)}
+        with tempfile.TemporaryDirectory() as td:
+            def fake_run(cmd, **kw):
+                if cmd[:2] == ["git", "rev-parse"]:
+                    h = state["heads"].pop(0) if len(state["heads"]) > 1 else state["heads"][0]
+                    return _types.SimpleNamespace(returncode=0, stdout=h + "\n")
+                if cmd[:2] == ["git", "diff"] and "--no-renames" in cmd:
+                    return _types.SimpleNamespace(returncode=0, stdout="\n".join(split_paths))
+                return _types.SimpleNamespace(returncode=0, stdout="")
+
+            def fake_run_legs(ls, plans, ctx, runner):
+                state["legs_calls"] += 1
+                return {}, True
+
+            def fake_ctx(*a, **k):
+                state["ctx"] += 1
+                raise RuntimeError("leg cache must not be built")
+
+            mod.plan = lambda full=False: (list(legs), ["README.md"], [], "stub plan", "b" * 40)
+            mod.run = fake_run
+            mod.run_legs = fake_run_legs
+            mod.post_github_status = lambda record: None
+            mod.report_debt = lambda: None
+            leg_cache.common_dir = lambda root: td
+            leg_cache.Context = fake_ctx
+            try:
+                rc = main(list(argv))
+            finally:
+                for n, v in saved.items():
+                    setattr(mod, n, v)
+                leg_cache.common_dir, leg_cache.Context = saved_common, saved_ctx
+            records = os.listdir(os.path.join(td, "pr-signoff")) if os.path.isdir(os.path.join(td, "pr-signoff")) else []
+        return rc, state, records
+
+    head = "f" * 40
+    rc, st, recs = drive(["gates-selftest"], ["README.md"], [head])
+    report(rc == 3 and st["legs_calls"] == 0 and st["ctx"] == 0 and not recs,
+           "no-legs-main-refuses-before-legs-and-record",
+           f"rc={rc} legs_calls={st['legs_calls']} ctx={st['ctx']} records={recs}")
+    rc, st, recs = drive([], ["README.md"], [head])
+    report(rc == 0 and st["legs_calls"] == 1 and recs == [f"{head}.json"],
+           "no-legs-main-records-empty-plan", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["src/App.zig", "docs/moved.zig"], [head])
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-rename-out-of-src", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["README.md"], [head, "e" * 40])
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-moved-head", f"rc={rc} records={recs}")
+    report(no_legs_conflict(["--no-legs-only", "--defer", "why"]) == "--defer"
+           and no_legs_conflict(["--no-legs-only", "--full"]) == "--full"
+           and no_legs_conflict(["--no-legs-only"]) is None
+           and no_legs_conflict(["--defer", "why"]) is None,
+           "no-legs-flag-conflicts", "dispatch flags and --full refuse the lane-free path")
+
     # resolve_record: the records dir also holds superseded heads (a stack
     # rebuilt after a fix leaves the old SHAs behind), so a prefix must
     # match exactly one file, ambiguity is an error naming the candidates,
@@ -734,6 +847,10 @@ def self_test():
 
 if __name__ == "__main__":
     argv = sys.argv[1:]
+    conflict = no_legs_conflict(argv)
+    if conflict:
+        print(f"signoff: --no-legs-only cannot be combined with {conflict}")
+        sys.exit(2)
     if "--self-test" in argv:
         sys.exit(self_test())
     if "--plan" in argv:

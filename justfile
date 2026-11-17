@@ -749,11 +749,12 @@ signoff-plan:
     python .agents/scripts/signoff.py --plan
 
 # Signoff for a change whose scope selects no leg (a README, a docs page).
-# It records the same green `signoff` would, and refuses without recording
-# the moment the plan selects any leg, so it is the one signoff recipe that
-# runs outside the build lane (AGENTS.md).
+# It records the same green `signoff` would, and exits 3 without recording
+# the moment the plan selects any leg (a rename's old path counts), so it
+# is the one recipe that records a signoff outside the build lane
+# (AGENTS.md). signoff, signoff-full and signoff-fresh stay in the lane.
 signoff-docs:
-    python .agents/scripts/signoff.py --no-legs-only
+    python .agents/scripts/signoff.py --no-legs-only; exit ($LASTEXITCODE ?? 1)
 
 # Run every leg regardless of what changed, and settle any deferred debt.
 # Legs still carry here; the debt settles only when HEAD contains

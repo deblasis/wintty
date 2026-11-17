@@ -48,7 +48,8 @@ The rules above are upstream's. They do not describe how work lands here.
 Issues and PRs against `deblasis/wintty` are the normal, required workflow:
 branch from `windows`, push the branch, open a PR with `--repo
 deblasis/wintty`, get it reviewed, run `just signoff` green against the
-exact head sha, and merge through `just merge-checked <pr>` by default.
+exact head sha (`just signoff-docs` when the plan selects no leg), and
+merge through `just merge-checked <pr>` by default.
 Push before the signoff: the ladder records against the exact head sha and
 also advertises it as a GitHub status, which can only land once the commit
 exists on GitHub. If the order ever inverts anyway, `just signoff-post
@@ -115,14 +116,17 @@ Who takes which lane:
 
 - You wrap the single-class recipes yourself: `incoda run --queue
   wintty-build --reason "..." -- just test`, and the same for every
-  `test-*` recipe, `test-win`, `build-dll`, `build-dll-release` and
-  `signoff`. They stay lane-free inside because they are cross-platform,
-  and the same recipe has to run unwrapped on a Linux or macOS host.
+  `test-*` recipe, `test-win`, `build-dll`, `build-dll-release`,
+  `signoff`, `signoff-full` and `signoff-fresh`. They stay lane-free
+  inside because they are cross-platform, and the same recipe has to run
+  unwrapped on a Linux or macOS host. `just signoff` itself always goes in
+  the lane, whatever the plan says.
 - `just signoff-docs` runs bare. It is for a change whose scope selects no
   leg (`just signoff-plan` says "(none needed)"), such as a README or docs
   edit: it records the same green `signoff` would, and when the plan
-  selects any leg it exits 3 without running or recording anything. Then
-  run `just signoff` in the lane as above.
+  selects any leg, a rename's old path included, it exits 3 without
+  running or recording anything. Then run `just signoff` in the lane as
+  above.
 - The harness recipes take their lanes themselves, one per phase: `just
   fuzz`, `search-fuzz`, `frame-style-fuzz`, `shader-notice-fuzz`,
   `splash-race` and `theme-matrix` build under `wintty-build`, release it,
