@@ -148,7 +148,9 @@ def _canonical_attr(line):
     """The canonical form of a column-0 attribute line, or None when the
     line is not one: items sorted, spacing and any trailing comment gone.
     `[private, unix]` and `[unix , private]` canonicalize the same,
-    because just reads them the same."""
+    because just reads them the same. A list carrying a quoted string is
+    kept as written: inside the quotes a comma or a space is an
+    argument's text, not spelling."""
     m = _BRACKET_LINE.match(line)
     if m is None:
         return None
@@ -165,11 +167,19 @@ def _canonical_attr(line):
 
 def _gates_platform(line):
     """True when an attribute line's list names a platform, which hides
-    the recipe that follows it from every host it does not match."""
+    the recipe that follows it from every host it does not match.
+
+    Quote-bearing content counts as gating too: the naive comma split
+    cannot find the platform name inside such a line, and a line that
+    turns out not to gate names a recipe the dump can see, so treating it
+    as gating only adds coverage."""
     m = _BRACKET_LINE.match(line)
     if m is None:
         return False
-    items = _attr_items(m.group(1))
+    content = m.group(1)
+    if any(q in content for q in "\"'"):
+        return True
+    items = _attr_items(content)
     return items is not None and any(i in _PLATFORMS for i in items)
 
 
@@ -296,7 +306,8 @@ def justfile_legs(base):
     The one part of the file the dump cannot see is a recipe defined once
     per platform, which appears in the definition valid on this host only;
     those regions are compared from the raw text, every line counting but
-    the trailing blanks and the spelling of readable attribute lines. A
+    the trailing blanks and the spelling of readable attribute lines (a
+    list carrying a quoted string compares as written). A
     missing justfile on either side, one just cannot load, or a gated
     recipe whose attribute or header line this scanner cannot read, forces
     every leg.
@@ -921,6 +932,8 @@ def self_test():
         ("variant-quoted-content-verbatim", b'[script("a,b"), unix]\ntest-win:\n    echo a\n', b'[script("a, b"), unix]\ntest-win:\n    echo a\n', win),
         ("variant-unreadable-attr-suspicious", b'[unix]\ntest-win:\n    echo a\n', b'[doc("a]b"), unix]\ntest-win:\n    echo b\n', every),
         ("variant-mixed-quoted-gate-edited", b'[script("a"), unix]\ntest-win:\n    echo a\n', b'[script("a"), unix]\ntest-win:\n    echo b\n', win),
+        ("variant-single-quoted-verbatim", b"[doc('a,b'), unix]\ntest-win:\n    echo a\n", b"[doc('a, b'), unix]\ntest-win:\n    echo a\n", win),
+        ("variant-quoted-empty-fragment-edited", b'[script("a,,b"), unix]\ntest-win:\n    echo a\n', b'[script("a,,b"), unix]\ntest-win:\n    echo b\n', win),
         ("variant-attr-spelled-edited", b"[unix]\t# note\ntest-win:\n    echo a\n", b"[unix]\t# note\ntest-win:\n    echo b\n", win),
         ("variant-macos-arm", b"no regions", b"[macos]\ntest:\n    echo a\n", zig),
         ("variant-crlf-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\r\ntest-win:\r\n    echo a\r\n", set()),
