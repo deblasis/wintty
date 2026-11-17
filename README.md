@@ -4,13 +4,18 @@
   <br>Wintty
 </h1>
 <p align="center">
-  Ghostty for Windows: a native Windows terminal emulator on the Ghostty core.
+  A libghostty-powered terminal emulator for Windows.
   <br />
-  Wintty runs the same <code>libghostty</code> core with a WinUI 3 shell and a
-  DirectX 12 (GPU) renderer. Wintty Pro adds a terminal multiplexer: sessions
-  that keep running after you close the window.
+  Ghostty on Windows? There is no official Ghostty for Windows, and none is
+  planned: since 1.4.0 the Ghostty project has no Windows app on its roadmap.
+  What does support Windows is <code>libghostty</code>, the core Ghostty is
+  built on. Wintty puts a native Windows app around it: a WinUI 3 shell and a
+  DirectX 12 (GPU) renderer.
   <br />
-  Wintty is an independent project, not affiliated with <a href="https://ghostty.org">Ghostty</a>. We are big fans. Ghostty 1.4.0 dropped Windows from its GUI roadmap and points Windows work at downstream projects built on <code>libghostty</code>. That is what Wintty does.
+  Wintty Pro adds a terminal multiplexer: sessions that keep running after you
+  close the window.
+  <br />
+  Wintty is an independent project, not affiliated with <a href="https://ghostty.org">Ghostty</a>. We are big fans.
   <br />
   <a href="https://wintty.io/?utm_source=gh_readme&utm_content=nav">Website</a>
   ·
@@ -86,8 +91,8 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 
 ## What you get: Ghostty on Windows
 
-- Real terminal emulation on the Zig core Ghostty ships, Kitty graphics
-  protocol included 
+- Real terminal emulation on `libghostty`, the Zig core Ghostty ships, Kitty
+  graphics protocol included
 - A native WinUI 3 shell: vertical tabs, splits, quick terminal, command
   palette, full settings UI, profiles with shell auto-discovery, session
   restore
@@ -97,8 +102,8 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 - A thin C# layer over `ghostty.dll` via P/Invoke, same architecture as macOS
   where Swift wraps the same core
 
-That is the open source build and the Sponsor build: Ghostty's terminal, as a
-Windows application.
+That is the open source build and the Sponsor build: Ghostty's terminal core,
+`libghostty`, as a Windows application.
 
 ## Wintty Pro: a terminal multiplexer for Windows
 
