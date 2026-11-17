@@ -132,24 +132,54 @@ def _recipe_semantics(recipe):
     return r
 
 
-_PLATFORM_ATTR = re.compile(
-    r"^\[\s*(windows|unix|linux|macos)\s*\]\s*(?:#.*)?$")
+_BRACKET_LINE = re.compile(r"^\[([^\]]*)\]\s*(?:#.*)?$")
+_PLATFORMS = frozenset(("windows", "unix", "linux", "macos"))
+
+
+def _attr_items(content):
+    """The comma-separated items of an attribute line's brackets, or None
+    when the content is not a plain list (a string value, a function
+    call). just accepts any spacing around the commas."""
+    items = [item.strip() for item in content.split(",")]
+    return items if all(items) else None
+
+
+def _canonical_attr(line):
+    """The canonical form of a column-0 attribute line, or None when the
+    line is not one: items sorted, spacing and any trailing comment gone.
+    `[private, unix]` and `[unix , private]` canonicalize the same,
+    because just reads them the same."""
+    m = _BRACKET_LINE.match(line)
+    if m is None:
+        return None
+    items = _attr_items(m.group(1))
+    if items is None:
+        return None
+    return "[" + ", ".join(sorted(items)) + "]"
+
+
+def _gates_platform(line):
+    """True when an attribute line's list names a platform, which hides
+    the recipe that follows it from every host it does not match."""
+    m = _BRACKET_LINE.match(line)
+    if m is None:
+        return False
+    items = _attr_items(m.group(1))
+    return items is not None and any(i in _PLATFORMS for i in items)
 
 
 def _normalized_region(lines):
     """A region's lines reduced only by what cannot change meaning: the
-    carriage return of a CRLF ending, blank body lines, and the spelling
-    of the platform attribute line. Everything else counts: in a
-    definition this host cannot parse, nothing can tell a comment from an
-    interpreter's payload."""
+    carriage return of a CRLF ending, trailing blank lines, and the
+    spelling, order and trailing comment of attribute lines. Everything
+    else counts, comments included: in a definition this host cannot
+    parse, nothing can tell a comment from an interpreter's payload."""
     out = []
     for raw in lines:
         line = raw[:-1] if raw.endswith("\r") else raw
-        m = _PLATFORM_ATTR.match(line)
-        if m:
-            out.append(f"[{m.group(1)}]")
-            continue
-        if not line.strip():
+        canonical = _canonical_attr(line)
+        if canonical is not None:
+            out.append(canonical)
             continue
         out.append(line)
     while out and not out[-1]:
@@ -158,21 +188,24 @@ def _normalized_region(lines):
 
 
 def _variant_regions(text):
-    """{recipe name: [region text, ...]} for the platform-attribute regions
-    of a justfile: from a column-0 [windows]/[unix]/[linux]/[macos] line
-    through the recipe header and body that follow it.
+    """(regions, suspicious) for a justfile. regions maps a recipe name to
+    its platform-gated regions: from a column-0 attribute line whose list
+    names a platform, through any stacked attribute lines, the recipe
+    header and the body that follow. suspicious is True when a platform
+    attribute is followed by a header line this scanner cannot read: the
+    region is real (the host dump cannot see it) but its name is unknown,
+    so the caller must force every leg rather than guess.
 
-    just's dump shows each recipe in the definition valid on the host that
-    dumped it, so these regions are the one part of the file that reading
-    cannot see. The scan is lexical and deliberately dumb, and the
-    normalization is as blind as it can be while keeping every real edit:
-    a comment or a line-ending flip inside a region must not cost anything,
-    and anything else in it might be the only copy of a change."""
+    The dump shows each recipe in the definition valid on the host that
+    dumped it, so these regions are the one part of the file it cannot
+    see. The scan is lexical and deliberately dumb; the normalization is
+    as blind as it can be while keeping every real edit."""
     regions = {}
+    suspicious = False
     lines = text.split("\n")
     i = 0
     while i < len(lines):
-        if not _PLATFORM_ATTR.match(lines[i]):
+        if not lines[i] or not _gates_platform(lines[i]):
             i += 1
             continue
         start = i
@@ -182,12 +215,14 @@ def _variant_regions(text):
         header = None
         while i < len(lines):
             line = lines[i]
-            if line.startswith("["):
+            if line.startswith("[") and not line[0].isspace():
                 i += 1
                 continue
             if line and not line[0].isspace():
                 m = gate_scope.RECIPE_HEADER.match(line)
                 header = m.group(1) if m else None
+                if header is None:
+                    suspicious = True
                 i += 1
             break
         if header is None:
@@ -195,7 +230,7 @@ def _variant_regions(text):
         while i < len(lines) and (not lines[i] or lines[i][0].isspace()):
             i += 1
         regions.setdefault(header, []).append(_normalized_region(lines[start:i]))
-    return regions
+    return regions, suspicious
 
 
 def _just_semantics(path):
@@ -282,8 +317,10 @@ def justfile_legs(base):
         for name in set(old_recipes) | set(new_recipes):
             if old_recipes.get(name) != new_recipes.get(name):
                 legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
-    old_regions = _variant_regions(old_blob.decode("utf-8", "surrogateescape"))
-    new_regions = _variant_regions(new_blob.decode("utf-8", "surrogateescape"))
+    old_regions, old_suspicious = _variant_regions(old_blob.decode("utf-8", "surrogateescape"))
+    new_regions, new_suspicious = _variant_regions(new_blob.decode("utf-8", "surrogateescape"))
+    if old_suspicious or new_suspicious:
+        return every
     for name in set(old_regions) | set(new_regions):
         if old_regions.get(name) != new_regions.get(name):
             legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
@@ -829,8 +866,8 @@ def self_test():
         ("unparsable-old", b"x", b"y", None, sem(), every),
         ("unparsable-new", b"x", b"y", sem(), None, every),
         ("equal", b"x", b"y", same, sem({"test": {"body": ["a"]}, "hello": {}}), set()),
-        ("source-path-stripped", b"x", b"y", sem({"test": {"body": ["a"]}, "source": "tmp1"}),
-         sem({"test": {"body": ["a"]}, "source": "tmp2"}), set()),
+        ("source-path-stripped", b"x", b"y", sem({"test": {"body": ["a"]}}, source="tmp1"),
+         sem({"test": {"body": ["a"]}}, source="tmp2"), set()),
         ("settings-change", b"x", b"y", sem(), sem(settings={"x": 1}), every),
         ("assignment-change", b"x", b"y", sem(), sem(assignments={"a": 1}), every),
         ("default-recipe-change", b"x", b"y", sem(), sem(first="other"), every),
@@ -860,6 +897,13 @@ def self_test():
         ("variant-unmapped", b"no regions", b"[unix]\nhello:\n    echo a\n", set()),
         ("variant-comment-counts", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    # note\n    echo a\n", win),
         ("variant-attr-spelling-free", b"[unix] # note\ntest-win:\n    echo a\n", b"[ unix ]\ntest-win:\n    echo a\n", set()),
+        ("variant-attr-flip-counts", b"[unix]\ntest-win:\n    echo a\n", b"[linux]\ntest-win:\n    echo a\n", win),
+        ("variant-comma-attr-edited", b"[private, unix]\ntest-win:\n    echo a\n", b"[private, unix]\ntest-win:\n    echo b\n", win),
+        ("variant-comma-attr-order-free", b"[private, unix]\ntest-win:\n    echo a\n", b"[unix , private]\ntest-win:\n    echo a\n", set()),
+        ("variant-attr-above-removed", b"[private]\n[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    echo a\n", win),
+        ("variant-stacked-attrs-edited", b"[linux]\n[unix]\ntest-win:\n    echo a\n", b"[linux]\n[unix]\ntest-win:\n    echo b\n", win),
+        ("variant-unreadable-header-suspicious", b'[unix]\nrec x="a\\"b":\n    echo a\n', b'[unix]\nrec x="a\\"b":\n    echo b\n', every),
+        ("variant-inner-blank-counts", b"[unix]\ntest-win:\n    echo a\n\n    echo b\n", b"[unix]\ntest-win:\n    echo a\n    echo b\n", win),
         ("variant-attr-spelled-edited", b"[unix]\t# note\ntest-win:\n    echo a\n", b"[unix]\t# note\ntest-win:\n    echo b\n", win),
         ("variant-macos-arm", b"no regions", b"[macos]\ntest:\n    echo a\n", zig),
         ("variant-crlf-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\r\ntest-win:\r\n    echo a\r\n", set()),
