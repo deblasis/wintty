@@ -118,6 +118,11 @@ Who takes which lane:
   `test-*` recipe, `test-win`, `build-dll`, `build-dll-release` and
   `signoff`. They stay lane-free inside because they are cross-platform,
   and the same recipe has to run unwrapped on a Linux or macOS host.
+- `just signoff-docs` runs bare. It is for a change whose scope selects no
+  leg (`just signoff-plan` says "(none needed)"), such as a README or docs
+  edit: it records the same green `signoff` would, and when the plan
+  selects any leg it exits 3 without running or recording anything. Then
+  run `just signoff` in the lane as above.
 - The harness recipes take their lanes themselves, one per phase: `just
   fuzz`, `search-fuzz`, `frame-style-fuzz`, `shader-notice-fuzz`,
   `splash-race` and `theme-matrix` build under `wintty-build`, release it,

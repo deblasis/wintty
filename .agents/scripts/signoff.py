@@ -38,6 +38,9 @@ never as "the window did not move".
 Usage: just signoff          (scoped to what changed, greens carried)
        just signoff-full     (every leg, whatever changed)
        just signoff-fresh    (scoped, nothing carried)
+       just signoff-docs     (records only when no leg is selected;
+                              refuses otherwise, so it may run outside
+                              the build lane)
 """
 
 import datetime
@@ -457,9 +460,29 @@ def _run_command(cmd):
         return 127
 
 
+def no_legs_refusal(legs):
+    """Why a --no-legs-only run must not proceed, or None when it may.
+
+    AGENTS.md has every signoff that runs a leg wrapped in the build lane.
+    A change whose scope selects no leg (a README, a docs page) runs
+    nothing heavy, so making it queue for build slots behind an exclusive
+    holder costs wall time and protects nothing. --no-legs-only is the
+    entry point that may be run without the lane, and this check is what
+    keeps it honest: the moment the plan selects any leg, it refuses
+    before running or recording anything, so the lane-free form cannot
+    become a way to run tests outside the lane.
+    """
+    if not legs:
+        return None
+    return (f"the plan selects {', '.join(legs)}, so this signoff runs tests and "
+            "belongs in the build lane: incoda run --queue wintty-build "
+            '--reason "..." -- just signoff')
+
+
 def main(argv):
     full = "--full" in argv
     no_cache = "--no-cache" in argv
+    no_legs_only = "--no-legs-only" in argv
     head = run(["git", "rev-parse", "HEAD"]).stdout.strip()
     dirty = run(["git", "status", "--porcelain"]).stdout.strip()
     if dirty:
@@ -470,6 +493,12 @@ def main(argv):
     legs, paths, jf, reason, base = plan(full)
     print(f"signoff: {reason}")
     print(f"signoff: legs: {', '.join(legs) if legs else '(none needed)'}")
+
+    if no_legs_only:
+        refused = no_legs_refusal(legs)
+        if refused:
+            print(f"signoff: NOT recorded: {refused}")
+            return 3
 
     plans, ctx = None, None
     if legs:
@@ -667,6 +696,17 @@ def self_test():
     results, ok = run_legs(["zig-tests"], {"zig-tests": green}, None, fake_runner)
     report(ok and calls[-1] == "test" and "carried" not in results["zig-tests"],
            "run-legs-plans-without-context-run", str(calls))
+
+    # no_legs_refusal: the lane-free entry point proceeds only on an empty
+    # leg list. Any selected leg, a single one or the whole ladder (which
+    # is also what a failed scope computation falls back to), refuses and
+    # names the lane form to use instead.
+    report(no_legs_refusal([]) is None, "no-legs-proceeds", "an empty plan may record")
+    one = no_legs_refusal(["gates-selftest"])
+    report(one is not None and "gates-selftest" in one and "wintty-build" in one,
+           "no-legs-refuses-one-leg", str(one))
+    report(no_legs_refusal(sorted(gate_scope.ALL_LEGS)) is not None,
+           "no-legs-refuses-full-ladder", "the fail-closed every-leg plan refuses")
 
     # resolve_record: the records dir also holds superseded heads (a stack
     # rebuilt after a fix leaves the old SHAs behind), so a prefix must
