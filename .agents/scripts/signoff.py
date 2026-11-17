@@ -149,6 +149,15 @@ def justfile_legs(base):
     return legs
 
 
+def scoped_legs(base, paths):
+    """(legs, justfile_legs) a path list needs against `base`. The single
+    place a path list becomes legs, so every caller that scopes a list,
+    whatever produced it, applies the same rules, the justfile's
+    per-recipe reading included."""
+    jf = sorted(justfile_legs(base)) if "justfile" in paths else []
+    return gate_scope.required_legs(paths, justfile_legs=jf), jf
+
+
 def plan(full=False):
     """Returns (legs, paths, justfile_legs, reason, base). `base` is the
     merge base with origin/windows, recorded in the payload so the merge
@@ -165,8 +174,7 @@ def plan(full=False):
         return every, None, every, "could not list changed paths", base
     if not paths:
         return every, [], every, "no changes against the base; nothing to scope", base
-    jf = sorted(justfile_legs(base)) if "justfile" in paths else []
-    legs = gate_scope.required_legs(paths, justfile_legs=jf)
+    legs, jf = scoped_legs(base, paths)
     unknown = gate_scope.unknown_paths(paths)
     if unknown:
         reason = f"unclassified path(s) force every leg: {', '.join(unknown[:5])}"
@@ -479,31 +487,36 @@ def no_legs_refusal(legs):
             '--reason "..." -- just signoff')
 
 
-def legs_without_renames(base, jf):
+def legs_without_renames(base):
     """Legs the change needs when every rename counts as a delete of its
     old path plus an add of its new one, or None if git cannot say.
 
     `git diff --name-only` (and GitHub's PR file list, which the merge gate
     compares against) report a rename by its new path only, so moving a
     file out of src/ into docs/ plans no leg even though src/ lost a file.
-    The lane-free path refuses on that too; the record itself keeps the
-    regular path list, so it stays identical to what `just signoff` writes.
+    The split list goes through the same scoping as the plan, so a renamed
+    justfile is read as the justfile it was. The lane-free path refuses on
+    any of it; the record itself keeps the regular path list, so it stays
+    identical to what `just signoff` writes.
     """
     out = run(["git", "diff", "--no-renames", "--name-only", f"{base}...HEAD"])
     if out.returncode != 0:
         return None
     paths = sorted(p.strip().replace("\\", "/") for p in out.stdout.splitlines() if p.strip())
-    return gate_scope.required_legs(paths, justfile_legs=jf)
+    return scoped_legs(base, paths)[0]
 
 
-def no_legs_gate(head, legs, base, jf):
+def no_legs_gate(head, legs, base):
     """Every refusal of the lane-free path, in order, or None to proceed:
-    a plan with legs, a rename whose old side needs legs, a split diff git
-    cannot produce, and a HEAD that moved while the plan was computed."""
+    an unknown HEAD, a plan with legs, a rename whose old side needs legs,
+    a split diff git cannot produce, and a HEAD that moved while the plan
+    was computed."""
+    if not head:
+        return "could not resolve HEAD"
     refused = no_legs_refusal(legs)
     if refused:
         return refused
-    both_sides = legs_without_renames(base, jf)
+    both_sides = legs_without_renames(base)
     if both_sides is None:
         return "could not list the changed paths with renames split; run `just signoff` in the build lane"
     if both_sides:
@@ -520,8 +533,12 @@ NO_LEGS_CONFLICTS = ("--full", "--plan", "--debt", "--post", "--defer", "--settl
 
 
 def no_legs_conflict(argv):
-    """The first flag in argv that cannot be combined with --no-legs-only,
-    or None."""
+    """The first argument that cannot go with --no-legs-only, or None. A
+    misspelling such as `--no-legs-only=1` counts: otherwise it is ignored
+    and the run turns into a plain signoff that runs its legs."""
+    misspelt = next((a for a in argv if a.startswith("--no-legs-only") and a != "--no-legs-only"), None)
+    if misspelt:
+        return misspelt
     if "--no-legs-only" not in argv:
         return None
     return next((f for f in NO_LEGS_CONFLICTS if f in argv), None)
@@ -543,7 +560,7 @@ def main(argv):
     print(f"signoff: legs: {', '.join(legs) if legs else '(none needed)'}")
 
     if no_legs_only:
-        refused = no_legs_gate(head, legs, base, jf)
+        refused = no_legs_gate(head, legs, base)
         if refused:
             print(f"signoff: NOT recorded: {refused}")
             return 3
@@ -766,7 +783,7 @@ def self_test():
     saved = {n: getattr(mod, n) for n in stubbed}
     saved_common, saved_ctx = leg_cache.common_dir, leg_cache.Context
 
-    def drive(legs, split_paths, heads, argv=("--no-legs-only",)):
+    def drive(legs, split_paths, heads, argv=("--no-legs-only",), split_rc=0):
         state = {"legs_calls": 0, "ctx": 0, "heads": list(heads)}
         with tempfile.TemporaryDirectory() as td:
             def fake_run(cmd, **kw):
@@ -774,7 +791,13 @@ def self_test():
                     h = state["heads"].pop(0) if len(state["heads"]) > 1 else state["heads"][0]
                     return _types.SimpleNamespace(returncode=0, stdout=h + "\n")
                 if cmd[:2] == ["git", "diff"] and "--no-renames" in cmd:
-                    return _types.SimpleNamespace(returncode=0, stdout="\n".join(split_paths))
+                    return _types.SimpleNamespace(returncode=split_rc, stdout="\n".join(split_paths))
+                # A justfile that is gone at HEAD (renamed or deleted): its
+                # diff has a removed line and HEAD has no blob for it.
+                if cmd[:2] == ["git", "diff"] and "--unified=0" in cmd:
+                    return _types.SimpleNamespace(returncode=0, stdout="@@ -1 +0,0 @@\n-recipe:\n")
+                if cmd[:2] == ["git", "show"] and cmd[2].startswith("HEAD:"):
+                    return _types.SimpleNamespace(returncode=128, stdout="")
                 return _types.SimpleNamespace(returncode=0, stdout="")
 
             def fake_run_legs(ls, plans, ctx, runner):
@@ -815,11 +838,21 @@ def self_test():
     rc, st, recs = drive([], ["README.md"], [head, "e" * 40])
     report(rc == 3 and st["legs_calls"] == 0 and not recs,
            "no-legs-main-refuses-moved-head", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["justfile", "justfile-notes.md"], [head])
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-renamed-justfile", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["README.md"], [head], split_rc=128)
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-failed-split-diff", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["README.md"], [""])
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-unknown-head", f"rc={rc} records={recs}")
     report(no_legs_conflict(["--no-legs-only", "--defer", "why"]) == "--defer"
            and no_legs_conflict(["--no-legs-only", "--full"]) == "--full"
+           and no_legs_conflict(["--no-legs-only=1"]) == "--no-legs-only=1"
            and no_legs_conflict(["--no-legs-only"]) is None
            and no_legs_conflict(["--defer", "why"]) is None,
-           "no-legs-flag-conflicts", "dispatch flags and --full refuse the lane-free path")
+           "no-legs-flag-conflicts", "dispatch flags, --full and misspellings refuse the lane-free path")
 
     # resolve_record: the records dir also holds superseded heads (a stack
     # rebuilt after a fix leaves the old SHAs behind), so a prefix must
@@ -849,7 +882,7 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     conflict = no_legs_conflict(argv)
     if conflict:
-        print(f"signoff: --no-legs-only cannot be combined with {conflict}")
+        print(f"signoff: {conflict} is not accepted with or in place of --no-legs-only")
         sys.exit(2)
     if "--self-test" in argv:
         sys.exit(self_test())
