@@ -122,11 +122,18 @@ def justfile_legs(base):
     switched off. Both sides of the diff are inspected so a deleted recipe
     cannot slip through by leaving no new lines.
     """
-    diff = run(["git", "diff", "--unified=0", base, "HEAD", "--", "justfile"])
+    # Plain text whatever the user's git config says: forced colour, an
+    # external diff driver or a `-diff` attribute would all hide the hunk
+    # headers this reads, and a diff with no readable header must not pass
+    # as a change that touches no recipe.
+    diff = run(["git", "diff", "--no-color", "--no-ext-diff", "--text", "--unified=0",
+                base, "HEAD", "--", "justfile"])
     if diff.returncode != 0:
         return set(gate_scope.ALL_LEGS)
     if not diff.stdout.strip():
         return set()
+    if not (_hunk_lines(diff.stdout, "+") or _hunk_lines(diff.stdout, "-")):
+        return set(gate_scope.ALL_LEGS)
 
     new_content = run(["git", "show", "HEAD:justfile"])
     old_content = run(["git", "show", f"{base}:justfile"])
@@ -823,6 +830,22 @@ def self_test():
                 leg_cache.common_dir, leg_cache.Context = saved_common, saved_ctx
             records = os.listdir(os.path.join(td, "pr-signoff")) if os.path.isdir(os.path.join(td, "pr-signoff")) else []
         return rc, state, records
+
+    # justfile_legs: a diff that has content but no hunk header git's plain
+    # format would print (colour codes, an external driver's output, a
+    # binary notice) selects every leg instead of none.
+    def fake_jf_run(out):
+        return lambda cmd, **kw: _types.SimpleNamespace(returncode=0, stdout=out)
+    try:
+        mod.run = fake_jf_run("\x1b[36m@@ -3 +3 @@\x1b[m\n-old\n+new\n")
+        coloured = justfile_legs("b" * 40)
+        mod.run = fake_jf_run("Binary files a/justfile and b/justfile differ\n")
+        binary = justfile_legs("b" * 40)
+    finally:
+        mod.run = saved["run"]
+    report(coloured == set(gate_scope.ALL_LEGS) and binary == set(gate_scope.ALL_LEGS),
+           "justfile-unreadable-diff-forces-all",
+           f"coloured={sorted(coloured)} binary={sorted(binary)}")
 
     head = "f" * 40
     rc, st, recs = drive(["gates-selftest"], ["README.md"], [head])
