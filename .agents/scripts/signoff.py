@@ -146,8 +146,8 @@ def justfile_legs(base):
     on either side, or one just cannot load, forces every leg.
     """
     every = set(gate_scope.ALL_LEGS)
-    old_blob = _just_blob(f"{base}:justfile")
-    new_blob = _just_blob("HEAD:justfile")
+    old_blob = _just_blob(base)
+    new_blob = _just_blob("HEAD")
     if old_blob is None or new_blob is None:
         return every
     with tempfile.TemporaryDirectory() as td:
