@@ -46,9 +46,9 @@ LEG_COMMANDS = {
     LEG_RELEASE_GATE: ("just", "release-gate-check"),
 }
 
-# A justfile recipe header, as the hasher of each recipe's text must see
-# signoff.py maps a changed line to the recipe that owns it, leg_cache.py
-# hashes each recipe's text. Parameters may be bare (`pr-gate pr:`),
+# A justfile recipe header, as leg_cache.py must see it when it hashes
+# each recipe's text, and as the platform-region scan in signoff.py reads
+# it. Parameters may be bare (`pr-gate pr:`),
 # defaulted (`splash-race args="":`) or variadic (`+args`), and the
 # trailing colon must not be the `:=` of a `set` directive or an
 # assignment. Group 1 is the name, group 3 the dependency list.
