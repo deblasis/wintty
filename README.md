@@ -135,8 +135,9 @@ installer.
 
 ### Is it free?
 
-Yes. The source is MIT and builds the same app. Sponsoring pays for
-convenience: a signed installer that updates itself.
+Yes. The source is MIT and builds the same app as the Sponsor installer.
+Sponsoring pays for a signed installer that updates itself. Pro is paid and
+adds features.
 
 ### Do I need WSL?
 
