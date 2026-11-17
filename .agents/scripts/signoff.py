@@ -117,45 +117,40 @@ def _strip_where(value, name_keyed=False):
 def _recipe_semantics(recipe):
     """A recipe's dump with comment-bearing fields removed: `doc` (the doc
     comment above the recipe) and body lines that are nothing but a
-    comment, in a script recipe every line but the first, which names the
-    interpreter. A `#` line elsewhere in a script is a comment to the
-    interpreter that reads it; one hidden inside a quoted string is the
-    residual risk of this strip, and it over-selects nothing."""
+    comment, and only in a recipe just parses line by line on this host.
+    A script recipe's body is text an interpreter reads, where a `#` line
+    can be payload, so nothing is stripped there but the doc."""
     if not isinstance(recipe, dict):
         return recipe
     r = {k: v for k, v in recipe.items() if k != "doc"}
     body = r.get("body")
-    if isinstance(body, list):
-        keep_first = bool(r.get("shebang"))
-        r["body"] = [line for i, line in enumerate(body)
-                     if (keep_first and i == 0)
-                     or not (isinstance(line, list) and len(line) == 1
+    if isinstance(body, list) and not r.get("shebang"):
+        r["body"] = [line for line in body
+                     if not (isinstance(line, list) and len(line) == 1
                              and isinstance(line[0], str)
                              and line[0].lstrip().startswith("#"))]
     return r
 
 
-_PLATFORM_ATTR = re.compile(r"^\[(windows|unix|linux|macos)\]\s*$")
+_PLATFORM_ATTR = re.compile(
+    r"^\[\s*(windows|unix|linux|macos)\s*\]\s*(?:#.*)?$")
 
 
 def _normalized_region(lines):
-    """A region's lines reduced to what a change in meaning can touch:
-    indented comment lines (a shebang first body line is not one), blank
-    body lines and the carriage return of a CRLF ending never count."""
+    """A region's lines reduced only by what cannot change meaning: the
+    carriage return of a CRLF ending, blank body lines, and the spelling
+    of the platform attribute line. Everything else counts: in a
+    definition this host cannot parse, nothing can tell a comment from an
+    interpreter's payload."""
     out = []
-    body = 0
     for raw in lines:
         line = raw[:-1] if raw.endswith("\r") else raw
-        if line and not line[0].isspace():
-            out.append(line)
-            body = 0
+        m = _PLATFORM_ATTR.match(line)
+        if m:
+            out.append(f"[{m.group(1)}]")
             continue
-        stripped = line.strip()
-        if not stripped:
+        if not line.strip():
             continue
-        if stripped.startswith("#") and not (body == 0 and stripped.startswith("#!")):
-            continue
-        body += 1
         out.append(line)
     while out and not out[-1]:
         out.pop()
@@ -181,6 +176,8 @@ def _variant_regions(text):
             i += 1
             continue
         start = i
+        while start > 0 and lines[start - 1].startswith("["):
+            start -= 1
         i += 1
         header = None
         while i < len(lines):
@@ -236,9 +233,11 @@ def justfile_legs(base):
     Editing the recipe a leg runs through invalidates that leg only; a
     change outside every recipe (a setting, an assignment) can reach any
     of them and forces all. Adding an unrelated recipe forces nothing.
-    Changes that only alter comments never count, since a guard that
-    demands an hour of tests for a typo fix is the kind that gets
-    switched off.
+    Comment lines and doc comments are free where just parses them as
+    comments; a script's body and a platform region keep every line,
+    because there a `#` line can be payload; a comment at the end of a
+    code line counts. A guard that demands an hour of tests for a typo
+    fix is the kind that gets switched off.
 
     Both versions are read by just itself (`--dump`, which parses without
     executing) and compared as JSON, comment fields stripped first. Every
@@ -830,7 +829,8 @@ def self_test():
         ("unparsable-old", b"x", b"y", None, sem(), every),
         ("unparsable-new", b"x", b"y", sem(), None, every),
         ("equal", b"x", b"y", same, sem({"test": {"body": ["a"]}, "hello": {}}), set()),
-        ("source-path-stripped", b"x", b"y", same, sem({"test": {"body": ["a"]}, "hello": {}}), set()),
+        ("source-path-stripped", b"x", b"y", sem({"test": {"body": ["a"]}, "source": "tmp1"}),
+         sem({"test": {"body": ["a"]}, "source": "tmp2"}), set()),
         ("settings-change", b"x", b"y", sem(), sem(settings={"x": 1}), every),
         ("assignment-change", b"x", b"y", sem(), sem(assignments={"a": 1}), every),
         ("default-recipe-change", b"x", b"y", sem(), sem(first="other"), every),
@@ -838,6 +838,8 @@ def self_test():
         ("doc-comment-change", b"x", b"y", sem({"test": {"doc": "a"}}), sem({"test": {"doc": "b"}}), set()),
         ("body-comment-change", b"x", b"y", sem({"test": {"body": [["# note"], ["zig build test"]]}}), sem({"test": {"body": [["zig build test"]]}}), set()),
         ("shebang-flip", b"x", b"y", sem({"test": {"shebang": True, "body": [["#!/bin/sh"]]}}), sem({"test": {"shebang": False, "body": [["#!/bin/sh"]]}}), zig),
+        ("script-comment-line-counts", b"x", b"y", sem({"test": {"shebang": True, "body": [["#!/bin/sh"], ["# payload"]], "doc": "d"}}), sem({"test": {"shebang": True, "body": [["#!/bin/sh"], ["# payload 2"]], "doc": "d"}}), zig),
+        ("script-interpreter-line-counts", b"x", b"y", sem({"test": {"shebang": True, "body": [["#!/bin/sh"], ["echo a"]]}}), sem({"test": {"shebang": True, "body": [["#!/usr/bin/env python3"], ["echo a"]]}}), zig),
         ("assignment-named-line", b"x", b"y", sem(assignments={"line": "1"}), sem(assignments={"line": "2"}), every),
         ("recipe-added", b"x", b"y", sem({"hello": {}}), sem({"hello": {}, "test-win": {}}), win),
         ("recipe-removed", b"x", b"y", sem({"test": {}, "hello": {}}), sem({"hello": {}}), zig),
@@ -856,7 +858,10 @@ def self_test():
         ("variant-body-edited", b"no regions", b"[unix]\ntest-win:\n    echo a\n", win),
         ("variant-added", b"no regions", b"[linux]\ntest:\n    echo a\n", zig),
         ("variant-unmapped", b"no regions", b"[unix]\nhello:\n    echo a\n", set()),
-        ("variant-comment-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    # note\n    echo a\n", set()),
+        ("variant-comment-counts", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    # note\n    echo a\n", win),
+        ("variant-attr-spelling-free", b"[unix] # note\ntest-win:\n    echo a\n", b"[ unix ]\ntest-win:\n    echo a\n", set()),
+        ("variant-attr-spelled-edited", b"[unix]\t# note\ntest-win:\n    echo a\n", b"[unix]\t# note\ntest-win:\n    echo b\n", win),
+        ("variant-macos-arm", b"no regions", b"[macos]\ntest:\n    echo a\n", zig),
         ("variant-crlf-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\r\ntest-win:\r\n    echo a\r\n", set()),
         ("variant-shebang-counts", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    #!/bin/sh\n    echo a\n", win),
         ("variant-indent-noise-ignored", b"[unix]\ntest-win:\n    echo a\n\n", b"[unix]\ntest-win:\n    echo a\n", set()),
