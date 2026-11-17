@@ -15,7 +15,7 @@
   Wintty Pro adds a terminal multiplexer: sessions that keep running after you
   close the window.
   <br />
-  Stuck on DirectX 11? No problem, Wintty Pro Legacy has you covered.
+  Stuck on DirectX 11? No problem, <a href="https://wintty.io/docs/install/?utm_source=gh_readme&utm_content=pro-legacy">Wintty Pro Legacy</a> has you covered.
   <br />
   Wintty is an independent project, not affiliated with <a href="https://ghostty.org">Ghostty</a>. We are big fans.
   <br />
