@@ -6,11 +6,11 @@
 <p align="center">
   A libghostty-powered terminal emulator for Windows.
   <br />
-  Ghostty on Windows? There is no official Ghostty for Windows, and none is
-  planned: since 1.4.0 the Ghostty project has no Windows app on its roadmap.
-  What does support Windows is <code>libghostty</code>, the core Ghostty is
-  built on. Wintty puts a native Windows app around it: a WinUI 3 shell and a
-  DirectX 12 (GPU) renderer.
+  Ghostty on Windows? There is no official Ghostty for Windows: version 1.4.0
+  dropped the roadmap for Windows support in the Ghostty GUI.
+  <code>libghostty</code>, the core of Ghostty, fully supports Windows. Wintty
+  is the native Windows app around it: a WinUI 3 shell and a DirectX 12 (GPU)
+  renderer.
   <br />
   Wintty Pro adds a terminal multiplexer: sessions that keep running after you
   close the window.
@@ -41,8 +41,9 @@ and download it. You get both `stable` and `tip` channels and the
 sponsors-only Discord channel; Pro adds more
 ([tiers](https://wintty.io/docs/install/tiers/?utm_source=gh_readme)).
 
-The OSS and the Sponsor versions require Windows 11, x64, and a DirectX 12
-feature-level-12.0 GPU. These builds have no software fallback, so VMs without
+The OSS and the Sponsor versions require Windows 10 or 11 and a DirectX 12
+feature-level-12.0 GPU. x64 is the main build; Sponsor and Pro also ship an
+experimental ARM64 build. These builds have no software fallback, so VMs without
 GPU passthrough and Remote Desktop sessions will not start them.
 
 The Pro Legacy tier exists for exactly those boxes, shipping a DirectX 11 renderer
@@ -75,7 +76,7 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 > merges are gated on a green local `just signoff` run against the exact
 > commit, so the occasional bad commit can land between batches. For a
 > calmer ride, build a tagged source snapshot instead of the branch tip
-> (browse tags on the releases page).
+> ([browse tags](https://github.com/deblasis/wintty/tags)).
 
 > [!IMPORTANT]
 > ### An independent soft fork of Ghostty
@@ -107,9 +108,9 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 That is the open source build and the Sponsor build: Ghostty's terminal core,
 `libghostty`, as a Windows application.
 
-## Wintty Pro: a terminal multiplexer for Windows
+## Wintty Pro: a native terminal multiplexer for Windows
 
-Pro turns the terminal into a multiplexer, with no WSL and no tmux to set up:
+Persistent terminal sessions on Windows, tmux-style, without WSL:
 
 - [Persistent sessions](https://wintty.io/docs/features/persistent-sessions/?utm_source=gh_readme):
   shells keep running after you close the app, and you reattach to them later
@@ -119,6 +120,27 @@ Pro turns the terminal into a multiplexer, with no WSL and no tmux to set up:
 
 The full per-tier feature matrix:
 [Wintty tiers and features](https://wintty.io/docs/install/tiers/?utm_source=gh_readme).
+
+## FAQ
+
+### Does Ghostty work on Windows?
+
+Not as an official app. Wintty runs Ghostty's core, `libghostty`, as a native
+Windows app.
+
+### How do I get Ghostty on Windows?
+
+Build Wintty from source for free, or sponsor any amount for the signed
+installer.
+
+### Is it free?
+
+Yes. The source is MIT and builds the same app. Sponsoring pays for
+convenience: a signed installer that updates itself.
+
+### Do I need WSL?
+
+No. Wintty is a native Windows app. WSL distros open as profiles.
 
 ## Architecture in one paragraph
 
@@ -133,7 +155,8 @@ so embedders should expect some churn. .NET examples live in
 
 ## Roadmap
 
-The full issue tracker is the real roadmap.
+Open source work is tracked in the
+[issue tracker](https://github.com/deblasis/wintty/issues).
 
 ## Sponsors
 
