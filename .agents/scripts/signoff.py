@@ -152,7 +152,12 @@ def _canonical_attr(line):
     m = _BRACKET_LINE.match(line)
     if m is None:
         return None
-    items = _attr_items(m.group(1))
+    content = m.group(1)
+    if any(q in content for q in "\"'"):
+        # Quote-bearing content compares verbatim: a comma or a space
+        # inside a string is an argument's text, not spelling.
+        return "[" + content + "]"
+    items = _attr_items(content)
     if items is None:
         return None
     return "[" + ", ".join(sorted(items)) + "]"
@@ -192,9 +197,10 @@ def _variant_regions(text):
     its platform-gated regions: from a column-0 attribute line whose list
     names a platform, through any stacked attribute lines, the recipe
     header and the body that follow. suspicious is True when a platform
-    attribute is followed by a header line this scanner cannot read: the
-    region is real (the host dump cannot see it) but its name is unknown,
-    so the caller must force every leg rather than guess.
+    attribute is followed by a header line this scanner cannot read, or an
+    attribute line appears that this scanner cannot read at all: the
+    region is real (the host dump cannot see it) but its name or its gate
+    is unknown, so the caller must force every leg rather than guess.
 
     The dump shows each recipe in the definition valid on the host that
     dumped it, so these regions are the one part of the file it cannot
@@ -205,7 +211,12 @@ def _variant_regions(text):
     lines = text.split("\n")
     i = 0
     while i < len(lines):
-        if not lines[i] or not _gates_platform(lines[i]):
+        line = lines[i]
+        if line.startswith("[") and _canonical_attr(line) is None:
+            # An attribute line this scanner cannot read may carry a
+            # platform gate it cannot see; distrust it rather than skip.
+            suspicious = True
+        if not line or not _gates_platform(line):
             i += 1
             continue
         start = i
@@ -215,7 +226,7 @@ def _variant_regions(text):
         header = None
         while i < len(lines):
             line = lines[i]
-            if line.startswith("[") and not line[0].isspace():
+            if line.startswith("["):
                 i += 1
                 continue
             if line and not line[0].isspace():
@@ -284,8 +295,11 @@ def justfile_legs(base):
 
     The one part of the file the dump cannot see is a recipe defined once
     per platform, which appears in the definition valid on this host only;
-    those regions are compared from the raw text. A missing justfile on
-    either side, or one just cannot load, forces every leg.
+    those regions are compared from the raw text, every line counting but
+    the trailing blanks and the spelling of readable attribute lines. A
+    missing justfile on either side, one just cannot load, or a gated
+    recipe whose attribute or header line this scanner cannot read, forces
+    every leg.
     """
     every = set(gate_scope.ALL_LEGS)
     old_blob = _just_blob(base)
@@ -904,6 +918,9 @@ def self_test():
         ("variant-stacked-attrs-edited", b"[linux]\n[unix]\ntest-win:\n    echo a\n", b"[linux]\n[unix]\ntest-win:\n    echo b\n", win),
         ("variant-unreadable-header-suspicious", b'[unix]\nrec x="a\\"b":\n    echo a\n', b'[unix]\nrec x="a\\"b":\n    echo b\n', every),
         ("variant-inner-blank-counts", b"[unix]\ntest-win:\n    echo a\n\n    echo b\n", b"[unix]\ntest-win:\n    echo a\n    echo b\n", win),
+        ("variant-quoted-content-verbatim", b'[script("a,b"), unix]\ntest-win:\n    echo a\n', b'[script("a, b"), unix]\ntest-win:\n    echo a\n', win),
+        ("variant-unreadable-attr-suspicious", b'[unix]\ntest-win:\n    echo a\n', b'[doc("a]b"), unix]\ntest-win:\n    echo b\n', every),
+        ("variant-mixed-quoted-gate-edited", b'[script("a"), unix]\ntest-win:\n    echo a\n', b'[script("a"), unix]\ntest-win:\n    echo b\n', win),
         ("variant-attr-spelled-edited", b"[unix]\t# note\ntest-win:\n    echo a\n", b"[unix]\t# note\ntest-win:\n    echo b\n", win),
         ("variant-macos-arm", b"no regions", b"[macos]\ntest:\n    echo a\n", zig),
         ("variant-crlf-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\r\ntest-win:\r\n    echo a\r\n", set()),
