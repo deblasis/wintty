@@ -4,20 +4,28 @@
   <br>Wintty
 </h1>
 <p align="center">
-  A native Windows terminal emulator on the Ghostty core.
+  A libghostty-powered terminal emulator for Windows.
   <br />
-  Looking for Ghostty on Windows? Wintty runs the same <code>libghostty</code> core
-  with a WinUI 3 shell and a DirectX 12 (GPU) renderer.
+  Ghostty on Windows? There is no official Ghostty for Windows: Ghostty 1.4.0
+  dropped the roadmap for Windows support in the Ghostty GUI.
+  <code>libghostty</code>, the core of Ghostty, fully supports Windows. Wintty
+  is the native Windows app around it: a WinUI 3 shell and a DirectX 12 (GPU)
+  renderer.
   <br />
-  Wintty is an independent project, not affiliated with <a href="https://ghostty.org">Ghostty</a>. We are big fans, and we hope much of this work ends up in the official Ghostty for Windows.
+  Wintty Pro adds a terminal multiplexer: sessions that keep running after you
+  close the window.
+  <br />
+  Stuck on DirectX 11? No problem, <a href="https://wintty.io/docs/install/?utm_source=gh_readme&utm_content=pro-legacy">Wintty Pro Legacy</a> has you covered.
+  <br />
+  Wintty is an independent project, not affiliated with <a href="https://ghostty.org">Ghostty</a>. We are big fans.
   <br />
   <a href="https://wintty.io/?utm_source=gh_readme&utm_content=nav">Website</a>
   ·
-  <a href="https://wintty.io/download?utm_source=gh_readme&utm_content=nav">Download</a>
+  <a href="https://wintty.io/download/?utm_source=gh_readme&utm_content=nav">Download</a>
   ·
-  <a href="https://wintty.io/docs?utm_source=gh_readme&utm_content=nav">Documentation</a>
+  <a href="https://wintty.io/docs/?utm_source=gh_readme&utm_content=nav">Documentation</a>
   ·
-  <a href="#build-from-source">Build from source</a>
+  <a href="#build-from-source-free-always">Build from source</a>
   ·
   <a href="CONTRIBUTING.md">Contributing</a>
   ·
@@ -28,21 +36,22 @@
 
 **Sponsored build (recommended).** [Sponsor any amount](https://github.com/sponsors/deblasis)
 to unlock the signed installer with automatic in-app updates, then
-[sign in with GitHub](https://wintty.io/download?utm_source=gh_readme&utm_content=get-wintty)
+[sign in with GitHub](https://wintty.io/download/?utm_source=gh_readme&utm_content=get-wintty)
 and download it. You get both `stable` and `tip` channels and the
 sponsors-only Discord channel; Pro adds more
-([tiers](https://wintty.io/docs/install/tiers?utm_source=gh_readme)).
+([tiers](https://wintty.io/docs/install/tiers/?utm_source=gh_readme)).
 
-The OSS and the Sponsor versions require Windows 11, x64, and a DirectX 12
+The OSS and the Sponsor versions require Windows 10 or 11 and a DirectX 12
 feature-level-12.0 GPU. These builds have no software fallback, so VMs without
-GPU passthrough and Remote Desktop sessions will not start them.
+GPU passthrough and Remote Desktop sessions will not start them. x64 is the
+main build; Sponsor and Pro desktop also ship an experimental ARM64 build.
 
 The Pro Legacy tier exists for exactly those boxes, shipping a DirectX 11 renderer
 whose WARP software rasterizer engages automatically on no-GPU systems and in
 remote sessions. SmartScreen may show "Windows protected your PC" on first run
 of a newly published build (choose More info, then Run anyway).
 
-**IMPORTANT:** Do NOT trust installers and/or binaries that are not sourced from https://wintty.io/download and are not digitally signed.
+**IMPORTANT:** Do NOT trust installers and/or binaries that are not sourced from https://wintty.io/download/ and are not digitally signed.
 
 
 ### Build from source (free, always)
@@ -55,7 +64,7 @@ just              # tests + build the DLL
 just build-win    # the app
 ```
 
-Prerequisites: [Zig](https://ziglang.org/) 0.16 or newer (floor set by
+Prerequisites: [Zig](https://ziglang.org/) 0.17 or newer (floor set by
 `minimum_zig_version` in `build.zig.zon`), [Just](https://github.com/casey/just),
 [PowerShell 7](https://aka.ms/powershell), and the
 [.NET 10 SDK](https://dotnet.microsoft.com/) (version pinned in
@@ -67,7 +76,7 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 > merges are gated on a green local `just signoff` run against the exact
 > commit, so the occasional bad commit can land between batches. For a
 > calmer ride, build a tagged source snapshot instead of the branch tip
-> (browse tags on the releases page).
+> ([browse tags](https://github.com/deblasis/wintty/tags)).
 
 > [!IMPORTANT]
 > ### An independent soft fork of Ghostty
@@ -78,14 +87,15 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 > Ghostty project or Mitchell Hashimoto. It is a soft fork focused on
 > bringing Ghostty to Windows built with passion by a long time Windows user (3.11): the `windows` branch is the default and is
 > rebased on upstream `main` as often as possible. About 20 of this fork's build and CI PRs were
-> merged upstream before the project continued here, and since upstream is
-> not planning Windows at the time of writing, this is where Windows lives I guess.
+> merged upstream before the project continued here. Ghostty 1.4.0 (October
+> 2026) dropped Windows from the GUI roadmap, so this is where Ghostty on
+> Windows lives.
 
 
-## What you get
+## Ghostty for Windows: what you get
 
-- Real terminal emulation on the Zig core Ghostty ships, Kitty graphics
-  protocol included 
+- Real terminal emulation on `libghostty`, the Zig core Ghostty ships, Kitty
+  graphics protocol included
 - A native WinUI 3 shell: vertical tabs, splits, quick terminal, command
   palette, full settings UI, profiles with shell auto-discovery, session
   restore
@@ -95,8 +105,44 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 - A thin C# layer over `ghostty.dll` via P/Invoke, same architecture as macOS
   where Swift wraps the same core
 
+That is the open source build and the Sponsor build: Ghostty's terminal core,
+`libghostty`, as a Windows application.
+
+## Wintty Pro: a native terminal multiplexer for Windows
+
+Persistent terminal sessions on Windows, tmux-style, without WSL:
+
+- [Persistent sessions](https://wintty.io/docs/features/persistent-sessions/?utm_source=gh_readme):
+  shells keep running after you close the app, and you reattach to them later
+- [Layouts](https://wintty.io/docs/features/multiplexer/?utm_source=gh_readme)
+  of tabs and splits that survive app updates
+- Tabs that label the coding agent running in them
+
 The full per-tier feature matrix:
-[Wintty tiers and features](https://wintty.io/docs/install/tiers?utm_source=gh_readme).
+[Wintty tiers and features](https://wintty.io/docs/install/tiers/?utm_source=gh_readme).
+
+## FAQ
+
+### Does Ghostty work on Windows?
+
+Not as an official app. Wintty runs Ghostty's core, `libghostty`, as a native
+Windows app. More in
+[Ghostty for Windows](https://wintty.io/ghostty-for-windows/?utm_source=gh_readme&utm_content=faq).
+
+### How do I get Ghostty on Windows?
+
+Build Wintty from source for free, or sponsor any amount for the signed
+installer.
+
+### Is it free?
+
+Yes. The source is MIT and builds the same app as the Sponsor installer.
+Sponsoring pays for a signed installer that updates itself. Pro is paid and
+adds features.
+
+### Do I need WSL?
+
+No. Wintty is a native Windows app. WSL distros open as profiles.
 
 ## Architecture in one paragraph
 
@@ -111,7 +157,8 @@ so embedders should expect some churn. .NET examples live in
 
 ## Roadmap
 
-The full issue tracker is the real roadmap.
+Open source work is tracked in the
+[issue tracker](https://github.com/deblasis/wintty/issues).
 
 ## Sponsors
 
@@ -124,7 +171,7 @@ or [reach out](https://x.com/polyMatto).
 Wintty captures crashes locally and never sends anything anywhere on its own.
 If you hit a crash and want it fixed, open an issue; the app can also produce
 a support dump that you can review in full before choosing to send it.
-Details in the [privacy notice](https://wintty.io/privacy).
+Details in the [privacy notice](https://wintty.io/privacy/).
 
 ## License
 
