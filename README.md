@@ -4,18 +4,19 @@
   <br>Wintty
 </h1>
 <p align="center">
-  A native Windows terminal emulator on the Ghostty core.
+  Ghostty for Windows: a native Windows terminal emulator on the Ghostty core.
   <br />
-  Looking for Ghostty on Windows? Wintty runs the same <code>libghostty</code> core
-  with a WinUI 3 shell and a DirectX 12 (GPU) renderer.
+  Wintty runs the same <code>libghostty</code> core with a WinUI 3 shell and a
+  DirectX 12 (GPU) renderer. Wintty Pro adds a terminal multiplexer: sessions
+  that keep running after you close the window.
   <br />
-  Wintty is an independent project, not affiliated with <a href="https://ghostty.org">Ghostty</a>. We are big fans, and we hope much of this work ends up in the official Ghostty for Windows.
+  Wintty is an independent project, not affiliated with <a href="https://ghostty.org">Ghostty</a>. We are big fans. Ghostty 1.4.0 dropped Windows from its GUI roadmap and points Windows work at downstream projects built on <code>libghostty</code>. That is what Wintty does.
   <br />
   <a href="https://wintty.io/?utm_source=gh_readme&utm_content=nav">Website</a>
   ·
-  <a href="https://wintty.io/download?utm_source=gh_readme&utm_content=nav">Download</a>
+  <a href="https://wintty.io/download/?utm_source=gh_readme&utm_content=nav">Download</a>
   ·
-  <a href="https://wintty.io/docs?utm_source=gh_readme&utm_content=nav">Documentation</a>
+  <a href="https://wintty.io/docs/?utm_source=gh_readme&utm_content=nav">Documentation</a>
   ·
   <a href="#build-from-source">Build from source</a>
   ·
@@ -28,10 +29,10 @@
 
 **Sponsored build (recommended).** [Sponsor any amount](https://github.com/sponsors/deblasis)
 to unlock the signed installer with automatic in-app updates, then
-[sign in with GitHub](https://wintty.io/download?utm_source=gh_readme&utm_content=get-wintty)
+[sign in with GitHub](https://wintty.io/download/?utm_source=gh_readme&utm_content=get-wintty)
 and download it. You get both `stable` and `tip` channels and the
 sponsors-only Discord channel; Pro adds more
-([tiers](https://wintty.io/docs/install/tiers?utm_source=gh_readme)).
+([tiers](https://wintty.io/docs/install/tiers/?utm_source=gh_readme)).
 
 The OSS and the Sponsor versions require Windows 11, x64, and a DirectX 12
 feature-level-12.0 GPU. These builds have no software fallback, so VMs without
@@ -78,11 +79,12 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 > Ghostty project or Mitchell Hashimoto. It is a soft fork focused on
 > bringing Ghostty to Windows built with passion by a long time Windows user (3.11): the `windows` branch is the default and is
 > rebased on upstream `main` as often as possible. About 20 of this fork's build and CI PRs were
-> merged upstream before the project continued here, and since upstream is
-> not planning Windows at the time of writing, this is where Windows lives I guess.
+> merged upstream before the project continued here. Ghostty 1.4.0 (October
+> 2026) dropped Windows from the GUI roadmap, so this is where Ghostty on
+> Windows lives.
 
 
-## What you get
+## What you get: Ghostty on Windows
 
 - Real terminal emulation on the Zig core Ghostty ships, Kitty graphics
   protocol included 
@@ -95,8 +97,21 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 - A thin C# layer over `ghostty.dll` via P/Invoke, same architecture as macOS
   where Swift wraps the same core
 
+That is the open source build and the Sponsor build: Ghostty's terminal, as a
+Windows application.
+
+## Wintty Pro: a terminal multiplexer for Windows
+
+Pro turns the terminal into a multiplexer, with no WSL and no tmux to set up:
+
+- [Persistent sessions](https://wintty.io/docs/features/persistent-sessions/?utm_source=gh_readme):
+  shells keep running after you close the app, and you reattach to them later
+- [Layouts](https://wintty.io/docs/features/multiplexer/?utm_source=gh_readme)
+  of tabs and splits that survive app updates
+- Tabs that label the coding agent running in them
+
 The full per-tier feature matrix:
-[Wintty tiers and features](https://wintty.io/docs/install/tiers?utm_source=gh_readme).
+[Wintty tiers and features](https://wintty.io/docs/install/tiers/?utm_source=gh_readme).
 
 ## Architecture in one paragraph
 
@@ -124,7 +139,7 @@ or [reach out](https://x.com/polyMatto).
 Wintty captures crashes locally and never sends anything anywhere on its own.
 If you hit a crash and want it fixed, open an issue; the app can also produce
 a support dump that you can review in full before choosing to send it.
-Details in the [privacy notice](https://wintty.io/privacy).
+Details in the [privacy notice](https://wintty.io/privacy/).
 
 ## License
 
