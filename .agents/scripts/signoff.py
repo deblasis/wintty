@@ -283,7 +283,7 @@ def post_github_status(record):
     try:
         remote = subprocess.run(["git", "remote", "get-url", "origin"],
                                 cwd=REPO_ROOT, text=True,
-                                capture_output=True, timeout=10).stdout
+                                creationflags=0x08000000 if sys.platform == "win32" else 0,                                capture_output=True, timeout=10).stdout
         if "deblasis/wintty" not in remote:
             return False
         legs = sorted(record["steps"])
@@ -304,7 +304,7 @@ def post_github_status(record):
              "-f", f"state={state}",
              "-f", "context=signoff/ladder",
              "-f", f"description={desc[:140]}"],
-            cwd=REPO_ROOT, text=True, capture_output=True, timeout=20)
+             creationflags=0x08000000 if sys.platform == "win32" else 0,            cwd=REPO_ROOT, text=True, capture_output=True, timeout=20)
         if p.returncode != 0:
             print(f"signoff: GitHub status not posted (signoff unaffected): "
                   f"{p.stderr.strip()[:160]}")
@@ -451,7 +451,7 @@ def run_legs(legs, plans, ctx, runner):
 
 def _run_command(cmd):
     try:
-        return subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt")).returncode
+        return subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt"), creationflags=0x08000000 if sys.platform == "win32" else 0).returncode
     except FileNotFoundError as e:
         print(f"signoff: could not run {' '.join(cmd)}: {e}")
         return 127

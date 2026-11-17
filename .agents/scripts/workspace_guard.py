@@ -72,7 +72,7 @@ def git_dir(cwd):
         out = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
             cwd=cwd or None, capture_output=True, text=True, timeout=15,
-        )
+            creationflags=0x08000000 if sys.platform == "win32" else 0,        )
         if out.returncode == 0:
             p = out.stdout.strip()
             return p if os.path.isabs(p) else os.path.join(cwd or os.getcwd(), p)
@@ -145,7 +145,7 @@ def norm(path, cwd):
         root = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=cwd or None, capture_output=True, text=True, timeout=15,
-        ).stdout.strip().replace("\\", "/")
+            creationflags=0x08000000 if sys.platform == "win32" else 0,        ).stdout.strip().replace("\\", "/")
     except Exception:
         root = ""
     if root and p.lower().startswith(root.lower() + "/"):
@@ -157,7 +157,7 @@ def dirty_tracked(cwd):
     out = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=cwd or None, capture_output=True, text=True, timeout=30,
-    )
+        creationflags=0x08000000 if sys.platform == "win32" else 0,    )
     files = []
     for line in out.stdout.splitlines():
         if not line or line.startswith("??"):

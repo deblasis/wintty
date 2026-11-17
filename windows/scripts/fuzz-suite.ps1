@@ -1067,6 +1067,10 @@ function Start-HarnessProcess {
     # No new window, which is what -NoNewWindow bought: the child inherits this
     # console. Redirecting is what requires it to be false at all.
     $psi.UseShellExecute = $false
+    # CREATE_NO_WINDOW: the harness child keeps a windowless console, so a
+    # console-less parent never flashes a terminal for it (redirects alone
+    # do not prevent one).
+    $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
 

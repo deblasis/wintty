@@ -135,13 +135,13 @@ def git_run(args, cwd=None):
     """The real git runner. Takes git's own argument list (no leading
     "git"), the same shape merge_guard's runner and fakes speak."""
     return subprocess.run(["git"] + args, cwd=cwd or REPO_ROOT,
-                          capture_output=True, text=True, timeout=60)
+    creationflags=0x08000000 if sys.platform == "win32" else 0,                          capture_output=True, text=True, timeout=60)
 
 
 def gh_run(args, cwd=None):
     """The real gh runner, same convention."""
     return subprocess.run(["gh"] + args, cwd=cwd or REPO_ROOT,
-                          capture_output=True, text=True, timeout=120)
+    creationflags=0x08000000 if sys.platform == "win32" else 0,                          capture_output=True, text=True, timeout=120)
 
 
 def incoda_run(path, args, cwd=None):
@@ -149,7 +149,7 @@ def incoda_run(path, args, cwd=None):
     hour, and the lane's own --wait is the only queue bound that should
     apply."""
     return subprocess.run([path] + args, cwd=cwd or REPO_ROOT,
-                          capture_output=True, text=True)
+    creationflags=0x08000000 if sys.platform == "win32" else 0,                          capture_output=True, text=True)
 
 
 def incoda_status_run(path, args, cwd=None):
@@ -157,7 +157,7 @@ def incoda_status_run(path, args, cwd=None):
     timeout: a status read that hangs is worse than no status at all, and
     lane_busy_with treats a failed read as silent."""
     return subprocess.run([path] + args, cwd=cwd or REPO_ROOT,
-                          capture_output=True, text=True, timeout=30)
+    creationflags=0x08000000 if sys.platform == "win32" else 0,                          capture_output=True, text=True, timeout=30)
 
 
 def pid_alive(pid):

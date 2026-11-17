@@ -1,0 +1,27 @@
+# Spawn-site allowlist: path | anchor (line text) | mechanism | owner | expiry
+# One MECHANISM at one exact site; never a file or a glob. The validator
+# refuses globs, expired entries and entries without owner/reason.
+# Mechanisms: app-under-test (GUI window is the product), user-launcher (a
+# human asked for the window: run-win), intentional-gui.
+windows/scripts/run-win-launch.ps1 | Start-Process | user-launcher | wt-focus | 2027-06-30
+# app-under-test: these launch the Wintty exe (a GUI window is the product)
+windows/scripts/config-save-race.ps1 | Start-Process $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/crash-canary.ps1 | Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/crash-matrix.ps1 | Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/esctest/run-esctest.ps1 | Start-Process -FilePath $WinttyExe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/esctest/run-latency-probe.ps1 | Start-Process -FilePath $WinttyExe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/mouse-fuzz-jumplist.ps1 | Start-Process -FilePath $session.ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/mouse-smoke-run.ps1 | Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/release-smoke.ps1 | Start-Process -FilePath $Exe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/seam-bisect.ps1 | Start-Process -FilePath $exe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/seam-crash-dump.ps1 | Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/seam-probe.ps1 | Start-Process -FilePath $exe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/shader-notice-fuzz.ps1 | Start-Process -FilePath $Exe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/splash-single-instance-race.ps1 | Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/vttest/run-vttest-section.ps1 | Start-Process -FilePath $WinttyExe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/vttest/run-vttest.ps1 | Start-Process -FilePath $WinttyExe | app-under-test | wt-focus | 2027-06-30
+# a human clicks this button in the nightly control dialog; the pwsh window is the point
+.agents/scripts/nightly_control.ps1 | Start-Process pwsh | intentional-gui | wt-focus | 2027-06-30
+# parser module, no spawn sites (grep-verified at seeding); refused by the
+# fail-closed extension rule until it is rewritten or moved
+windows/scripts/esctest/EsctestParse.psm1 | file | passthrough | wt-focus | 2027-06-30

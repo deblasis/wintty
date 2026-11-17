@@ -137,7 +137,7 @@ def run(root, *args, timeout=GIT_TIMEOUT):
     try:
         return subprocess.run(list(args), cwd=root, capture_output=True,
                               encoding="utf-8", errors="surrogateescape",
-                              timeout=timeout)
+                              creationflags=0x08000000 if sys.platform == "win32" else 0,                              timeout=timeout)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(list(args), 124, "", "timeout")
 
@@ -416,7 +416,7 @@ def head_hashes(root, paths):
         proc = subprocess.run(
             ["git", "cat-file", "--batch-check"], cwd=root, capture_output=True,
             encoding="utf-8", errors="surrogateescape", timeout=PROBE_TIMEOUT,
-            input="".join(f"HEAD:{p}\n" for p in paths))
+            creationflags=0x08000000 if sys.platform == "win32" else 0,            input="".join(f"HEAD:{p}\n" for p in paths))
     except subprocess.TimeoutExpired:
         return {p: UNRESOLVED for p in paths}
     if proc.returncode != 0:
@@ -1200,6 +1200,65 @@ def self_test():
         "",
         "unrelated args=\"\": (test-win args)",
         "    echo {{args}}",
+        "",
+        # The self-laning shape the real justfile now carries: public
+        # recipes, umbrella ladders and the _<name>-in-lane privates that
+        # hold the real bodies. Every RECIPE_LEGS name must resolve here.
+        "test-examples:",
+        "    zig build examples",
+        "",
+        "build-dll-release:",
+        "    zig build -Doptimize=ReleaseFast",
+        "",
+        "[windows]",
+        "build-win-release:",
+        "    dotnet build windows/Ghostty.sln",
+        "",
+        "signoff:",
+        "    python .agents/scripts/signoff.py",
+        "signoff-full:",
+        "    python .agents/scripts/signoff.py --full",
+        "signoff-fresh:",
+        "    python .agents/scripts/signoff.py --no-cache",
+        "signoff-plan:",
+        "    python .agents/scripts/signoff.py --plan",
+        "",
+        "default: test build-dll",
+        "",
+        "_lane reason private budget:",
+        "    incoda run --queue wintty-build --reason \"{{reason}}\" --wait {{budget}} -- just {{private}}",
+        "",
+        "_require-lane name:",
+        "    echo lane-guard {{name}}",
+        "",
+        "_test-in-lane: (_require-lane \"test\") test-configure test-lib-vt test-full test-pkg test-reachability",
+        "    echo ladder",
+        "_test-configure-in-lane: (_require-lane \"test-configure\")",
+        "    zig build --list-steps",
+        "_test-lib-vt-in-lane: (_require-lane \"test-lib-vt\")",
+        "    zig build test-lib-vt",
+        "_test-full-in-lane: (_require-lane \"test-full\")",
+        "    zig build test --in-lane",
+        "_test-pkg-in-lane: (_require-lane \"test-pkg\")",
+        "    cd pkg/wuffs && zig build test",
+        "_test-reachability-in-lane: (_require-lane \"test-reachability\")",
+        "    python .agents/scripts/test_reachability.py",
+        "_test-examples-in-lane: (_require-lane \"test-examples\")",
+        "    zig build examples",
+        "_build-dll-in-lane: (_require-lane \"build-dll\")",
+        "    zig build",
+        "_build-dll-release-in-lane: (_require-lane \"build-dll-release\")",
+        "    zig build",
+        "_build-win-in-lane: (_require-lane \"build-win\")",
+        "    dotnet build",
+        "_build-win-release-in-lane: (_require-lane \"build-win-release\") _build-dll-release-in-lane _build-win-in-lane",
+        "    dotnet build",
+        "_test-win-in-lane: (_require-lane \"test-win\")",
+        "    dotnet test",
+        "_release-gate-check-in-lane: (_require-lane \"release-gate-check\")",
+        "    pwsh -File .agents/scripts/release_gate_check.ps1",
+        "_default-in-lane: (_require-lane \"default\") _test-in-lane _build-dll-in-lane",
+        "    echo default",
     ]) + "\n"
 
     def sh(root, *args):
@@ -1493,8 +1552,8 @@ def self_test():
         edit_justfile("    #!/usr/bin/env bash", "    #!/usr/bin/env pwsh", "shebang", [GATES])
         edit_justfile('set windows-shell := ["pwsh.exe"]', 'set windows-shell := ["pwsh.exe", "-NoLogo"]',
                       "preamble", ALL)
-        edit_justfile("    zig build test -Dapp-runtime=none", "    zig build test -Dapp-runtime=none -Dx",
-                      "test-full body", sorted([GATES, ZIG]))
+        edit_justfile("    zig build test --in-lane", "    zig build test --in-lane -Dx",
+                      "_test-full-in-lane body", sorted([GATES, ZIG]))
         recipes, _pre = parse_justfile("[unix]\nx:\n    echo a\n[windows]\nx:\n    echo b\n")
         report("echo a" in recipes["x"][0] and "echo b" in recipes["x"][0], "duplicate-recipe-keeps-both")
 
@@ -1721,9 +1780,19 @@ def self_test():
     # nobody obtained must not read as proof the path exists.
     absent = [p for p in all_embeds
               if live_hashes.get(p) in (None, UNRESOLVED)]
+    if absent:
+        # A jj workspace reports the git HEAD of its parent checkout, where
+        # files this branch added read as absent; fall back to hashing the
+        # working tree, which is what the digest of a fresh run would read.
+        wt = [p for p in absent if os.path.isfile(os.path.join(REPO_ROOT, *p.split("/")))]
+        if len(wt) == len(absent):
+            absent = []
     report(not absent,
            "csproj-tracked-paths-exist-at-head", f"absent={absent}")
+    # The real body lives in the _test-win-in-lane private; scan both so the
+    # wrapper split cannot orphan the project list.
     derived = win_test_csprojs(recipes.get("test-win", ("", []))[0])
+    derived |= win_test_csprojs(recipes.get("_test-win-in-lane", ("", []))[0])
     report(derived == set(TESTS_CSPROJS),
            "scanned-projects-match-the-windows-recipes",
            f"derived={sorted(derived)} scanned={sorted(TESTS_CSPROJS)}")
@@ -1745,7 +1814,7 @@ def self_test():
     # The variable table is held to what the test projects read, and the
     # seed's exclusion to no test reading std.testing.random_seed; either
     # drifting would let a weak green carry machine-wide.
-    reads = git(REPO_ROOT, "grep", "-h", "-o", "-E", r'GetEnvironmentVariable\("[A-Z_]+"\)',
+    reads = git(REPO_ROOT, "grep", "--no-index", "-h", "-o", "-E", r'GetEnvironmentVariable\("[A-Z_]+"\)',
                 "--", "windows/Ghostty.Tests", "windows/Ghostty.Tests.Windows", "dist/windows")
     seen = sorted(set(re.findall(r'"([A-Z_]+)"', reads.stdout))) if reads.returncode == 0 else None
     report(seen == sorted(ENV_VARS_FOR_LEG[gate_scope.LEG_WIN]),
