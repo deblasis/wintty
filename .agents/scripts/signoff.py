@@ -74,87 +74,81 @@ def changed_paths(base):
     return sorted(p.strip().replace("\\", "/") for p in out.stdout.splitlines() if p.strip())
 
 
-def _hunk_lines(diff_text, side):
-    """Line numbers touched on one side of a unified diff (side: '-' or '+')."""
-    lines = set()
-    for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff_text, re.M):
-        start = int(m.group(1) if side == "-" else m.group(3))
-        count = m.group(2) if side == "-" else m.group(4)
-        count = 1 if count is None else int(count)
-        for i in range(count):
-            lines.add(start + i)
-    return lines
+def _justfile_shape(text):
+    """(top_level, recipes): the parts of a justfile's text that decide what
+    it does, with comments and blank lines dropped.
 
-
-def _recipe_at(content_lines, lineno):
-    """Name of the recipe owning a 1-based line, or None for file preamble.
-
-    Body lines are indented, so the owning recipe is the nearest header at
-    column 0 above. A changed line that is itself at column 0 and not a
-    recipe header (a `set` directive, an assignment) belongs to no recipe
-    and is treated as preamble, which forces a full run.
+    top_level is every non-comment line at column 0 that is not a recipe
+    header (settings, assignments, imports, attributes such as [windows])
+    plus any indented line before the first recipe, in file order.
+    recipes maps a recipe name to one body per definition, since a recipe
+    can be defined once per platform; a body is its header line and its
+    indented lines. A comment inside a body is dropped, except a shebang as
+    the first body line, which turns the recipe into a script.
     """
-    idx = lineno - 1
-    if idx < 0 or idx >= len(content_lines):
-        return None
     header = gate_scope.RECIPE_HEADER
-    line = content_lines[idx]
-    if line and not line[0].isspace():
-        m = header.match(line)
-        return m.group(1) if m else None
-    for i in range(idx, -1, -1):
-        cur = content_lines[i]
-        if not cur or cur[0].isspace():
+    top, recipes, cur = [], {}, None
+    for raw in text.split("\n"):
+        line = raw.rstrip("\r")
+        stripped = line.strip()
+        if not stripped:
             continue
-        m = header.match(cur)
-        return m.group(1) if m else None
-    return None
+        if not line[0].isspace():
+            if stripped.startswith("#"):
+                continue
+            m = header.match(line)
+            if m:
+                cur = [line]
+                recipes.setdefault(m.group(1), []).append(cur)
+            else:
+                cur = None
+                top.append(line)
+            continue
+        if stripped.startswith("#") and not (cur is not None and len(cur) == 1
+                                             and stripped.startswith("#!")):
+            continue
+        (top if cur is None else cur).append(line)
+    return top, recipes
+
+
+def justfile_shape_legs(old_text, new_text):
+    """Legs whose meaning an edit from old_text to new_text could change.
+    Any top-level difference can reach every recipe and forces every leg;
+    otherwise each recipe whose bodies differ, including one that was
+    added, removed or cut short by a header inserted into it, contributes
+    the legs that run through it."""
+    old_top, old_recipes = _justfile_shape(old_text)
+    new_top, new_recipes = _justfile_shape(new_text)
+    if old_top != new_top:
+        return set(gate_scope.ALL_LEGS)
+    legs = set()
+    for name in set(old_recipes) | set(new_recipes):
+        if old_recipes.get(name) != new_recipes.get(name):
+            legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
+    return legs
 
 
 def justfile_legs(base):
     """Legs whose meaning a justfile edit could have changed.
 
     Editing the recipe a leg runs through invalidates that leg only; a
-    changed line outside every recipe (the shell preamble, a variable) can
+    change outside every recipe (a setting, a variable, an attribute) can
     reach any of them and forces all. Adding an unrelated recipe forces
     nothing. Comment-only and blank-line changes never count, since a guard
     that demands an hour of tests for a typo fix is the kind that gets
-    switched off. Both sides of the diff are inspected so a deleted recipe
-    cannot slip through by leaving no new lines.
-    """
-    # Plain text whatever the user's git config says: forced colour, an
-    # external diff driver or a `-diff` attribute would all hide the hunk
-    # headers this reads, and a diff with no readable header must not pass
-    # as a change that touches no recipe.
-    diff = run(["git", "diff", "--no-color", "--no-ext-diff", "--text", "--unified=0",
-                base, "HEAD", "--", "justfile"])
-    if diff.returncode != 0:
-        return set(gate_scope.ALL_LEGS)
-    if not diff.stdout.strip():
-        return set()
-    if not (_hunk_lines(diff.stdout, "+") or _hunk_lines(diff.stdout, "-")):
-        return set(gate_scope.ALL_LEGS)
+    switched off.
 
+    Both versions are read as raw blobs and compared by their parsed shape,
+    not through `git diff`: a diff's text depends on the reader's git
+    config (colour, external drivers, textconv, attributes), and mapping
+    its line numbers back onto the file is where every miss of this
+    function came from. A justfile missing on either side forces every leg.
+    """
     new_content = run(["git", "show", "HEAD:justfile"])
     old_content = run(["git", "show", f"{base}:justfile"])
     if new_content.returncode != 0 or old_content.returncode != 0:
         return set(gate_scope.ALL_LEGS)
-
-    legs = set()
-    for side, blob in (("+", new_content.stdout), ("-", old_content.stdout)):
-        content_lines = blob.splitlines()
-        for lineno in _hunk_lines(diff.stdout, side):
-            if lineno - 1 >= len(content_lines):
-                return set(gate_scope.ALL_LEGS)
-            text = content_lines[lineno - 1].strip()
-            if not text or text.startswith("#"):
-                continue
-            recipe = _recipe_at(content_lines, lineno)
-            if recipe is None:
-                return set(gate_scope.ALL_LEGS)
-            legs.update(gate_scope.RECIPE_LEGS.get(recipe, ()))
-    return legs
-
+    return justfile_shape_legs(old_content.stdout, new_content.stdout)
 
 def scoped_legs(base, paths):
     """(legs, justfile_legs) a path list needs against `base`. The single
@@ -659,54 +653,51 @@ def self_test():
             failed = True
         print(f"{'ok ' if ok else 'FAIL'} {label}{': ' + detail if detail else ''}")
 
-    justfile = [
+    # justfile_shape_legs: what an edit costs, read from the parsed shape of
+    # both versions. Each case is an edit someone can actually make.
+    base_jf = "\n".join([
         "# preamble comment",
         'set windows-shell := ["pwsh.exe"]',
         "",
         "test: test-lib-vt",
         "    zig build test",
+        "    zig build test-lib-vt",
         "",
         "[windows]",
-        "gallery-verify:",
-        "    bash tools/gallery/verify.sh",
+        "test-win:",
+        "    dotnet test windows/Ghostty.sln",
         "",
-        "pr-gate pr:",                       # bare parameter
+        "[unix]",
+        "test-win:",
+        "    echo windows only",
+        "",
+        "pr-gate pr:",
         "    python .agents/scripts/pr_gate.py",
         "",
-        'splash-race args="": build-win',    # defaulted parameter and a dep
-        "    pwsh -File x.ps1",
-        "",
-        "signoff-defer +reason:",            # variadic parameter
-        "    python .agents/scripts/signoff.py",
+    ])
+    every = set(gate_scope.ALL_LEGS)
+    zig, win = set(gate_scope.RECIPE_LEGS["test"]), set(gate_scope.RECIPE_LEGS["test-win"])
+    shape_cases = [
+        ("unchanged", base_jf, set()),
+        ("comment-only", base_jf.replace("# preamble comment", "# reworded comment"), set()),
+        ("blank-line", base_jf.replace("pr-gate pr:", "\npr-gate pr:"), set()),
+        ("crlf-only", base_jf.replace("\n", "\r\n"), set()),
+        ("form-feed-in-comment", base_jf.replace("# preamble comment", "# pre\x0camble"), set()),
+        ("body-comment", base_jf.replace("    zig build test\n", "    # note\n    zig build test\n"), set()),
+        ("added-unrelated-recipe", base_jf + "\nhello:\n    echo hi\n", set()),
+        ("recipe-body", base_jf.replace("zig build test-lib-vt", "zig build test-lib-vt -Dx"), zig),
+        ("one-platform-body", base_jf.replace("echo windows only", "echo changed"), win),
+        ("recipe-deleted", base_jf.replace("test: test-lib-vt\n    zig build test\n    zig build test-lib-vt\n", ""), zig),
+        ("recipe-cut-short", base_jf.replace("    zig build test\n", "    zig build test\nsplit-here:\n"), zig),
+        ("shebang-first-body-line", base_jf.replace("test: test-lib-vt\n", "test: test-lib-vt\n    #!/usr/bin/env python3\n"), zig),
+        ("header-deps", base_jf.replace("test: test-lib-vt", "test:"), zig),
+        ("setting", base_jf.replace('set windows-shell := ["pwsh.exe"]', 'set windows-shell := ["cmd.exe"]'), every),
+        ("setting-after-form-feed", base_jf.replace("# preamble comment", "# pre\x0camble\nset dotenv-load"), every),
+        ("attribute", base_jf.replace("[unix]\n", "[unix]\n[no-cd]\n"), every),
     ]
-    owner_cases = [
-        (1, None),   # comment in the preamble
-        (2, None),   # set directive, not a recipe called "set"
-        (4, "test"),
-        (5, "test"),
-        (8, "gallery-verify"),
-        (9, "gallery-verify"),
-        (11, "pr-gate"),
-        (12, "pr-gate"),
-        (14, "splash-race"),
-        (15, "splash-race"),
-        (17, "signoff-defer"),
-        (18, "signoff-defer"),
-    ]
-    for lineno, expect in owner_cases:
-        got = _recipe_at(justfile, lineno)
-        report(got == expect, "recipe-owner", f"line {lineno} -> {got}")
-
-    # A pure insertion (-10,0) touches no old line, so only the new side
-    # carries it; a replacement (-4 +4) appears on both.
-    hunk = "@@ -10,0 +11,2 @@\n+new line\n+another\n@@ -4 +4 @@\n-old\n+new\n"
-    report(_hunk_lines(hunk, "+") == {11, 12, 4}, "hunk-new", str(sorted(_hunk_lines(hunk, "+"))))
-    report(_hunk_lines(hunk, "-") == {4}, "hunk-old", str(sorted(_hunk_lines(hunk, "-"))))
-
-    deletion = "@@ -20,3 +19,0 @@\n-a\n-b\n-c\n"
-    report(_hunk_lines(deletion, "-") == {20, 21, 22}, "hunk-deletion", str(sorted(_hunk_lines(deletion, "-"))))
-    report(_hunk_lines(deletion, "+") == set(), "hunk-deletion-new", str(sorted(_hunk_lines(deletion, "+"))))
-
+    for label, new_text, expect in shape_cases:
+        got = justfile_shape_legs(base_jf, new_text)
+        report(got == expect, f"justfile-shape-{label}", str(sorted(got)))
     # The record must carry the window it was taken against: the merge guard
     # reads `base` next to `sha` to measure what moved on the branch. A None
     # base must still be PRESENT in the payload, so a reader distinguishing
@@ -799,10 +790,8 @@ def self_test():
                     return _types.SimpleNamespace(returncode=0, stdout=h + "\n")
                 if cmd[:2] == ["git", "diff"] and "--no-renames" in cmd:
                     return _types.SimpleNamespace(returncode=split_rc, stdout="\n".join(split_paths))
-                # A justfile that is gone at HEAD (renamed or deleted): its
-                # diff has a removed line and HEAD has no blob for it.
-                if cmd[:2] == ["git", "diff"] and "--unified=0" in cmd:
-                    return _types.SimpleNamespace(returncode=0, stdout="@@ -1 +0,0 @@\n-recipe:\n")
+                # A justfile that is gone at HEAD (renamed or deleted) has
+                # no blob there.
                 if cmd[:2] == ["git", "show"] and cmd[2].startswith("HEAD:"):
                     return _types.SimpleNamespace(returncode=128, stdout="")
                 return _types.SimpleNamespace(returncode=0, stdout="")
@@ -831,22 +820,21 @@ def self_test():
             records = os.listdir(os.path.join(td, "pr-signoff")) if os.path.isdir(os.path.join(td, "pr-signoff")) else []
         return rc, state, records
 
-    # justfile_legs: a diff that has content but no hunk header git's plain
-    # format would print (colour codes, an external driver's output, a
-    # binary notice) selects every leg instead of none.
-    def fake_jf_run(out):
-        return lambda cmd, **kw: _types.SimpleNamespace(returncode=0, stdout=out)
+    # justfile_legs reads the two blobs with `git show` and nothing else, so
+    # no diff setting can change its answer; a blob git cannot produce (a
+    # justfile renamed or deleted on either side) forces every leg.
+    seen = []
+
+    def fake_show(cmd, **kw):
+        seen.append(cmd[:2])
+        return _types.SimpleNamespace(returncode=128 if cmd[2].startswith("HEAD:") else 0, stdout="")
     try:
-        mod.run = fake_jf_run("\x1b[36m@@ -3 +3 @@\x1b[m\n-old\n+new\n")
-        coloured = justfile_legs("b" * 40)
-        mod.run = fake_jf_run("Binary files a/justfile and b/justfile differ\n")
-        binary = justfile_legs("b" * 40)
+        mod.run = fake_show
+        missing = justfile_legs("b" * 40)
     finally:
         mod.run = saved["run"]
-    report(coloured == set(gate_scope.ALL_LEGS) and binary == set(gate_scope.ALL_LEGS),
-           "justfile-unreadable-diff-forces-all",
-           f"coloured={sorted(coloured)} binary={sorted(binary)}")
-
+    report(missing == set(gate_scope.ALL_LEGS) and all(c == ["git", "show"] for c in seen),
+           "justfile-legs-reads-blobs-only", f"legs={sorted(missing)} calls={seen}")
     head = "f" * 40
     rc, st, recs = drive(["gates-selftest"], ["README.md"], [head])
     report(rc == 3 and st["legs_calls"] == 0 and st["ctx"] == 0 and not recs,
