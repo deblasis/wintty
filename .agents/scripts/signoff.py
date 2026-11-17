@@ -138,6 +138,30 @@ def _recipe_semantics(recipe):
 _PLATFORM_ATTR = re.compile(r"^\[(windows|unix|linux|macos)\]\s*$")
 
 
+def _normalized_region(lines):
+    """A region's lines reduced to what a change in meaning can touch:
+    indented comment lines (a shebang first body line is not one), blank
+    body lines and the carriage return of a CRLF ending never count."""
+    out = []
+    body = 0
+    for raw in lines:
+        line = raw[:-1] if raw.endswith("\r") else raw
+        if line and not line[0].isspace():
+            out.append(line)
+            body = 0
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") and not (body == 0 and stripped.startswith("#!")):
+            continue
+        body += 1
+        out.append(line)
+    while out and not out[-1]:
+        out.pop()
+    return "\n".join(out)
+
+
 def _variant_regions(text):
     """{recipe name: [region text, ...]} for the platform-attribute regions
     of a justfile: from a column-0 [windows]/[unix]/[linux]/[macos] line
@@ -145,9 +169,10 @@ def _variant_regions(text):
 
     just's dump shows each recipe in the definition valid on the host that
     dumped it, so these regions are the one part of the file that reading
-    cannot see. The scan is lexical and deliberately dumb; comments inside
-    a region count as changes, because nothing else can see the region at
-    all."""
+    cannot see. The scan is lexical and deliberately dumb, and the
+    normalization is as blind as it can be while keeping every real edit:
+    a comment or a line-ending flip inside a region must not cost anything,
+    and anything else in it might be the only copy of a change."""
     regions = {}
     lines = text.split("\n")
     i = 0
@@ -172,10 +197,7 @@ def _variant_regions(text):
             continue
         while i < len(lines) and (not lines[i] or lines[i][0].isspace()):
             i += 1
-        region = lines[start:i]
-        while region and not region[-1]:
-            region.pop()
-        regions.setdefault(header, []).append("\n".join(region))
+        regions.setdefault(header, []).append(_normalized_region(lines[start:i]))
     return regions
 
 
@@ -834,7 +856,9 @@ def self_test():
         ("variant-body-edited", b"no regions", b"[unix]\ntest-win:\n    echo a\n", win),
         ("variant-added", b"no regions", b"[linux]\ntest:\n    echo a\n", zig),
         ("variant-unmapped", b"no regions", b"[unix]\nhello:\n    echo a\n", set()),
-        ("variant-comment-counts", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    # note\n    echo a\n", win),
+        ("variant-comment-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    # note\n    echo a\n", set()),
+        ("variant-crlf-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\r\ntest-win:\r\n    echo a\r\n", set()),
+        ("variant-shebang-counts", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    #!/bin/sh\n    echo a\n", win),
         ("variant-indent-noise-ignored", b"[unix]\ntest-win:\n    echo a\n\n", b"[unix]\ntest-win:\n    echo a\n", set()),
     ]
     for label, ob, nb, expect in variant_blobs:
