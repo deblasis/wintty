@@ -6,7 +6,7 @@
 <p align="center">
   A libghostty-powered terminal emulator for Windows.
   <br />
-  Ghostty on Windows? There is no official Ghostty for Windows: version 1.4.0
+  Ghostty on Windows? There is no official Ghostty for Windows: Ghostty 1.4.0
   dropped the roadmap for Windows support in the Ghostty GUI.
   <code>libghostty</code>, the core of Ghostty, fully supports Windows. Wintty
   is the native Windows app around it: a WinUI 3 shell and a DirectX 12 (GPU)
@@ -25,7 +25,7 @@
   ·
   <a href="https://wintty.io/docs/?utm_source=gh_readme&utm_content=nav">Documentation</a>
   ·
-  <a href="#build-from-source">Build from source</a>
+  <a href="#build-from-source-free-always">Build from source</a>
   ·
   <a href="CONTRIBUTING.md">Contributing</a>
   ·
@@ -42,16 +42,16 @@ sponsors-only Discord channel; Pro adds more
 ([tiers](https://wintty.io/docs/install/tiers/?utm_source=gh_readme)).
 
 The OSS and the Sponsor versions require Windows 10 or 11 and a DirectX 12
-feature-level-12.0 GPU. x64 is the main build; Sponsor and Pro also ship an
-experimental ARM64 build. These builds have no software fallback, so VMs without
-GPU passthrough and Remote Desktop sessions will not start them.
+feature-level-12.0 GPU. These builds have no software fallback, so VMs without
+GPU passthrough and Remote Desktop sessions will not start them. x64 is the
+main build; Sponsor and Pro desktop also ship an experimental ARM64 build.
 
 The Pro Legacy tier exists for exactly those boxes, shipping a DirectX 11 renderer
 whose WARP software rasterizer engages automatically on no-GPU systems and in
 remote sessions. SmartScreen may show "Windows protected your PC" on first run
 of a newly published build (choose More info, then Run anyway).
 
-**IMPORTANT:** Do NOT trust installers and/or binaries that are not sourced from https://wintty.io/download and are not digitally signed.
+**IMPORTANT:** Do NOT trust installers and/or binaries that are not sourced from https://wintty.io/download/ and are not digitally signed.
 
 
 ### Build from source (free, always)
@@ -64,7 +64,7 @@ just              # tests + build the DLL
 just build-win    # the app
 ```
 
-Prerequisites: [Zig](https://ziglang.org/) 0.16 or newer (floor set by
+Prerequisites: [Zig](https://ziglang.org/) 0.17 or newer (floor set by
 `minimum_zig_version` in `build.zig.zon`), [Just](https://github.com/casey/just),
 [PowerShell 7](https://aka.ms/powershell), and the
 [.NET 10 SDK](https://dotnet.microsoft.com/) (version pinned in
@@ -92,7 +92,7 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 > Windows lives.
 
 
-## What you get: Ghostty on Windows
+## Ghostty for Windows: what you get
 
 - Real terminal emulation on `libghostty`, the Zig core Ghostty ships, Kitty
   graphics protocol included
@@ -126,7 +126,8 @@ The full per-tier feature matrix:
 ### Does Ghostty work on Windows?
 
 Not as an official app. Wintty runs Ghostty's core, `libghostty`, as a native
-Windows app.
+Windows app. More in
+[Ghostty for Windows](https://wintty.io/ghostty-for-windows/?utm_source=gh_readme&utm_content=faq).
 
 ### How do I get Ghostty on Windows?
 
