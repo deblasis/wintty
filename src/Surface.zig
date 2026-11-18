@@ -1932,7 +1932,6 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
                 self.retry_on_exit,
                 self.restart_spec != null,
                 self.readonly,
-                dormant,
             );
             self.restart_key = if (self.restart_offered) self.retry_key else null;
             if (self.restart_offered) {
@@ -2019,18 +2018,16 @@ fn restartOffered(
     retry_on_exit: bool,
     has_spec: bool,
     readonly: bool,
-    dormant: bool,
 ) bool {
-    return keep_open and retry_on_exit and has_spec and !readonly and !dormant;
+    return keep_open and retry_on_exit and has_spec and !readonly;
 }
 
 test "restartOffered truth table" {
-    try std.testing.expect(!restartOffered(false, true, true, false, false));
-    try std.testing.expect(!restartOffered(true, false, true, false, false));
-    try std.testing.expect(!restartOffered(true, true, false, false, false));
-    try std.testing.expect(!restartOffered(true, true, true, true, false));
-    try std.testing.expect(!restartOffered(true, true, true, false, true));
-    try std.testing.expect(restartOffered(true, true, true, false, false));
+    try std.testing.expect(!restartOffered(false, true, true, false));
+    try std.testing.expect(!restartOffered(true, false, true, false));
+    try std.testing.expect(!restartOffered(true, true, false, false));
+    try std.testing.expect(!restartOffered(true, true, true, true));
+    try std.testing.expect(restartOffered(true, true, true, false));
 }
 
 /// Whether a surface whose child exited (normally, past the abnormal-exit
@@ -2703,7 +2700,7 @@ pub fn updateConfig(
 
     // Re-parse the retry key: a corrected key must reach held-open panes,
     // whose notice already names the old one.
-    self.retry_key = retryKeyFromConfig(original);
+    self.retry_key = retryKeyFromConfig(config);
 
     // Notify the window
     _ = try self.rt_app.performAction(
