@@ -173,6 +173,29 @@ config_conditional_state: configpkg.ConditionalState,
 /// This is used to determine if we need to confirm, hold open, etc.
 child_exited: bool = false,
 
+/// The spawn spec for restarting this surface's command after its child
+/// exits. Built before the initial IO spawn and freed in `deinit`; see
+/// `termio.Exec.RestartSpec`.
+restart_spec: ?termio.Exec.RestartSpec = null,
+
+/// Whether `io_thr` names a live IO thread. False before the initial
+/// spawn and between a restart's teardown and its new spawn, so `deinit`
+/// never notifies, joins or deinits a handle that has no thread (the
+/// Phase D spawn-failure state).
+io_started: bool = false,
+
+/// Teardown token for messages the IO machinery pushes to the app
+/// thread. Latched at the top of `deinit` (authoritative) and by `close`
+/// as a hint; reset at the start of a restart attempt, where the surface
+/// is provably alive.
+restart_abort: std.atomic.Value(bool) = .init(false),
+
+/// True while the exit notice offers a restart: the pane is held open,
+/// a spawn spec exists, and the surface is neither read-only nor dormant.
+/// Set under `renderer_state.mutex`; the press predicate gates read-only
+/// at the key, never here.
+restart_offered: bool = false,
+
 /// Close on a clean exit even when `wait-after-command` holds the surface
 /// open: exit code 0 closes it, any other code keeps it open to show the
 /// status. This is Windows Terminal's `closeOnExit: graceful`. An embedding
@@ -742,53 +765,52 @@ pub fn init(
         break :command config.command;
     };
 
+    // Everything a restart re-spawns from, captured before the config arena
+    // is freed. Built here -- before the IO spawn, the last fallible step --
+    // and adopted only after that spawn succeeds: building it after the
+    // spawn would unwind `io.deinit`/`io_thread.deinit` under a running
+    // thread on OOM, and adopting it earlier would leak it on a later init
+    // failure.
+    const restart_spec = try termio.Exec.RestartSpec.init(alloc, .{
+        .command = command,
+        .working_directory = if (config.@"working-directory") |wd| wd.value() else null,
+        // Whether that directory is one the user wrote. A WSL shell reads
+        // the difference as "open somewhere else instead": see
+        // Config.WorkingDirectoryDefaulted, which answers from these two.
+        .working_directory_defaulted = config._working_directory_defaulted,
+        .env_override = config.env,
+        .shell_integration = config.@"shell-integration",
+        .shell_integration_features = config.@"shell-integration-features",
+        .cursor_blink = config.@"cursor-style-blink",
+        .utf8_console = if (comptime builtin.os.tag == .windows)
+            config.@"utf8-console"
+        else {},
+        .resources_dir = global.resourcesDir().host(),
+        .term = config.term,
+        .rt_pre_exec_info = .init(config),
+        .rt_post_fork_info = .init(config),
+    });
+    var restart_spec_owned = true;
+    errdefer if (restart_spec_owned) restart_spec.deinit(alloc);
+
     // Start our IO implementation
     // This separate block ({}) is important because our errdefers must
     // be scoped here to be valid.
     {
-        // Exec.init takes ownership of the env even if it fails, so the
-        // errdefer for it must not reach past the call.
-        const env = termio_env: {
-            var env = rt_surface.defaultTermioEnv() catch |err| env: {
-                // If an error occurs, we don't want to block surface startup.
-                log.warn("error getting env map for surface err={}", .{err});
-                break :env global.environMap() catch std.process.Environ.Map.init(alloc);
-            };
-            errdefer env.deinit();
+        var env = try self.childEnv(alloc);
+        var env_owned = true;
+        errdefer if (env_owned) env.deinit();
 
-            // don't leak GHOSTTY_LOG to any subprocesses
-            _ = env.orderedRemove("GHOSTTY_LOG");
-
-            var buf: [18]u8 = undefined;
-            try env.put(
-                "GHOSTTY_SURFACE_ID",
-                std.mem.print(&buf, "0x{x:0>16}", .{self.id}) catch unreachable,
-            );
-
-            break :termio_env env;
-        };
+        // The first spawn takes the same config path a restart does, so the
+        // two cannot drift. `Subprocess.init` owns `cfg.env` from entry, so
+        // the block errdefer is disarmed immediately before that call; Zig
+        // errdefers are block-scoped, and leaving one armed through the
+        // call would free the same map twice on its failure path.
+        const exec_config = restart_spec.toConfig(env);
+        env_owned = false;
 
         // Initialize our IO backend
-        var io_exec = try termio.Exec.init(alloc, .{
-            .command = command,
-            .env = env,
-            .env_override = config.env,
-            .shell_integration = config.@"shell-integration",
-            .shell_integration_features = config.@"shell-integration-features",
-            .cursor_blink = config.@"cursor-style-blink",
-            .working_directory = if (config.@"working-directory") |wd| wd.value() else null,
-            // Whether that directory is one the user wrote. A WSL shell reads
-            // the difference as "open somewhere else instead": see
-            // Config.WorkingDirectoryDefaulted, which answers from these two.
-            .working_directory_defaulted = config._working_directory_defaulted,
-            .resources_dir = global.resourcesDir().host(),
-            .term = config.term,
-            .utf8_console = if (comptime builtin.target.os.tag == .windows)
-                config.@"utf8-console"
-            else {},
-            .rt_pre_exec_info = .init(config),
-            .rt_post_fork_info = .init(config),
-        });
+        var io_exec = try termio.Exec.init(alloc, exec_config);
         errdefer io_exec.deinit();
 
         // Initialize our IO mailbox
@@ -876,6 +898,13 @@ pub fn init(
         .{ &self.io_thread, &self.io },
     );
     self.io_thr.setName(global.io(), "io") catch {};
+    self.io_started = true;
+
+    // The spawn succeeded, so the spec is adopted by the surface (freed in
+    // `deinit`); the errdefer above is disarmed. This assignment is
+    // infallible and every earlier fallible step has passed.
+    self.restart_spec = restart_spec;
+    restart_spec_owned = false;
 
     // Determine our initial window size if configured. We need to do this
     // quite late in the process because our height/width are in grid dimensions,
@@ -948,6 +977,11 @@ fn setInitialTitle(self: *Surface, title: [:0]const u8) void {
 }
 
 pub fn deinit(self: *Surface) void {
+    // Authoritative teardown latch, before anything can join: a required
+    // push still in flight from the IO machinery gives up instead of
+    // spending its whole delivery budget against a surface going away.
+    self.restart_abort.store(true, .release);
+
     // Stop search thread
     if (self.search) |*s| s.deinit();
 
@@ -958,11 +992,15 @@ pub fn deinit(self: *Surface) void {
         self.renderer_thr.join();
     }
 
-    // Stop our IO thread
-    {
+    // Stop our IO thread. `io_started` is false before the initial spawn
+    // and in the restart's post-teardown (Phase D spawn failure) state, so
+    // this must not notify/join/deinit a handle with no thread.
+    if (self.io_started) {
         self.io_thread.stop.notify() catch |err|
             log.err("error notifying io thread to stop, may stall err={}", .{err});
         self.io_thr.join();
+        self.io_thread.deinit();
+        self.io_started = false;
     }
 
     // We need to deinit AFTER everything is stopped, since there are
@@ -974,7 +1012,6 @@ pub fn deinit(self: *Surface) void {
     // stops the display link for good.
     self.renderer.deinit();
     self.renderer_thread.deinit();
-    self.io_thread.deinit();
     // A dormant terminal is already torn down; the gesture's deinit
     // untracks pins from pages that no longer exist, and Termio.deinit
     // below owns the dormant teardown instead.
@@ -999,6 +1036,10 @@ pub fn deinit(self: *Surface) void {
     if (self.renderer_state.preedit) |p| self.alloc.free(p.codepoints);
     self.alloc.destroy(self.renderer_state.mutex);
     self.config.deinit();
+    if (self.restart_spec) |*spec| {
+        spec.deinit(self.alloc);
+        self.restart_spec = null;
+    }
 
     log.info("surface closed id={x}", .{self.id});
 }
@@ -1006,6 +1047,9 @@ pub fn deinit(self: *Surface) void {
 /// Close this surface. This will trigger the runtime to start the
 /// close process, which should ultimately deinitialize this surface.
 pub fn close(self: *Surface) void {
+    // A hint for any required push still in flight; `deinit` latches the
+    // same token and is the authoritative one.
+    self.restart_abort.store(true, .release);
     self.rt_surface.close(self.needsConfirmQuit());
 }
 
@@ -1305,6 +1349,8 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
 
         .child_exited => |v| self.childExited(v),
 
+        .restart_failed => self.restartFailed(),
+
         .desktop_notification => |notification| {
             if (!self.config.desktop_notifications) {
                 log.info("application attempted to display a desktop notification, but 'desktop-notifications' is disabled", .{});
@@ -1510,6 +1556,288 @@ fn selectionScrollTick(self: *Surface) !void {
     try self.queueRender();
 }
 
+/// The environment a child is spawned with, recaptured from the embedder
+/// through the same helper (and fallback) the first run uses. The caller
+/// owns the map; `Subprocess.init` takes it over.
+fn childEnv(self: *Surface, alloc: Allocator) !std.process.Environ.Map {
+    var env = self.rt_surface.defaultTermioEnv() catch |err| env: {
+        // If an error occurs, we don't want to block surface startup.
+        log.warn("error getting env map for surface err={}", .{err});
+        break :env global.environMap() catch std.process.Environ.Map.init(alloc);
+    };
+    errdefer env.deinit();
+
+    // don't leak GHOSTTY_LOG to any subprocesses
+    _ = env.orderedRemove("GHOSTTY_LOG");
+
+    var buf: [18]u8 = undefined;
+    try env.put(
+        "GHOSTTY_SURFACE_ID",
+        std.fmt.bufPrint(&buf, "0x{x:0>16}", .{self.id}) catch unreachable,
+    );
+    return env;
+}
+
+/// The fallible pieces of a restart's new run, built before the old run is
+/// torn down so a failure here leaves the old run and the notice intact.
+const RestartRun = struct {
+    exec: termio.Exec,
+    mailbox: termio.Mailbox,
+    thread: termio.Thread,
+};
+
+/// Phase A: build every fallible new piece. On failure the locals are freed
+/// here and the old run is untouched.
+fn restartBuild(self: *Surface, alloc: Allocator) !RestartRun {
+    const spec = if (self.restart_spec) |*spec| spec else return error.NoRestartSpec;
+
+    var env = try self.childEnv(alloc);
+    var env_owned = true;
+    errdefer if (env_owned) env.deinit();
+
+    const exec_config = spec.toConfig(env);
+    // `Subprocess.init` owns `cfg.env` from entry, so this errdefer must be
+    // disarmed immediately before the call: leaving it armed would free the
+    // map twice on the call's own failure path.
+    env_owned = false;
+    var exec = try termio.Exec.init(alloc, exec_config);
+    errdefer exec.deinit();
+
+    var mailbox = try termio.Mailbox.initSPSC(alloc);
+    errdefer mailbox.deinit(alloc);
+
+    var thread = try termio.Thread.init(alloc);
+    errdefer thread.deinit();
+
+    return .{ .exec = exec, .mailbox = mailbox, .thread = thread };
+}
+
+/// Clear the dormancy block a restart attempt holds. Takes the renderer
+/// mutex (`goDormant` checks the flag under that same lock), so every
+/// caller must have released it first.
+fn restartEnd(self: *Surface) void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    self.io.dormancy_blocked.store(false, .release);
+}
+
+/// Restart the exited child in this same surface, keeping the scrollback.
+///
+/// Returns true when the attempt closed the surface: the caller must not
+/// touch `self` again. Returns false when the surface is alive, whether the
+/// restart succeeded or failed with the notice re-armed.
+fn restartChild(self: *Surface) bool {
+    // Begin the attempt atomically against `goDormant`: one critical
+    // section decides whether dormancy wins and, if not, blocks it.
+    var proceed = false;
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+
+        // A dormant surface refuses: its terminal is torn down to bytes and
+        // cannot be handed to a new child.
+        if (self.renderer_state.dormant.load(.acquire)) return false;
+
+        self.io.dormancy_blocked.store(true, .release);
+
+        if (self.child_exited and self.restart_spec != null) {
+            // Clear the state the offer depended on only once the
+            // precondition holds, and reset the push token: the surface is
+            // provably alive for this attempt.
+            self.restart_abort.store(false, .release);
+            self.child_exited = false;
+            self.restart_offered = false;
+            proceed = true;
+        }
+    }
+
+    if (!proceed) {
+        // Defensive: the key predicate only calls this with both set.
+        // Release the block so dormancy is not wedged.
+        self.restartEnd();
+        return false;
+    }
+
+    return self.restartChildInner() catch |err| {
+        // Phase A failed: the old run and the notice are still in place.
+        // Print and re-arm under the renderer mutex (the helper's
+        // contract), then release the dormancy block.
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        self.io.restartFailed(err);
+        self.child_exited = true;
+        self.restart_offered = true;
+        self.renderer_state.mutex.unlock(global.io());
+        self.restartEnd();
+        return false;
+    };
+}
+
+/// Phases B-D of a restart. The precondition and the dormancy block are the
+/// caller's; no failure after Phase B returns, because the old run is gone.
+fn restartChildInner(self: *Surface) !bool {
+    const alloc = self.alloc;
+
+    // ---- Phase A ---------------------------------------------------------
+    // Transactional: every fallible allocation happens before the dead run
+    // is stopped.
+    var run = try self.restartBuild(alloc);
+
+    // ---- Phase B: stop and replace the dead run --------------------------
+    if (self.io_started) {
+        self.io_thread.stop.notify() catch |err|
+            log.err("error notifying io thread to stop, may stall err={}", .{err});
+        self.io_thr.join();
+        self.io_thread.deinit();
+        self.io_started = false;
+    }
+
+    // `.none` immediately, so a later `Termio.deinit` is a no-op on an
+    // already-stopped backend. The old thread's defers (threadExit,
+    // data.deinit) ran after its loop returned, before the join.
+    self.io.backend.deinit();
+    self.io.backend = .{ .none = {} };
+
+    // The old run's exit latched the one-way abort token. A new run that
+    // inherited it would drop every droppable surface message (title, pwd,
+    // color, bell) instead of spending its fail-fast budget.
+    self.io.terminal_stream.handler.teardown.store(false, .release);
+
+    self.io.mailbox.deinit(alloc);
+    self.io.mailbox = run.mailbox;
+
+    // ---- Phase C: reset the inherited terminal ---------------------------
+    // Takes the renderer mutex itself, so it must run unlocked.
+    self.io.deepIdleTrim();
+
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+
+        const t = &self.io.terminal;
+
+        // The new ConPTY negotiates mode 9001 itself; the old transport bit
+        // must not precede that request. `modes.reset` preserves whatever
+        // it sees here.
+        t.modes.set(.win32_input, false);
+
+        // The dead TUI's alternate screen -- its kitty stack, saved cursor
+        // and cells -- is not the new child's.
+        t.screens.switchTo(.primary);
+        if (t.screens.get(.alternate) != null) t.screens.remove(alloc, .alternate);
+
+        t.modes.reset();
+        t.softReset();
+        t.resetTabstops();
+
+        const primary = t.screens.get(.primary).?;
+        primary.kitty_keyboard = .{};
+        primary.semantic_prompt = .disabled;
+        // Back to output before the resize below: a prompt-tagged cursor
+        // would let the resize's prompt clear take the notice with it.
+        primary.cursorSetSemanticContent(.output);
+        primary.cursor.page_row.semantic_prompt = .none;
+        // Releases the page ref and zeroes both hyperlink fields; writing
+        // the id alone leaves `cursor.hyperlink != null` and trips the next
+        // OSC 8 invariant.
+        primary.endHyperlink();
+
+        // Not scrollback: registrations belong to the dead session.
+        t.glyph_glossary.clearAndFree(t.gpa());
+
+        // Input mirrors `softReset` and `modes.reset` do not carry.
+        t.flags.mouse_event = .none;
+        t.flags.mouse_format = .x10;
+        t.flags.mouse_shift_capture = .null;
+        t.flags.modify_other_keys_2 = false;
+        t.flags.shell_redraws_prompt = .true;
+
+        t.mouse_shape = .text;
+
+        // Best-effort: a swallowed failure keeps the old grid (and the old
+        // `io.size`), and the restart still proceeds.
+        const grid = self.size.grid();
+        const resized = resized: {
+            t.resize(alloc, .{
+                .cols = grid.columns,
+                .rows = grid.rows,
+                .cell_size_px = .{
+                    .width = self.size.cell.width,
+                    .height = self.size.cell.height,
+                },
+            }) catch |err| {
+                log.warn("restart: terminal resize failed err={}", .{err});
+                break :resized false;
+            };
+            break :resized true;
+        };
+
+        // The only pre-start sizing writer for the new pty.
+        run.exec.initTerminal(t);
+
+        // The handler's size reports read `io.size`; on a swallowed resize
+        // error do not assign it, so they report the grid the terminal and
+        // pty actually have.
+        if (resized) self.io.size = self.size;
+
+        // The new child's output must not join the notice's line.
+        t.carriageReturn();
+        t.linefeed() catch {};
+    }
+
+    // A direct `.instant` mailbox push, outside the renderer lock: the
+    // writer path assumes that lock is held, and this caller does not.
+    self.io.terminal_stream.handler.pushMouseShape(.text);
+
+    // ---- Phase C adoption ------------------------------------------------
+    self.io.backend = .{ .exec = run.exec };
+    self.io_thread = run.thread;
+
+    // ---- Phase D: start the new thread -----------------------------------
+    self.io.restarting = true;
+    self.io_thr = std.Thread.spawn(
+        .{},
+        termio.Thread.threadMain,
+        .{ &self.io_thread, &self.io },
+    ) catch |err| {
+        // Post-destructive failure: there is no old run to return to.
+        self.io.backend.deinit();
+        self.io.backend = .{ .none = {} };
+        self.io_thread.deinit();
+
+        {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+            self.io.restartFailed(err);
+        }
+
+        // The pane is closing with no child: the host must not read the
+        // cleared-at-attempt-start flag as a live process and ask for a
+        // close confirmation over a dead pane.
+        self.child_exited = true;
+
+        // Clear the dormancy block BEFORE the close: a synchronous close
+        // that frees the surface must not see a post-free write.
+        self.restartEnd();
+        self.close();
+        return true;
+    };
+    self.io_thr.setName(global.io(), "io") catch {};
+    self.io_started = true;
+    self.restartEnd();
+    return false;
+}
+
+/// A restart's new IO thread failed before it entered. The failed thread
+/// drains and waits for stop; the surface is the only state owner and
+/// re-arms the notice so Enter can retry. `!readonly` is never baked in:
+/// the key predicate gates read-only.
+fn restartFailed(self: *Surface) void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    self.child_exited = true;
+    self.restart_offered = true;
+}
+
 fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
     // Mark our flag that we exited immediately
     self.child_exited = true;
@@ -1525,6 +1853,15 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
         }
 
         log.warn("abnormal process exit detected, showing error message", .{});
+
+        // An abnormal exit never offers a restart. Clear the offer under
+        // the lock that writes it; `childExitedAbnormally` switches to the
+        // primary screen before its notice under the same lock.
+        {
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+            self.restart_offered = false;
+        }
 
         // Try and show a GUI message. If it returns true, don't do anything else.
         if (self.rt_app.performAction(
@@ -1543,6 +1880,44 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
             return;
         };
 
+        return;
+    }
+
+    // Whether this pane is held open at all. Computed before the locked
+    // read so the read stays one load.
+    const keep_open = keepOpenAfterExit(
+        self.config.wait_after_command,
+        self.close_on_clean_exit,
+        info.exit_code,
+    );
+
+    // The offer is a locked decision: `dormant` is read once under the
+    // mutex `goDormant` holds through the teardown, so the notice and the
+    // offer cannot describe a terminal that is already bytes. A read-only
+    // pane is not offered, but that bit is not stored here.
+    var dormant = false;
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+
+        dormant = self.renderer_state.dormant.load(.acquire);
+        if (dormant) {
+            self.restart_offered = false;
+        } else {
+            // The dead child's notice lands on the screen that owns the
+            // scrollback, never on the alternate screen a TUI left behind.
+            const t = self.renderer_state.terminal;
+            if (t.screens.active_key == .alternate) t.screens.switchTo(.primary);
+            self.restart_offered = keep_open and
+                self.restart_spec != null and
+                !self.readonly;
+        }
+    }
+
+    if (dormant) {
+        // There is no terminal to write a notice to; the close contract
+        // still applies.
+        if (!keep_open) self.close();
         return;
     }
 
@@ -1570,8 +1945,16 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
         const t: *terminal.Terminal = self.renderer_state.terminal;
         t.carriageReturn();
         t.linefeed() catch break :terminal;
-        t.printString("Process exited. Press any key to close the terminal.") catch
-            break :terminal;
+        // The offer decides the sentence: only a pane that can actually
+        // restart promises it.
+        if (self.restart_offered) {
+            t.printString(
+                "Process exited. Press Enter to restart, any other key to close.",
+            ) catch break :terminal;
+        } else {
+            t.printString("Process exited. Press any key to close the terminal.") catch
+                break :terminal;
+        }
         t.modes.set(.cursor_visible, false);
 
         // We also want to ensure that normal keyboard encoding is on
@@ -1583,11 +1966,7 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
 
     // Waiting after command we stop here. The terminal is updated, our
     // state is updated, and now its up to the user to decide what to do.
-    if (keepOpenAfterExit(
-        self.config.wait_after_command,
-        self.close_on_clean_exit,
-        info.exit_code,
-    )) return;
+    if (keep_open) return;
 
     // If we aren't waiting after the command, then we exit immediately
     // with no confirmation.
@@ -1632,6 +2011,7 @@ test "keepOpenAfterExit: graceful close for a launch command" {
     // Not waiting: always closes.
     try testing.expect(!keepOpenAfterExit(false, false, 0));
     try testing.expect(!keepOpenAfterExit(false, false, 3));
+    try testing.expect(!keepOpenAfterExit(false, true, 0));
     // Waiting: stays open whatever the code.
     try testing.expect(keepOpenAfterExit(true, false, 0));
     try testing.expect(keepOpenAfterExit(true, false, 3));
@@ -1652,6 +2032,7 @@ fn childExitedAbnormally(
 
     // Build up our command for the error message
     const command = try std.mem.join(alloc, " ", switch (self.io.backend) {
+        .none => &.{},
         .exec => |*exec| exec.subprocess.args,
     });
     const runtime_str = try alloc.print("{d} ms", .{info.runtime_ms});
@@ -1659,6 +2040,11 @@ fn childExitedAbnormally(
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
     const t: *terminal.Terminal = self.renderer_state.terminal;
+
+    // The abnormal notice belongs on the primary screen, the one that owns
+    // the scrollback, like the normal exit notice. An alternate screen a
+    // dead TUI left behind is not where the user looks for it.
+    if (t.screens.active_key == .alternate) t.screens.switchTo(.primary);
 
     // No matter what move the cursor back to the column 0.
     t.carriageReturn();
@@ -2065,6 +2451,12 @@ pub fn updateConfig(
     // We want a config pointer for everything so we get that either
     // based on our conditional state or the original config.
     const config: *const configpkg.Config = if (config_) |*c| c else original;
+
+    // A reload is the only way a value already captured for a restart can
+    // be revoked: refresh the spec's env before the early return below, so
+    // a reload that fails to derive still revokes (the old clone is kept
+    // when the clone itself fails).
+    if (self.restart_spec) |*spec| spec.updateEnvOverride(self.alloc, config.env);
 
     // Update our new derived config immediately
     const derived = DerivedConfig.init(self.alloc, config) catch |err| {
@@ -3204,6 +3596,29 @@ pub fn keyCallback(
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
         if (self.io.terminal.modes.get(.disable_keyboard)) return .consumed;
+    }
+
+    // An exited, held-open pane offers a restart on plain Enter. Any other
+    // encoded key keeps today's close semantics (the encode path below).
+    // `mods.binding()` ignores CapsLock/NumLock, which must not make Enter
+    // stop being "plain"; read-only is gated here, at the press.
+    if (self.child_exited) {
+        if (event.action == .press and
+            (event.key == .enter or event.key == .numpad_enter) and
+            event.mods.binding().empty() and
+            !self.readonly and
+            self.restart_offered)
+        {
+            const closed = self.restartChild();
+            if (closed) {
+                // self is dead from here, exactly like a closing binding.
+                surface_closed = true;
+                return .closed;
+            }
+            // Handled: never forwarded to a child that is gone.
+            return .consumed;
+        }
+        // Anything else falls through to encode-and-close.
     }
 
     // If this input event has text, then we hide the mouse if configured.

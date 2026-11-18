@@ -1309,6 +1309,21 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.{ .set_mouse_shape = shape });
     }
 
+    /// Push the mouse shape to the surface without the dedupe `setMouseShape`
+    /// does. A restart resets `terminal.mouse_shape` to `.text` itself, so the
+    /// field comparison cannot tell it whether the apprt is still showing the
+    /// dead child's shape; this pushes unconditionally. It also must not go
+    /// through `surfaceMessageWriter`, which assumes the renderer mutex is
+    /// held and unlocks/relocks on a full mailbox (a UI-thread caller holds
+    /// no such lock). A full mailbox drops the message: the next OSC 22 from
+    /// the new child derives the shape again.
+    pub fn pushMouseShape(self: *StreamHandler, shape: terminal.MouseShape) void {
+        _ = self.surface_mailbox.push(
+            .{ .set_mouse_shape = shape },
+            .{ .instant = {} },
+        );
+    }
+
     fn clipboardContents(self: *StreamHandler, kind: u8, data: []const u8) !void {
         // Note: we ignore the "kind" field and always use the standard clipboard.
         // iTerm also appears to do this but other terminals seem to only allow

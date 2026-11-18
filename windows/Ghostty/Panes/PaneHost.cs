@@ -378,6 +378,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
     public LeafPane? ZoomedLeaf => _zoomedLeaf;
 
+#if TESTSEAM
     // ---- test seam accessors (WINTTY_TEST_SEAM=1) --------------------
     // Named TestSeam* so the seam's footprint on this class is greppable
     // and removable as one shape. The rects read RENDERED geometry rather
@@ -483,6 +484,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         var origin = element.TransformToVisual(null).TransformPoint(new Point(0, 0));
         return new Rect(origin.X, origin.Y, element.ActualWidth, element.ActualHeight);
     }
+#endif
 
     /// <summary>
     /// Raised after any structural change to the tree (split, close,

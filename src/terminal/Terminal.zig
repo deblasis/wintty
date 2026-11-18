@@ -3002,6 +3002,13 @@ pub fn tabReset(self: *Terminal) void {
     self.tabstops.reset(TABSTOP_INTERVAL);
 }
 
+/// Reset every tabstop to the default interval. DECSTR does this; the
+/// interval constant is private to this file, so a caller outside it
+/// (a surface handing the terminal to a new child) needs this helper.
+pub fn resetTabstops(self: *Terminal) void {
+    self.tabstops.reset(TABSTOP_INTERVAL);
+}
+
 /// Move the cursor to the next line in the scrolling region, possibly scrolling.
 ///
 /// If the cursor is outside of the scrolling region: move the cursor one line

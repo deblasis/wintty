@@ -146,6 +146,14 @@ pub const Message = union(enum) {
     /// command are given in the `ChildExited` struct.
     child_exited: ChildExited,
 
+    /// A restart attempt's new IO thread failed before it entered. Pushed by
+    /// `termio.Thread.threadMain` before the reason line is printed, so a
+    /// reader that synchronizes on the line already sees the offer queued;
+    /// the surface re-arms the exit notice and the next Enter can retry.
+    /// Nothing is re-derivable: dropping it would leave a dead surface with
+    /// no offer.
+    restart_failed: void,
+
     /// Show a desktop notification.
     desktop_notification: DesktopNotification,
 
@@ -259,6 +267,7 @@ pub const Message = union(enum) {
             .change_config,
             .close,
             .child_exited,
+            .restart_failed,
             .desktop_notification,
             .renderer_health,
             .present_surface,
@@ -288,11 +297,13 @@ pub const Message = union(enum) {
     /// re-derives the message, so dropping it is permanent and
     /// user-visible; those must go through `pushRequired`.
     ///
-    /// `.child_exited` is the only one today. `Exec.processExitCommon`
-    /// runs once per surface lifetime and `Surface.childExited` is what
-    /// sets `self.child_exited`, so without it `close-on-exit` never
-    /// fires, the exit overlay never appears, and the close confirmation
-    /// keeps asking about a process that is already gone.
+    /// `.child_exited` and `.restart_failed` are the two today.
+    /// `Exec.processExitCommon` runs once per surface lifetime and
+    /// `Surface.childExited` is what sets `self.child_exited`, so without
+    /// it `close-on-exit` never fires, the exit overlay never appears, and
+    /// the close confirmation keeps asking about a process that is already
+    /// gone. `.restart_failed` is the only re-arm of the restart offer: a
+    /// dropped one leaves a dead pane with no way back.
     ///
     /// Exhaustive on purpose, matching `deinit`. Two things follow, and
     /// both are the point of writing it this way:
@@ -310,7 +321,7 @@ pub const Message = union(enum) {
     ///     change exists to close.
     pub fn dropAllowed(self: Message) bool {
         return switch (self) {
-            .child_exited => false,
+            .child_exited, .restart_failed => false,
 
             .set_title,
             .report_title,
@@ -643,10 +654,10 @@ test "surface message variants are all accounted for by the push give-up path" {
     // Make that decision, then bump this count. Without the guard a new
     // owning variant compiles and leaks silently on every drop.
     const fields = comptime meta_compat.unionFields(Message);
-    try std.testing.expectEqual(@as(usize, 30), fields.len);
+    try std.testing.expectEqual(@as(usize, 31), fields.len);
 }
 
-test "the child-exit notice is the one message push may not carry" {
+test "the child-exit notice and a failed restart are messages push may not carry" {
     // This is the decision `Mailbox.push` and `Mailbox.pushRequired`
     // assert on, and it is the only part of the guard a test in this
     // config can reach: `Mailbox.push` itself is not semantically
@@ -658,6 +669,10 @@ test "the child-exit notice is the one message push may not carry" {
         .exit_code = 0,
         .runtime_ms = 0,
     } }).dropAllowed());
+
+    // A failed restart re-arms the only retry affordance; nothing
+    // re-derives it, so it is undroppable like the exit notice.
+    try std.testing.expect(!(Message{ .restart_failed = {} }).dropAllowed());
 
     // And the assert in `push` must not fire on anything the stream
     // handler, the renderer or the search thread actually send, one per

@@ -76,6 +76,11 @@ pub fn clone(
     var it = self.map.iterator();
     while (it.next()) |entry| {
         const key = try alloc.dupeSentinel(u8, entry.key_ptr.*, 0);
+        // The value dupe can fail after the key is allocated and before the
+        // map owns it; free it with the iteration that allocated it. A
+        // completed iteration's errdefer is out of scope, so a later entry's
+        // failure still leaves this key to the map's own errdefer.
+        errdefer alloc.free(key);
         const value = try alloc.dupeSentinel(u8, entry.value_ptr.*, 0);
         map.putAssumeCapacity(key, value);
     }

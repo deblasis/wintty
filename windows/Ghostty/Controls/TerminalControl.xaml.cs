@@ -669,6 +669,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         PwdChanged?.Invoke(this, pwd);
     }
 
+#if TESTSEAM
     /// <summary>
     /// Hand <paramref name="text"/> to this surface the way committed IME
     /// text arrives: one ghostty_surface_text call, no synthesized OS input
@@ -688,7 +689,26 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         return true;
     }
 
-#if TESTSEAM
+    /// <summary>
+    /// The test seam's key press: the same retire a real OnKeyDown runs
+    /// first, then the same ghostty_surface_key forward SendKey makes,
+    /// with the scancode derived the same way from the virtual key (a
+    /// seam press has no KeyStatus, so the MapVirtualKey fallback is the
+    /// only path, as it is for keys WinUI 3 strips a scancode from).
+    /// Non-extended keys only: the seam cannot know IsExtendedKey.
+    /// </summary>
+    internal bool TestSeamKeyDown(Windows.System.VirtualKey key, GhosttyMods mods, GhosttyInputAction action)
+    {
+        // OnKeyDown's first statement: an arm left over from a consumed
+        // close elsewhere must not decide this key's character's fate.
+        RetireStaleCharacterSuppress();
+
+        uint scancode = PInvoke.MapVirtualKey(
+            (uint)key,
+            MAP_VIRTUAL_KEY_TYPE.MAPVK_VK_TO_VSC);
+        return SendKeyCore(scancode, action, mods);
+    }
+
     /// <summary>
     /// A right-click at the centre of the pane, for the test seam: the press
     /// and release halves the pointer handlers run, in order, so the capture
@@ -3160,26 +3180,6 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             Composing = (byte)(_imeForwarder.Composing ? 1 : 0),
         };
         return NativeMethods.SurfaceKey(_surface, key);
-    }
-
-    /// <summary>
-    /// The test seam's key press: the same retire a real OnKeyDown runs
-    /// first, then the same ghostty_surface_key forward SendKey makes,
-    /// with the scancode derived the same way from the virtual key (a
-    /// seam press has no KeyStatus, so the MapVirtualKey fallback is the
-    /// only path, as it is for keys WinUI 3 strips a scancode from).
-    /// Non-extended keys only: the seam cannot know IsExtendedKey.
-    /// </summary>
-    internal bool TestSeamKeyDown(Windows.System.VirtualKey key, GhosttyMods mods, GhosttyInputAction action)
-    {
-        // OnKeyDown's first statement: an arm left over from a consumed
-        // close elsewhere must not decide this key's character's fate.
-        RetireStaleCharacterSuppress();
-
-        uint scancode = PInvoke.MapVirtualKey(
-            (uint)key,
-            MAP_VIRTUAL_KEY_TYPE.MAPVK_VK_TO_VSC);
-        return SendKeyCore(scancode, action, mods);
     }
 
     private void OnCharacterReceived(UIElement sender, CharacterReceivedRoutedEventArgs e)

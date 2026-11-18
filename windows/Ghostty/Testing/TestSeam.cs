@@ -917,16 +917,7 @@ internal static class TestSeam
                 if (grid is null)
                     return Error(op, $"tab {index} cell read failed");
                 var g = grid.Value;
-                var sb = new System.Text.StringBuilder((g.Rows + 1) * g.Cols);
-                for (var y = 0; y < g.Rows; y++)
-                {
-                    for (var x = 0; x < g.Cols; x++)
-                    {
-                        var cp = g.Cells[y * g.Cols + x].Codepoint;
-                        sb.Append(cp == 0 ? ' ' : (char)cp);
-                    }
-                    sb.Append('\n');
-                }
+                var text = CellsToViewportText(g);
                 return Json(json =>
                 {
                     json.WriteStartObject();
@@ -940,7 +931,66 @@ internal static class TestSeam
                     json.WriteNumber("cursorRow", g.CursorRow);
                     json.WriteNumber("cursorCol", g.CursorCol);
                     json.WriteBoolean("cursorInViewport", g.CursorInViewport);
-                    json.WriteString("text", sb.ToString());
+                    json.WriteString("text", text);
+                    json.WriteEndObject();
+                });
+            }
+
+            case "screen-scroll":
+            {
+                // Scrolls one leaf's viewport through the real
+                // binding-action path (no key input) and returns the viewport
+                // text. `row` is optional; -1 reads the current viewport
+                // without scrolling, and a row past the end clamps to the
+                // active viewport (the bottom). `scroll_to_row:N` is
+                // synchronous (`scroll_to_bottom` queues to the IO thread and
+                // would race the read).
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                var host = (Panes.PaneHost)tab.PaneHost;
+                var terminal = host.TestSeamLeafTerminal(
+                    ArgInt(args, "leaf", -1))
+                    ?? host.ActiveLeaf.Terminal();
+                if (terminal.SurfaceHandle == IntPtr.Zero)
+                    return Error(op, $"tab {index} has no live surface");
+                var handle = new Interop.GhosttySurface(terminal.SurfaceHandle);
+                var row = ArgInt(args, "row", -1);
+                if (row >= 0)
+                {
+                    var action = $"scroll_to_row:{row}";
+                    var actionBytes = Encoding.UTF8.GetBytes(action);
+                    bool applied;
+                    unsafe
+                    {
+                        fixed (byte* p = actionBytes)
+                        {
+                            applied = Interop.NativeMethods.SurfaceBindingAction(
+                                handle, p, (UIntPtr)actionBytes.Length);
+                        }
+                    }
+                    if (!applied)
+                        return Error(op, $"binding action '{action}' refused");
+                }
+                var grid = Interop.NativeMethods.SurfaceReadCells(handle);
+                if (grid is null)
+                    return Error(op, $"tab {index} cell read failed");
+                var g = grid.Value;
+                var text = CellsToViewportText(g);
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteNumber("index", index);
+                    json.WriteNumber("leaf", ArgInt(args, "leaf", -1));
+                    json.WriteNumber("row", row);
+                    json.WriteNumber("rows", g.Rows);
+                    json.WriteNumber("cols", g.Cols);
+                    json.WriteNumber("cursorRow", g.CursorRow);
+                    json.WriteNumber("cursorCol", g.CursorCol);
+                    json.WriteBoolean("cursorInViewport", g.CursorInViewport);
+                    json.WriteString("text", text);
                     json.WriteEndObject();
                 });
             }
@@ -3338,6 +3388,26 @@ internal static class TestSeam
         json.WriteNumber("y", rect.Y);
         json.WriteNumber("w", rect.Width);
         json.WriteNumber("h", rect.Height);
+    }
+
+    /// <summary>
+    /// Flatten a surface's cell grid into the viewport text the screen ops
+    /// return. The ui-liveness search walks its own row because it looks for
+    /// a needle, not the whole viewport.
+    /// </summary>
+    private static string CellsToViewportText(in CellGrid g)
+    {
+        var sb = new System.Text.StringBuilder((g.Rows + 1) * g.Cols);
+        for (var y = 0; y < g.Rows; y++)
+        {
+            for (var x = 0; x < g.Cols; x++)
+            {
+                var cp = g.Cells[y * g.Cols + x].Codepoint;
+                sb.Append(cp == 0 ? ' ' : (char)cp);
+            }
+            sb.Append('\n');
+        }
+        return sb.ToString();
     }
 
     // ---- argument readers --------------------------------------------

@@ -134,108 +134,169 @@ pub fn deinit(self: *Thread) void {
 
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread, io: *termio.Termio) void {
+    // A failed restart's `.restart_failed` push happens AFTER the catch
+    // below, because the pin's catch holds `renderer_state.mutex` through
+    // its `defer`. The push is required, so it spends a `.persist` budget
+    // on a full app mailbox; holding the renderer mutex for that would
+    // stall the UI thread's `restartEnd` for the same 60 s.
+    var restart_failed_push = false;
+    var restart_failed_err: ?anyerror = null;
+
     // Call child function so we can use errors...
     self.threadMain_(io) catch |err| {
         log.warn("error in io thread err={}", .{err});
 
-        // Use an arena to simplify memory management below
-        var arena = ArenaAllocator.init(self.alloc);
-        defer arena.deinit();
-        const alloc = arena.allocator();
-
-        // If there is an error, we replace our terminal screen with
-        // the error message. It might be better in the future to send
-        // the error to the surface thread and let the apprt deal with it
-        // in some way but this works for now. Without this, the user would
-        // just see a blank terminal window.
+        // The pin's catch takes the renderer mutex here and holds it
+        // through the error screen. `restartFailed` is a caller-holds
+        // helper, so this branch must not lock a second time.
         io.renderer_state.mutex.lockUncancelable(global.io());
         defer io.renderer_state.mutex.unlock(global.io());
-        const t = io.renderer_state.terminal;
 
-        // Hide the cursor
-        t.modes.set(.cursor_visible, false);
+        if (io.restarting) {
+            // The new run failed before it entered (a dead executable, a
+            // spawn refusal). The surface owns the state re-arm; the
+            // terminal is still the one the restart reset, so print there
+            // unless a dormancy transition got in first (defensive: a
+            // failed enter cannot dispatch `.go_dormant`).
+            io.restarting = false;
+            if (io.renderer_state.dormant.load(.acquire)) {
+                log.warn("restart failed while dormant err={}", .{err});
+            } else {
+                // The reason line must not be readable before the surface
+                // is offered the retry. Queue the re-arm first (after the
+                // catch, without this mutex), then print.
+                restart_failed_err = err;
+            }
+            restart_failed_push = true;
+        } else if (io.renderer_state.dormant.load(.acquire)) {
+            // Ordinary loop failure on a terminal that has been torn
+            // down into its dormancy snapshot. The startup error screen
+            // below would walk freed pages; the snapshot cannot be
+            // rebuilt here (that needs the mailbox), so log and skip it.
+            log.warn("io thread failed while dormant, no error screen err={}", .{err});
+        } else {
+            // Use an arena to simplify memory management below
+            var arena = ArenaAllocator.init(self.alloc);
+            defer arena.deinit();
+            const alloc = arena.allocator();
 
-        // This is weird but just ensures that no matter what our underlying
-        // implementation we have the errors below. For example, Windows doesn't
-        // have "OpenptyFailed".
-        const Err = @TypeOf(err) || error{
-            OpenptyFailed,
-            InputNotFound,
-            InputFailed,
-            BatchArgumentUnsafe,
-        };
+            // If there is an error, we replace our terminal screen with
+            // the error message. It might be better in the future to send
+            // the error to the surface thread and let the apprt deal with it
+            // in some way but this works for now. Without this, the user would
+            // just see a blank terminal window.
+            const t = io.renderer_state.terminal;
 
-        switch (@as(Err, @errorCast(err))) {
-            error.OpenptyFailed => {
-                const str =
-                    \\Your system cannot allocate any more pty devices.
-                    \\
-                    \\Wintty requires a pty device to launch a new terminal.
-                    \\This error is usually due to having too many terminal
-                    \\windows open or having another program that is using too
-                    \\many pty devices.
-                    \\
-                    \\Please free up some pty devices and try again.
-                ;
+            // Hide the cursor
+            t.modes.set(.cursor_visible, false);
 
-                t.eraseDisplay(.complete, false);
-                t.printString(str) catch {};
-            },
+            // This is weird but just ensures that no matter what our underlying
+            // implementation we have the errors below. For example, Windows doesn't
+            // have "OpenptyFailed".
+            const Err = @TypeOf(err) || error{
+                OpenptyFailed,
+                InputNotFound,
+                InputFailed,
+                BatchArgumentUnsafe,
+            };
 
-            error.InputNotFound,
-            error.InputFailed,
-            => {
-                const str =
-                    \\A configured `input` path was not found, was not readable,
-                    \\was too large, or the underlying pty failed to accept
-                    \\the write.
-                    \\
-                    \\Wintty can't continue since it can't guarantee that
-                    \\initial terminal state will be as desired. Please review
-                    \\the value of `input` in your configuration file and
-                    \\ensure that all the path values exist and are readable.
-                ;
+            switch (@as(Err, @errorCast(err))) {
+                error.OpenptyFailed => {
+                    const str =
+                        \\Your system cannot allocate any more pty devices.
+                        \\
+                        \\Wintty requires a pty device to launch a new terminal.
+                        \\This error is usually due to having too many terminal
+                        \\windows open or having another program that is using too
+                        \\many pty devices.
+                        \\
+                        \\Please free up some pty devices and try again.
+                    ;
 
-                t.eraseDisplay(.complete, false);
-                t.printString(str) catch {};
-            },
+                    t.eraseDisplay(.complete, false);
+                    t.printString(str) catch {};
+                },
 
-            error.BatchArgumentUnsafe => {
-                const str =
-                    \\The command was refused before it started. A batch file
-                    \\(.bat or .cmd) target was given a path or argument that
-                    \\cmd.exe would re-parse into additional commands, expand
-                    \\or silently drop, and no safe serialization exists for
-                    \\it.
-                    \\
-                    \\This terminal is non-functional. Please close it and try
-                    \\again.
-                ;
+                error.InputNotFound,
+                error.InputFailed,
+                => {
+                    const str =
+                        \\A configured `input` path was not found, was not readable,
+                        \\was too large, or the underlying pty failed to accept
+                        \\the write.
+                        \\
+                        \\Wintty can't continue since it can't guarantee that
+                        \\initial terminal state will be as desired. Please review
+                        \\the value of `input` in your configuration file and
+                        \\ensure that all the path values exist and are readable.
+                    ;
 
-                t.eraseDisplay(.complete, false);
-                t.printString(str) catch {};
-            },
+                    t.eraseDisplay(.complete, false);
+                    t.printString(str) catch {};
+                },
 
-            else => {
-                const str = alloc.print(
-                    \\error starting IO thread: {}
-                    \\
-                    \\The underlying shell or command was unable to be started.
-                    \\This error is usually due to exhausting a system resource.
-                    \\If this looks like a bug, please report it.
-                    \\
-                    \\This terminal is non-functional. Please close it and try again.
-                ,
-                    .{err},
-                ) catch
-                    \\Out of memory. This terminal is non-functional. Please close it and try again.
-                ;
+                error.BatchArgumentUnsafe => {
+                    const str =
+                        \\The command was refused before it started. A batch file
+                        \\(.bat or .cmd) target was given a path or argument that
+                        \\cmd.exe would re-parse into additional commands, expand
+                        \\or silently drop, and no safe serialization exists for
+                        \\it.
+                        \\
+                        \\This terminal is non-functional. Please close it and try
+                        \\again.
+                    ;
 
-                t.eraseDisplay(.complete, false);
-                t.printString(str) catch {};
-            },
+                    t.eraseDisplay(.complete, false);
+                    t.printString(str) catch {};
+                },
+
+                else => {
+                    const str = alloc.print(
+                        \\error starting IO thread: {}
+                        \\
+                        \\The underlying shell or command was unable to be started.
+                        \\This error is usually due to exhausting a system resource.
+                        \\If this looks like a bug, please report it.
+                        \\
+                        \\This terminal is non-functional. Please close it and try again.
+                    ,
+                        .{err},
+                    ) catch
+                        \\Out of memory. This terminal is non-functional. Please close it and try again.
+                    ;
+
+                    t.eraseDisplay(.complete, false);
+                    t.printString(str) catch {};
+                },
+            }
         }
     };
+
+    if (restart_failed_push) {
+        // The re-arm is queued BEFORE the reason line is printed: a reader
+        // that synchronizes on "Restart failed:" sees the line only after
+        // the offer is queued. The handler runs on the app thread, so the
+        // residual window is one dispatch (declared in the design's rim);
+        // the push itself stays after the catch: the pin's defer has
+        // released the renderer mutex, so a required push can wait out a
+        // full mailbox without blocking the UI thread's `restartEnd`.
+        // `restart_abort` is the surface's teardown token, so a close
+        // joined here gives up fast.
+        _ = io.surface_mailbox.pushRequired(
+            .{ .restart_failed = {} },
+            &io.surface_mailbox.surface.restart_abort,
+        );
+        if (restart_failed_err) |err| {
+            io.renderer_state.mutex.lockUncancelable(global.io());
+            defer io.renderer_state.mutex.unlock(global.io());
+            if (io.renderer_state.dormant.load(.acquire)) {
+                log.warn("restart failed while dormant err={}", .{err});
+            } else {
+                io.restartFailed(err);
+            }
+        }
+    }
 
     // If our loop is not stopped, then we need to keep running so that
     // messages are drained and we can wait for the surface to send a stop
@@ -282,6 +343,10 @@ fn threadMain_(self: *Thread, io: *termio.Termio) !void {
     // on the stack here so that it has a stable pointer throughout the
     // lifetime of the thread.
     try io.threadEnter(self, &cb.data);
+    // The new run is up: from here a loop failure is an ordinary IO
+    // failure, not a failed restart (the surface was told nothing would
+    // arrive only if the enter itself failed).
+    io.restarting = false;
     defer cb.data.deinit();
     defer io.threadExit(&cb.data);
 
