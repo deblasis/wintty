@@ -133,7 +133,9 @@ def _recipe_semantics(recipe):
 
 
 _BRACKET_LINE = re.compile(r"^\[([^\]]*)\]\s*(?:#.*)?$")
-_PLATFORMS = frozenset(("windows", "unix", "linux", "macos"))
+_PLATFORMS = frozenset(
+    ("windows", "unix", "linux", "macos", "freebsd", "openbsd", "netbsd", "android")
+)
 
 
 def _attr_items(content):
@@ -186,9 +188,10 @@ def _gates_platform(line):
 def _normalized_region(lines):
     """A region's lines reduced only by what cannot change meaning: the
     carriage return of a CRLF ending, trailing blank lines, and the
-    spelling, order and trailing comment of attribute lines. Everything
-    else counts, comments included: in a definition this host cannot
-    parse, nothing can tell a comment from an interpreter's payload."""
+    spelling, order and trailing comment of attribute lines, whose quoted
+    content stays as written. Everything else counts, comments included:
+    in a definition this host cannot parse, nothing can tell a comment
+    from an interpreter's payload."""
     out = []
     for raw in lines:
         line = raw[:-1] if raw.endswith("\r") else raw
@@ -934,6 +937,7 @@ def self_test():
         ("variant-mixed-quoted-gate-edited", b'[script("a"), unix]\ntest-win:\n    echo a\n', b'[script("a"), unix]\ntest-win:\n    echo b\n', win),
         ("variant-single-quoted-verbatim", b"[doc('a,b'), unix]\ntest-win:\n    echo a\n", b"[doc('a, b'), unix]\ntest-win:\n    echo a\n", win),
         ("variant-quoted-empty-fragment-edited", b'[script("a,,b"), unix]\ntest-win:\n    echo a\n', b'[script("a,,b"), unix]\ntest-win:\n    echo b\n', win),
+        ("variant-single-quoted-empty-fragment-edited", b"[script('a,,b'), unix]\ntest-win:\n    echo a\n", b"[script('a,,b'), unix]\ntest-win:\n    echo b\n", win),
         ("variant-attr-spelled-edited", b"[unix]\t# note\ntest-win:\n    echo a\n", b"[unix]\t# note\ntest-win:\n    echo b\n", win),
         ("variant-macos-arm", b"no regions", b"[macos]\ntest:\n    echo a\n", zig),
         ("variant-crlf-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\r\ntest-win:\r\n    echo a\r\n", set()),
