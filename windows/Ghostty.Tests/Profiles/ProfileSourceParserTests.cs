@@ -7,6 +7,53 @@ namespace Ghostty.Tests.Profiles;
 public sealed class ProfileSourceParserTests
 {
     [Fact]
+    public void Parse_RetryOnExit_TrueFalseAbsent()
+    {
+        const string config = """
+            profile.a.name = A
+            profile.a.command = a.exe
+            profile.a.retry-on-exit = true
+            profile.b.name = B
+            profile.b.command = b.exe
+            profile.b.retry-on-exit = false
+            profile.c.name = C
+            profile.c.command = c.exe
+            """;
+
+        var result = ProfileSourceParser.Parse(config);
+
+        Assert.True(result.Profiles["a"].RetryOnExit);
+        Assert.False(result.Profiles["b"].RetryOnExit);
+        Assert.False(result.Profiles["c"].RetryOnExit);
+    }
+
+    [Fact]
+    public void Parse_MalformedRetryOnExit_ReadsFalse()
+    {
+        const string config = """
+            profile.a.name = A
+            profile.a.command = a.exe
+            profile.a.retry-on-exit = yes-please
+            """;
+
+        Assert.False(ProfileSourceParser.Parse(config).Profiles["a"].RetryOnExit);
+    }
+
+    [Fact]
+    public void Parse_Override_CarriesTriStateRetryOnExit()
+    {
+        const string config = """
+            profile.a.retry-on-exit = true
+            profile.b.retry-on-exit = false
+            """;
+
+        var result = ProfileSourceParser.Parse(config);
+
+        Assert.True(result.Overrides["a"].RetryOnExit);
+        Assert.False(result.Overrides["b"].RetryOnExit);
+    }
+
+    [Fact]
     public void Parse_SingleProfile_AllRequiredKeys()
     {
         const string config = """

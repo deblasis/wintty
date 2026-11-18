@@ -1562,6 +1562,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // keeps libghostty's wait-after-command behaviour.
         surfaceConfig.CloseOnCleanExit =
             Ghostty.Core.Profiles.PaneCommandPolicy.ClosesOnCleanExit(Snapshot) ? (byte)1 : (byte)0;
+        surfaceConfig.RetryOnExit =
+            Ghostty.Core.Profiles.PaneCommandPolicy.RetriesOnExit(Snapshot) ? (byte)1 : (byte)0;
 
         // Pin a managed handle to `this` and pass it as per-surface userdata.
         // libghostty echoes this pointer back through close_surface_cb and the

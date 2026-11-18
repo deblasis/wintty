@@ -732,6 +732,10 @@ pub const Surface = struct {
         /// Terminal's `closeOnExit: graceful` does. Ignored when the user set
         /// `wait-after-command` themselves, which then holds as configured.
         close_on_clean_exit: bool = false,
+
+        /// The host's per-profile `retry-on-exit` opt-in. The core adds it
+        /// to the exit-offer predicate; false keeps today's notice.
+        retry_on_exit: bool = false,
     };
 
     // Options is declared three times: here, as ghostty_surface_config_s in
@@ -762,6 +766,7 @@ pub const Surface = struct {
         .{ .name = "width", .offset = 120 },
         .{ .name = "height", .offset = 124 },
         .{ .name = "close_on_clean_exit", .offset = 128 },
+        .{ .name = "retry_on_exit", .offset = 129 },
     };
 
     comptime {
@@ -976,6 +981,10 @@ pub const Surface = struct {
         // close on any exit (#1176). The record comes from the force
         // sites themselves, so it cannot drift from what creation did.
         self.core_surface.wait_after_command_forced = wait_forced_by_host;
+
+        // The host's per-profile opt-in. Set before the mailbox drain, like
+        // the close flag above.
+        self.core_surface.retry_on_exit = opts.retry_on_exit;
 
         // If our options requested a specific font-size, set that.
         if (opts.font_size != 0) {

@@ -607,8 +607,10 @@ typedef struct {
   // a placeholder size until the first ghostty_surface_set_size.
   //
   // Fields are only ever appended here, and an embedder must be rebuilt
-  // against this header: a library built with these fields reads them past
-  // the end of a struct from an older build.
+  // against this header. A newer library reading a struct from an older
+  // build sees the old tail padding as uninitialized memory (an appended
+  // bool can read true by accident); a zero-initializing older embedder
+  // reads zero. Rebuilding is the supported path.
   uint32_t width;
   uint32_t height;
 
@@ -616,6 +618,12 @@ typedef struct {
   // exits 0, keep it open on any other exit (Windows Terminal's closeOnExit
   // "graceful"). Ignored when the user set wait-after-command themselves.
   bool close_on_clean_exit;
+
+  // The host's per-profile `retry-on-exit` opt-in. When true, the exit
+  // notice offers the configured retry key (see the retry-on-exit-key
+  // config) instead of the any-key close. Appended after the fields above;
+  // an embedder must be rebuilt against this header.
+  bool retry_on_exit;
 } ghostty_surface_config_s;
 
 typedef struct {

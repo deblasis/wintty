@@ -35,6 +35,7 @@ param(
 . (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
+$OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $VK_ENTER = 0x0D
@@ -118,21 +119,39 @@ env = PATH=C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem
 env = SECRET=1
 profile.repro.name = Repro
 profile.repro.command = direct:"$ReproMain"
+profile.repro.retry-on-exit = true
 profile.repro-live.name = Repro Live
 profile.repro-live.command = direct:"$ReproLive"
+profile.repro-live.retry-on-exit = true
 profile.repro-env.name = Repro Env
 profile.repro-env.command = direct:C:\Windows\System32\cmd.exe /c "if defined SECRET (echo SECRET-SET) else (echo SECRET-UNSET)"
+profile.repro-env.retry-on-exit = true
 profile.repro-alt.name = Repro Alt
 profile.repro-alt.command = direct:C:\Windows\System32\cmd.exe /c type "$ReproAltTxt"
+profile.repro-alt.retry-on-exit = true
 profile.repro-del.name = Repro Deleted
 profile.repro-del.command = direct:"$ReproExe" /c "echo DELETED-EXE-MARKER"
+profile.repro-del.retry-on-exit = true
 "@
+
+# The same staged config with repro's opt-in removed: the disabled
+# contract (today's notice, any key closes).
+$ConfigNoRetry = $Config.Replace("profile.repro.retry-on-exit = true`n", "")
+
+# The per-scenario key override for the chord row.
+$ConfigCtrlR = $Config + "`nretry-on-exit-key = ctrl+r`n"
+
+# The -e row needs a flagged default profile; the other rows must not get one
+# (a launch tab running repro would exit and shift their tab counts).
+$ConfigEdge = $Config + "`ndefault-profile = repro`n"
 
 $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 
 # The exact sentence the offer owns. Pinned here, where the product decision
 # lives, so a wording drift reds instead of matching "some notice".
 $RestartSentence = 'Process exited. Press Enter to restart, any other key to close.'
+$CtrlRSentence = 'Process exited. Press Ctrl+R to restart, any other key to close.'
+$CloseSentence = 'Process exited. Press any key to close the terminal.'
 
 function Get-Screen($s, [Parameter(Mandatory)][int]$Index) {
     # The polling read is deliberately not Invoke-SeamCommand: its per-answer
@@ -272,6 +291,16 @@ function Press-Enter($s, [int]$Index) {
     })
 }
 
+function Press-CtrlR($s, [int]$Index) {
+    # The chord the custom-key row configures: KeyDown R with Ctrl, then the
+    # WM_CHAR half a real Ctrl+R delivers (0x12, not 'r'). The KeyDown alone
+    # carries no text; a printable 'r' after it is a separate text event the
+    # dead pane reads as a plain r, which closes it.
+    [void](Invoke-SeamCommand $s @{
+        op = 'terminal-key'; tab = $Index; vk = 0x52; ctrl = $true; action = 'press'; char = ([string][char]0x12)
+    })
+}
+
 function Press-Escape($s, [int]$Index) {
     [void](Invoke-SeamCommand $s @{
         op = 'terminal-key'; tab = $Index; vk = $VK_ESCAPE; action = 'press'
@@ -289,16 +318,16 @@ function Wait-TabCountBelow($s, [int]$Below, [string]$Which, [int]$TimeoutSecond
         $Which, (Get-State $s).tabs.Count)
 }
 
-function Invoke-Scenario([string]$Name, [scriptblock]$Body) {
+function Invoke-Scenario([string]$Name, [scriptblock]$Body, [string]$ConfigText = $Config, [string[]]$Arguments = @(), [switch]$ExpectAppExit) {
     $crashMark = Get-SeamSessionMark
     $s = $null
     $entry = [ordered]@{ name = $Name; ok = $false; class = ''; error = '' }
     Write-Host "=== scenario $Name ==="
     try {
         Assert-NoWinttyFrom -ExePath $ExePath -Context "The restart-on-exit scenario '$Name'"
-        $s = Start-SeamSession -ExePath $ExePath -ConfigText $Config -AllowInput
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $ConfigText -Arguments $Arguments -AllowInput
         & $Body $s
-        if ($s.Proc.HasExited) {
+        if ($s.Proc.HasExited -and -not $ExpectAppExit) {
             throw ("APP_EXIT: the app exited during '{0}' (code {1})" -f $Name, $s.Proc.ExitCode)
         }
         $entry.ok = $true
@@ -349,9 +378,29 @@ function Assert-RestartNotice([string]$screen, [string]$which) {
     }
 }
 
+function Assert-ProfileRetry($s, [string]$Id, [bool]$Expected) {
+    $p = Invoke-SeamCommand $s @{ op = 'profiles' }
+    $profile = @($p.profiles | Where-Object { $_.id -eq $Id }) | Select-Object -First 1
+    if ($null -eq $profile) {
+        throw ("HARNESS: no '{0}' profile in the registry" -f $Id)
+    }
+    if ([bool]$profile.retriesOnExit -ne $Expected) {
+        throw ("PRODUCT_FAIL: profile {0} resolved retriesOnExit={1}, expected {2}" -f
+            $Id, $profile.retriesOnExit, $Expected)
+    }
+}
+
+function Assert-Notice([string]$screen, [string]$Sentence, [string]$which) {
+    if ($screen.Contains($Sentence)) { return }
+    $line = ($screen -split "`n" | Where-Object { $_ -like '*Process exited*' } | Select-Object -First 1)
+    throw ("PRODUCT_FAIL: {0} shows the wrong notice. Expected '{1}'; reads: '{2}'" -f
+        $which, $Sentence, "$line".Trim())
+}
+
 Invoke-Scenario 'enter-restarts-the-same-command' {
     param($s)
     Assert-Profile $s 'repro'
+    Assert-ProfileRetry $s 'repro' $true
     $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'repro' }
     $index = [int]$opened.state.active
     Write-Host ("opened: active={0} tabs={1} title={2}" -f $index, $opened.state.tabs.Count,
@@ -626,6 +675,66 @@ Invoke-Scenario 'env-revocation' {
     }
     Write-Host ("env revoked: reload applied generation {0}" -f $generation0)
 }
+
+Invoke-Scenario 'disabled-profile-keeps-the-old-close' {
+    param($s)
+    Assert-ProfileRetry $s 'repro' $false
+    $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'repro' }
+    $index = [int]$opened.state.active
+    $before = $opened.state.tabs.Count
+    $screen = Wait-ScreenContains $s 'Process exited.' -Index $index
+    Assert-Notice $screen $CloseSentence 'the disabled exit'
+    Press-Enter $s $index
+    Wait-TabCountBelow $s $before 'Enter on a disabled exit'
+    Write-Host 'a profile without the opt-in closed on Enter'
+} -ConfigText $ConfigNoRetry
+
+Invoke-Scenario 'custom-key-restarts' {
+    param($s)
+    Assert-ProfileRetry $s 'repro' $true
+    $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'repro' }
+    $index = [int]$opened.state.active
+    $screen = Wait-ScreenContains $s 'Process exited.' -Index $index
+    Assert-Notice $screen $CtrlRSentence 'the custom-key exit'
+    # The run counter is GLOBAL across every scenario in this probe run (one
+    # count file under $OutDir), so this scenario's first run is not RUN-1.
+    # Capture the number the first exit printed; the restart must print N+1.
+    $firstRun = [int]([regex]::Match($screen, 'RESTART-MARKER-RUN-(\d+)').Groups[1].Value)
+    if ($firstRun -lt 1) { throw "HARNESS: no RESTART-MARKER-RUN-n in the first exit screen" }
+    $next = $firstRun + 1
+    $wantMarker = "RESTART-MARKER-RUN-$next"
+    Press-CtrlR $s $index
+    Assert-PaneAlive $s $index 'the chord restart'
+    $deadline = [datetime]::UtcNow.AddSeconds(20)
+    $sawNext = $false
+    while ([datetime]::UtcNow -lt $deadline) {
+        $r = Get-ScreenScroll $s $index
+        if ($r.text.Contains($wantMarker)) { $sawNext = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $sawNext) { throw "PRODUCT_FAIL: Ctrl+R did not restart the profile command (no $wantMarker in the scroll)" }
+    $notice2 = Wait-ScreenContains $s 'Process exited.' -Index $index
+    Assert-Notice $notice2 $CtrlRSentence 'the restarted exit' 
+    $before = (Get-State $s).tabs.Count
+    Press-Enter $s $index
+    Wait-TabCountBelow $s $before 'Enter after a chord restart'
+    Write-Host 'Ctrl+R restarted; Enter closed the restarted exit'
+} -ConfigText $ConfigCtrlR
+
+Invoke-Scenario 'ad-hoc-launch-has-no-offer' {
+    param($s)
+    Assert-ProfileRetry $s 'repro' $true
+    $st = Get-State $s
+    $titles = ($st.tabs | ForEach-Object { $_.title }) -join '; '
+    Write-Host ("launch state: tabs={0} titles=[{1}]" -f $st.tabs.Count, $titles)
+    $screen = Wait-ScreenContains $s 'Process exited.' -Index 0
+    Assert-Notice $screen $CloseSentence 'the -e exit'
+    Press-Enter $s 0
+    if (-not $s.Proc.WaitForExit(10000)) {
+        throw 'PRODUCT_FAIL: Enter on a -e exit did not close the pane (the app is still running)'
+    }
+    Write-Host '-e exit showed the disabled notice and closed'
+} -ConfigText $ConfigEdge -Arguments @('-e', 'C:\Windows\System32\cmd.exe', '/c', 'exit 1') -ExpectAppExit
 
 # ---- verdict ---------------------------------------------------------------
 

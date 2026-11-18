@@ -534,6 +534,22 @@ public sealed class FirstPaneCommandWiringTests
         return reader.ReadToEnd().Replace("\r\n", "\n");
     }
 
+    [Fact]
+    public void LaunchPane_RetryOnExit_EndToEndWiring()
+    {
+        // Host: the surface config carries the origin-gated opt-in, set from
+        // the same first layout pass as CloseOnCleanExit.
+        var control = ShellSource.Load("Controls.TerminalControl.xaml.cs");
+        var create = control.Method("TryCreateSurface").Body!.ToString();
+        Assert.Contains("surfaceConfig.RetryOnExit =", create);
+        Assert.Contains("PaneCommandPolicy.RetriesOnExit(Snapshot)", create);
+
+        // Native: the opt-in reaches the core surface config.
+        var text = EmbeddedZig();
+        Assert.Contains("retry_on_exit: bool = false,", text);
+        Assert.Contains("self.core_surface.retry_on_exit = opts.retry_on_exit;", text);
+    }
+
     private static string EmbeddedZig()
     {
         var asm = typeof(FirstPaneCommandWiringTests).Assembly;

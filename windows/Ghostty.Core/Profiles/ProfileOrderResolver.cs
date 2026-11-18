@@ -72,7 +72,8 @@ public static class ProfileOrderResolver
                     Hidden: o.Hidden,
                     ProbeId: d.ProbeId,
                     VisualsOrNull: o.VisualsOrNull,
-                    TabIconTracksForeground: o.TabIconTracksForeground ?? true);
+                    TabIconTracksForeground: o.TabIconTracksForeground ?? true,
+                    RetryOnExit: o.RetryOnExit ?? false);
                 continue;
             }
 
@@ -138,7 +139,8 @@ public static class ProfileOrderResolver
             ProbeId: def.ProbeId,
             OrderIndex: orderIndex,
             IsDefault: isDefault,
-            TabIconTracksForeground: def.TabIconTracksForeground);
+            TabIconTracksForeground: def.TabIconTracksForeground,
+            RetryOnExit: def.RetryOnExit);
 
     // When a profile has no explicit icon, derive one from the command's
     // exe basename via ProcessIconTable so user-defined profiles like

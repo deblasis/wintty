@@ -196,6 +196,19 @@ restart_abort: std.atomic.Value(bool) = .init(false),
 /// at the key, never here.
 restart_offered: bool = false,
 
+/// The trigger that restarts the exited child when the profile opted
+/// in. Parsed once from `retry-on-exit-key`; Enter by default.
+retry_key: input.Binding.Trigger = .{ .key = .{ .physical = .enter } },
+
+/// The trigger the printed offer names, snapshotted when the offer arms.
+/// A config reload changes `retry_key`; the notice already on screen must
+/// keep its own press until consumed.
+restart_key: ?input.Binding.Trigger = null,
+
+/// The host's per-profile opt-in (`profile.<id>.retry-on-exit`). A
+/// profile that leaves it false keeps the old exit notice and close.
+retry_on_exit: bool = false,
+
 /// Close on a clean exit even when `wait-after-command` holds the surface
 /// open: exit code 0 closes it, any other code keeps it open to show the
 /// status. This is Windows Terminal's `closeOnExit: graceful`. An embedding
@@ -689,6 +702,8 @@ pub fn init(
         .app = app,
         .rt_app = rt_app,
         .rt_surface = rt_surface,
+        .retry_key = retryKeyFromConfig(config),
+        .restart_key = null,
         .font_grid_key = font_grid_key,
         .font_size = font_size,
         .font_size_adjusted = false,
@@ -1647,6 +1662,8 @@ fn restartChild(self: *Surface) bool {
             self.restart_abort.store(false, .release);
             self.child_exited = false;
             self.restart_offered = false;
+            // restart_key is kept: a failed spawn re-arms the same printed
+            // trigger, not the reloaded one.
             proceed = true;
         }
     }
@@ -1861,6 +1878,7 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
             self.restart_offered = false;
+            self.restart_key = null;
         }
 
         // Try and show a GUI message. If it returns true, don't do anything else.
@@ -1903,14 +1921,29 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
         dormant = self.renderer_state.dormant.load(.acquire);
         if (dormant) {
             self.restart_offered = false;
+            self.restart_key = null;
         } else {
             // The dead child's notice lands on the screen that owns the
             // scrollback, never on the alternate screen a TUI left behind.
             const t = self.renderer_state.terminal;
             if (t.screens.active_key == .alternate) t.screens.switchTo(.primary);
-            self.restart_offered = keep_open and
-                self.restart_spec != null and
-                !self.readonly;
+            self.restart_offered = restartOffered(
+                keep_open,
+                self.retry_on_exit,
+                self.restart_spec != null,
+                self.readonly,
+                dormant,
+            );
+            self.restart_key = if (self.restart_offered) self.retry_key else null;
+            if (self.restart_offered) {
+                // The offer owns its key: a leader sequence or key table
+                // armed when the child died must not complete across the
+                // restart and run a binding the notice never described.
+                // Use the canonical drains so queued writes and apprt
+                // notifications are not skipped.
+                self.endKeySequence(.drop, .free);
+                _ = self.deactivateAllKeyTables() catch {};
+            }
         }
     }
 
@@ -1948,9 +1981,15 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
         // The offer decides the sentence: only a pane that can actually
         // restart promises it.
         if (self.restart_offered) {
-            t.printString(
-                "Process exited. Press Enter to restart, any other key to close.",
-            ) catch break :terminal;
+            var key_buf: [48]u8 = undefined;
+            const key = self.retryKeyLabel(&key_buf);
+            var msg_buf: [128]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &msg_buf,
+                "Process exited. Press {s} to restart, any other key to close.",
+                .{key},
+            ) catch "Process exited. Press Enter to restart, any other key to close.";
+            t.printString(msg) catch break :terminal;
         } else {
             t.printString("Process exited. Press any key to close the terminal.") catch
                 break :terminal;
@@ -1973,6 +2012,27 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
     self.close();
 }
 
+/// Whether a normally-exited, held-open pane offers the retry key. Pure so
+/// the truth table can be tested without a Surface.
+fn restartOffered(
+    keep_open: bool,
+    retry_on_exit: bool,
+    has_spec: bool,
+    readonly: bool,
+    dormant: bool,
+) bool {
+    return keep_open and retry_on_exit and has_spec and !readonly and !dormant;
+}
+
+test "restartOffered truth table" {
+    try std.testing.expect(!restartOffered(false, true, true, false, false));
+    try std.testing.expect(!restartOffered(true, false, true, false, false));
+    try std.testing.expect(!restartOffered(true, true, false, false, false));
+    try std.testing.expect(!restartOffered(true, true, true, true, false));
+    try std.testing.expect(!restartOffered(true, true, true, false, true));
+    try std.testing.expect(restartOffered(true, true, true, false, false));
+}
+
 /// Whether a surface whose child exited (normally, past the abnormal-exit
 /// window) stays open. `wait-after-command` holds it open, except that a
 /// surface marked `close_on_clean_exit` still closes on exit code 0.
@@ -1983,6 +2043,101 @@ fn keepOpenAfterExit(
 ) bool {
     if (!wait_after_command) return false;
     return !(close_on_clean_exit and exit_code == 0);
+}
+
+/// Parse `retry-on-exit-key`, falling back to Enter. The config field is a
+/// raw string because a single trigger has no config type of its own; the
+/// parse happens once, here, and an invalid value cannot disable a profile's
+/// opt-in.
+fn retryKeyFromConfig(config: *const configpkg.Config) input.Binding.Trigger {
+    const raw = config.@"retry-on-exit-key" orelse
+        return .{ .key = .{ .physical = .enter } };
+    return parseRetryKey(raw);
+}
+
+/// The retry-key value -> trigger gate, split from the config so the
+/// rejection rows are testable. Any value the matcher can never fire falls
+/// back to Enter with a warning: a parse error, an unset key (`ctrl`),
+/// `catch_all`, lock-modifier chords (`caps_lock+enter`), and a bare
+/// codepoint a plain press does not produce (`X`, `?`, `ctrl+X`).
+fn parseRetryKey(raw: []const u8) input.Binding.Trigger {
+    const fallback: input.Binding.Trigger = .{ .key = .{ .physical = .enter } };
+    const trigger = input.Binding.Trigger.parse(raw) catch |err| {
+        log.warn("invalid retry-on-exit-key \"{s}\" err={t}; using enter", .{ raw, err });
+        return fallback;
+    };
+    // A parse can succeed without naming a key: `ctrl` is all modifiers
+    // (unset key) and `catch_all` matches everything, which would break the
+    // "any other key closes" contract. Neither can be offered.
+    if (trigger.isKeyUnset() or trigger.key == .catch_all) {
+        log.warn("invalid retry-on-exit-key \"{s}\": not a single key; using enter", .{raw});
+        return fallback;
+    }
+    // A bare codepoint must be one a plain press produces: a lowercase letter
+    // or a digit. `X`, `?` and `+` parse to codepoints the unshifted key never
+    // sends, so the notice's promise would be a close.
+    // Lock bits can never match: `mods.binding()` drops them, so a
+    // caps_lock+enter chord would leave the notice saying Enter while Enter
+    // closes. Require the parsed mods to be canonical.
+    if (!std.meta.eql(trigger.mods, trigger.mods.binding())) {
+        log.warn("invalid retry-on-exit-key \"{s}\": lock modifiers cannot match; using enter", .{raw});
+        return fallback;
+    }
+    switch (trigger.key) {
+        .unicode => |cp| if (!((cp >= 'a' and cp <= 'z') or (cp >= '0' and cp <= '9'))) {
+            log.warn("invalid retry-on-exit-key \"{s}\": bare codepoint is not a plain key; using enter", .{raw});
+            return fallback;
+        },
+        else => {},
+    }
+    return trigger;
+}
+
+test "retry key parsing rejects unmatchable values" {
+    const testing = std.testing;
+    const fallback: input.Binding.Trigger = .{ .key = .{ .physical = .enter } };
+
+    // Valid forms keep their key.
+    try testing.expect(std.meta.eql(fallback, parseRetryKey("enter")));
+    const ctrlr = parseRetryKey("ctrl+r");
+    try testing.expect(ctrlr.mods.ctrl);
+    try testing.expect(ctrlr.key == .unicode and ctrlr.key.unicode == 'r');
+
+    // Unmatchable forms fall back.
+    for ([_][]const u8{
+        "ctrl", // modifiers only, no key
+        "catch_all",
+        "caps_lock+enter", // lock bits are dropped by the matcher
+        "X", // uppercase needs the shift the trigger does not carry
+        "?",
+        "+",
+        "ctrl+X",
+        "alt+,",
+        "not-a-key!!",
+    }) |raw| {
+        try testing.expect(std.meta.eql(fallback, parseRetryKey(raw)));
+    }
+
+    // A lowercase unicode key and an explicit numpad enter are pressable.
+    const lower = parseRetryKey("x");
+    try testing.expect(lower.key == .unicode and lower.key.unicode == 'x');
+    const numpad = parseRetryKey("numpad_enter");
+    try testing.expect(numpad.key == .physical and numpad.key.physical == .numpad_enter);
+}
+
+test "retry label spellings" {
+    const testing = std.testing;
+    var buf: [48]u8 = undefined;
+
+    try testing.expectEqualStrings("Enter", retryLabel(.{ .key = .{ .physical = .enter } }, &buf));
+    try testing.expectEqualStrings(
+        "Ctrl+R",
+        retryLabel(try input.Binding.Trigger.parse("ctrl+r"), &buf),
+    );
+    try testing.expectEqualStrings(
+        "Numpad Enter",
+        retryLabel(try input.Binding.Trigger.parse("numpad_enter"), &buf),
+    );
 }
 
 /// The wait-after-command a surface runs on after a config reload: a wait
@@ -2545,6 +2700,10 @@ pub fn updateConfig(
         .set_title,
         .{ .title = title },
     );
+
+    // Re-parse the retry key: a corrected key must reach held-open panes,
+    // whose notice already names the old one.
+    self.retry_key = retryKeyFromConfig(original);
 
     // Notify the window
     _ = try self.rt_app.performAction(
@@ -3523,6 +3682,59 @@ pub fn keyEventIsBinding(
     };
 }
 
+/// Whether this event is the configured retry key. The physical key is
+/// tried first, then a single-codepoint unicode key (the same order
+/// `Binding.Set.getEvent` uses); the default `enter` also matches the numpad
+/// Enter, and an explicit `numpad_enter` matches only that key.
+fn retryKeyPressed(self: *const Surface, event: input.KeyEvent) bool {
+    if (event.action != .press) return false;
+    const trigger = self.restart_key orelse self.retry_key;
+    if (!std.meta.eql(event.mods.binding(), trigger.mods)) return false;
+    return switch (trigger.key) {
+        .physical => |k| event.key == k or (k == .enter and event.key == .numpad_enter),
+        .unicode => |cp| unicode: {
+            if (event.utf8.len > 0) {
+                const view = std.unicode.Utf8View.init(event.utf8) catch
+                    break :unicode false;
+                var it = view.iterator();
+                const c = it.nextCodepoint() orelse break :unicode false;
+                if (it.nextCodepoint() == null and c == cp) return true;
+            }
+            break :unicode event.unshifted_codepoint == cp;
+        },
+        .catch_all => false,
+    };
+}
+
+/// The retry key as it appears in the notice. The trigger formatter writes
+/// lower-case config words (`enter`, `ctrl+r`); the notice title-cases each
+/// chord segment. The default reads `Enter`.
+fn retryKeyLabel(self: *const Surface, buf: []u8) []const u8 {
+    return retryLabel(self.restart_key orelse self.retry_key, buf);
+}
+
+/// The notice spelling of one trigger: the config formatter's words with
+/// each `+` segment title-cased and `_` as a space (`Enter`, `Ctrl+R`,
+/// `Numpad Enter`). Split from the Surface so the spelling is testable.
+fn retryLabel(trigger: input.Binding.Trigger, buf: []u8) []const u8 {
+    const raw = std.fmt.bufPrint(buf, "{f}", .{trigger}) catch return "Enter";
+    var upper = true;
+    for (raw) |*ch| {
+        if (upper) {
+            ch.* = std.ascii.toUpper(ch.*);
+            upper = false;
+        } else if (ch.* == '+') {
+            upper = true;
+        } else if (ch.* == '_') {
+            ch.* = ' ';
+            upper = true;
+        } else if (ch.* >= 'A' and ch.* <= 'Z') {
+            ch.* = std.ascii.toLower(ch.*);
+        }
+    }
+    return raw;
+}
+
 /// Called for any key events. This handles keybindings, encoding and
 /// sending to the terminal, etc.
 pub fn keyCallback(
@@ -3580,6 +3792,36 @@ pub fn keyCallback(
         }
     };
 
+    // An exited, held-open pane whose profile opted in offers the configured
+    // key. The offer is checked before the keybinding lookup and before the
+    // KAM swallow: a user binding on that key must not shadow a notice that
+    // promises it. Any other encoded key keeps today's close semantics (the
+    // encode path below). `mods.binding()` ignores CapsLock/NumLock, which
+    // must not make the configured key stop matching; read-only is gated
+    // here, at the press.
+    if (self.child_exited) {
+        if (self.retryKeyPressed(event) and
+            !self.readonly and
+            self.restart_offered)
+        {
+            // A leader sequence or key table entered after the offer armed
+            // must not complete across the restart (the arm-time drain in
+            // childExited covers only state that predates the notice).
+            self.endKeySequence(.drop, .free);
+            _ = self.deactivateAllKeyTables() catch {};
+            const closed = self.restartChild();
+            if (closed) {
+                // self is dead from here, exactly like a closing binding.
+                surface_closed = true;
+                return .closed;
+            }
+            // Handled: never forwarded to a child that is gone.
+            return .consumed;
+        }
+        // Anything else falls through to the bindings, the KAM, and then
+        // encode-and-close.
+    }
+
     // Handle keybindings first. We need to handle this on all events
     // (press, repeat, release) because a press may perform a binding but
     // a release should not encode if we consumed the press.
@@ -3596,29 +3838,6 @@ pub fn keyCallback(
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
         if (self.io.terminal.modes.get(.disable_keyboard)) return .consumed;
-    }
-
-    // An exited, held-open pane offers a restart on plain Enter. Any other
-    // encoded key keeps today's close semantics (the encode path below).
-    // `mods.binding()` ignores CapsLock/NumLock, which must not make Enter
-    // stop being "plain"; read-only is gated here, at the press.
-    if (self.child_exited) {
-        if (event.action == .press and
-            (event.key == .enter or event.key == .numpad_enter) and
-            event.mods.binding().empty() and
-            !self.readonly and
-            self.restart_offered)
-        {
-            const closed = self.restartChild();
-            if (closed) {
-                // self is dead from here, exactly like a closing binding.
-                surface_closed = true;
-                return .closed;
-            }
-            // Handled: never forwarded to a child that is gone.
-            return .consumed;
-        }
-        // Anything else falls through to encode-and-close.
     }
 
     // If this input event has text, then we hide the mouse if configured.

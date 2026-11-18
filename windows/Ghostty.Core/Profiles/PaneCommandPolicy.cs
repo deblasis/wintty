@@ -160,11 +160,14 @@ public static class PaneCommandPolicy
         if (snapshot is null)
             return CommandSnapshot(command, isArgv, PaneCommandOrigin.LaunchCommand, workingDirectory);
 
+        // -e and initial-command are not profile commands: a profile's
+        // opt-in must not offer a one-key rerun of an ad-hoc argv.
         return WithWorkingDirectory(snapshot, workingDirectory) with
         {
             ResolvedCommand = command,
             CommandIsArgv = isArgv,
             CommandOrigin = PaneCommandOrigin.LaunchCommand,
+            RetryOnExit = false,
         };
     }
 
@@ -218,6 +221,15 @@ public static class PaneCommandPolicy
     /// </summary>
     public static bool ClosesOnCleanExit(ProfileSnapshot? snapshot)
         => snapshot is { CommandOrigin: PaneCommandOrigin.LaunchCommand };
+
+    /// <summary>
+    /// Whether an exited, held-open pane may offer a one-key restart. Only a
+    /// profile-origin pane whose profile opted in: <c>-e</c>/<c>initial-command</c>
+    /// keep their snapshot with RetryOnExit cleared, and a pane with no
+    /// profile starts false.
+    /// </summary>
+    public static bool RetriesOnExit(ProfileSnapshot? snapshot)
+        => snapshot is { CommandOrigin: PaneCommandOrigin.Profile, RetryOnExit: true };
 
     private static ProfileSnapshot? WithWorkingDirectory(ProfileSnapshot? snapshot, string? workingDirectory)
         => snapshot is not null && !string.IsNullOrEmpty(workingDirectory)

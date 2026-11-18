@@ -1328,6 +1328,7 @@ internal static class TestSeam
                         json.WriteString("name", p.Name);
                         json.WriteString("command", p.Command);
                         json.WriteBoolean("default", p.IsDefault);
+                        json.WriteBoolean("retriesOnExit", p.RetryOnExit);
                         json.WriteEndObject();
                     }
                     json.WriteEndArray();
