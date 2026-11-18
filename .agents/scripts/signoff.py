@@ -133,6 +133,9 @@ def _recipe_semantics(recipe):
 
 
 _BRACKET_LINE = re.compile(r"^\[([^\]]*)\]\s*(?:#.*)?$")
+# A trailing zero-argument call pair, with any spacing inside it.
+_CALL_FORM = re.compile(r"\s*\(\s*\)$")
+
 _PLATFORMS = frozenset(
     ("windows", "unix", "linux", "macos", "freebsd", "openbsd", "netbsd", "android",
      "dragonfly")
@@ -141,12 +144,16 @@ _PLATFORMS = frozenset(
 
 def _attr_items(content):
     """The comma-separated items of an attribute line's brackets, or None
-    when the content is not a plain list (a string value, a function
-    call). just accepts any spacing around the commas."""
+    when the content is not a plain list (a string value, an
+    argument-bearing call). just accepts any spacing around the commas and
+    inside a zero-argument call pair."""
     items = [item.strip() for item in content.split(",")]
-    # just accepts a zero-argument attribute in call syntax, so [unix()]
-    # gates exactly like [unix]; read both spellings as the one gate.
-    items = [item[:-2] if item.endswith("()") else item for item in items]
+    # just accepts a zero-argument attribute in call syntax with any
+    # spacing inside the parens, so [unix()] and [unix ( )] gate exactly
+    # like [unix]; read all of those spellings as the one gate. An
+    # argument-bearing form is left raw: just refuses it, which fails the
+    # dump and forces every leg.
+    items = [_CALL_FORM.sub("", item) for item in items]
     return items if all(items) else None
 
 
@@ -947,6 +954,9 @@ def self_test():
         ("variant-dragonfly-edited", b"[dragonfly]\ntest-win:\n    echo a\n", b"[dragonfly]\ntest-win:\n    echo b\n", win),
         ("variant-call-form-gate-edited", b"[unix()]\ntest-win:\n    echo a\n", b"[unix()]\ntest-win:\n    echo b\n", win),
         ("variant-call-form-spelling-free", b"[unix()]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    echo a\n", set()),
+        ("variant-call-form-spaced-edited", b"[unix ( )]\ntest-win:\n    echo a\n", b"[unix ( )]\ntest-win:\n    echo b\n", win),
+        ("variant-call-form-spaced-list-edited", b"[private, unix\t()]\ntest-win:\n    echo a\n", b"[private, unix\t()]\ntest-win:\n    echo b\n", win),
+        ("variant-call-form-spaced-flip-free", b"[unix ()]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    echo a\n", set()),
         ("variant-attr-spelled-edited", b"[unix]\t# note\ntest-win:\n    echo a\n", b"[unix]\t# note\ntest-win:\n    echo b\n", win),
         ("variant-macos-arm", b"no regions", b"[macos]\ntest:\n    echo a\n", zig),
         ("variant-crlf-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\r\ntest-win:\r\n    echo a\r\n", set()),
