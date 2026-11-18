@@ -144,9 +144,11 @@ _PLATFORMS = frozenset(
 
 def _attr_items(content):
     """The comma-separated items of an attribute line's brackets, or None
-    when the content is not a plain list (a string value, an
-    argument-bearing call). just accepts any spacing around the commas and
-    inside a zero-argument call pair."""
+    when an item is left empty (a trailing comma, a lone zero-argument
+    pair). just accepts any spacing around the commas and inside a
+    zero-argument call pair, which reads as the bare name; an
+    argument-bearing item stays as written, and just refuses it, which
+    fails the dump and forces every leg."""
     items = [item.strip() for item in content.split(",")]
     # just accepts a zero-argument attribute in call syntax with any
     # spacing inside the parens, so [unix()] and [unix ( )] gate exactly
