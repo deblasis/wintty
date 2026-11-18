@@ -1259,6 +1259,14 @@ def self_test():
         "    pwsh -File .agents/scripts/release_gate_check.ps1",
         "_default-in-lane: (_require-lane \"default\") _test-in-lane _build-dll-in-lane",
         "    echo default",
+        "_require-incoda:",
+        "    echo incoda",
+        "_build-in-lane reason +recipes:",
+        "    echo build-lane {{reason}} {{recipes}}",
+        "_signoff-in-lane *args: (_require-lane \"signoff\")",
+        "    echo signoff {{args}}",
+        "lanes:",
+        "    echo lanes",
     ]) + "\n"
 
     def sh(root, *args):

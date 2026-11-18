@@ -4,23 +4,27 @@ A file for [guiding coding agents](https://agents.md/).
 
 ## Commands
 
-- **Build:** `zig build`
+The build and test recipes take the heavy-job lane themselves on Windows
+(AGENTS.md, "Heavy job lanes"): call them BARE. A raw `zig build`/`dotnet
+build` is never the way here.
+
+- **Build:** `just build-dll` (`just build-win` for the app shell)
   - If you're on macOS and don't need to build the macOS app, use
     `-Demit-macos-app=false` to skip building the app bundle and speed up
     compilation.
-- **Test (Zig):** `zig build test`
+- **Test (Zig):** `just test`
   - Prefer to run targeted tests with `-Dtest-filter` because the full
-    test suite is slow to run.
-- **Test filter (Zig)**: `zig build test -Dtest-filter=<test name>`
+    test suite is slow to run: `just test-full -Dtest-filter=<test name>`
+- **Test filter (Zig)**: `just test-full -Dtest-filter=<test name>`
 - **Formatting (Zig)**: `zig fmt .`
 - **Formatting (Swift)**: `swiftlint lint --strict --fix`
 - **Formatting (other)**: `prettier -w .`
 
 ## libghostty-vt
 
-- Build: `zig build -Demit-lib-vt`
-- Build WASM: `zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall`
-- Test: `zig build test-lib-vt -Dtest-filter=<filter>`
+- Build: `just build-dll` (the lane recipe)
+- Build WASM: `incoda run --queue wintty-build --reason "libghostty-vt wasm" -- zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall`
+- Test: `just test-lib-vt` (`-Dtest-filter=<filter>` goes through the recipe's ARGS)
   - Prefer this when the change is in a libghostty-vt file
 - All C enums in `include/ghostty/vt/` must have a `_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE`
   sentinel as the last entry to force int enum sizing (pre-C23 portability).

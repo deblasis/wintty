@@ -103,6 +103,14 @@ RECIPE_LEGS.update({
     "_test-win-in-lane": RECIPE_LEGS["test-win"],
     "_release-gate-check-in-lane": RECIPE_LEGS["release-gate-check"],
     "_default-in-lane": ALL_LEGS,
+    # The lane plumbing itself: an edit here changes which recipe runs where
+    # for every laned recipe, so it invalidates everything.
+    "_lane": ALL_LEGS,
+    "_build-in-lane": ALL_LEGS,
+    "_require-lane": ALL_LEGS,
+    "_require-incoda": ALL_LEGS,
+    "_signoff-in-lane": ALL_LEGS,
+    "lanes": ALL_LEGS,
     "default": ALL_LEGS,
     "signoff": ALL_LEGS,
     "signoff-full": ALL_LEGS,

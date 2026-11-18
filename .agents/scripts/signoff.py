@@ -142,7 +142,10 @@ def justfile_legs(base):
             recipe = _recipe_at(content_lines, lineno)
             if recipe is None:
                 return set(gate_scope.ALL_LEGS)
-            legs.update(gate_scope.RECIPE_LEGS.get(recipe, ()))
+            # Unknown or unlisted recipes and preamble lines fail closed: they can
+            # reach any leg (the lane plumbing especially), and an empty set
+            # here once let a justfile-only edit carry a stale green.
+            legs.update(gate_scope.RECIPE_LEGS.get(recipe, gate_scope.ALL_LEGS))
     return legs
 
 

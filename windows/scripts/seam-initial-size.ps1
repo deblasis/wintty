@@ -243,7 +243,7 @@ function ConvertTo-WslSlug([string]$Name) {
 function Invoke-WslCapture([string[]]$WslArgs, [int]$TimeoutSec) {
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "wintty-wsl-probe-$([guid]::NewGuid().ToString('N')).txt"
     try {
-        $p = Start-Process -FilePath 'wsl.exe' -ArgumentList $WslArgs -PassThru -NoNewWindow -WindowStyle Hidden `
+        $p = Start-Process -FilePath 'wsl.exe' -ArgumentList $WslArgs -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput $tmp -RedirectStandardError "$tmp.err"
         if (-not $p.WaitForExit($TimeoutSec * 1000)) {
             try { $p.Kill($true) } catch { }

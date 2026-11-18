@@ -200,3 +200,7 @@
 
 # Packaging - Snap
 /snap/ @ghostty-org/snap
+
+# The spawn-site allowlist exempts exact statements from the no-stray-windows
+# scan (AGENTS.md, "No stray windows"): a maintainer review surface.
+/windows/scripts/spawn-allowlist.txt @deblasis

@@ -105,7 +105,7 @@ function Capture-HangStacks([Parameter(Mandatory)]$Session) {
         $dump = Join-Path $OutDir ("hang-{0}.dmp" -f $pid0)
         Start-Process -FilePath rundll32.exe `
             -ArgumentList "comsvcs.dll,MiniDump", $pid0, $dump, "mini" `
-            -Wait -NoNewWindow -WindowStyle Hidden | Out-Null
+            -Wait -WindowStyle Hidden | Out-Null
         $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
         if (-not (Test-Path $cdb)) { return }
         $stacks = Join-Path $OutDir 'hang-stacks.txt'
