@@ -134,7 +134,8 @@ def _recipe_semantics(recipe):
 
 _BRACKET_LINE = re.compile(r"^\[([^\]]*)\]\s*(?:#.*)?$")
 _PLATFORMS = frozenset(
-    ("windows", "unix", "linux", "macos", "freebsd", "openbsd", "netbsd", "android")
+    ("windows", "unix", "linux", "macos", "freebsd", "openbsd", "netbsd", "android",
+     "dragonfly")
 )
 
 
@@ -143,6 +144,9 @@ def _attr_items(content):
     when the content is not a plain list (a string value, a function
     call). just accepts any spacing around the commas."""
     items = [item.strip() for item in content.split(",")]
+    # just accepts a zero-argument attribute in call syntax, so [unix()]
+    # gates exactly like [unix]; read both spellings as the one gate.
+    items = [item[:-2] if item.endswith("()") else item for item in items]
     return items if all(items) else None
 
 
@@ -938,6 +942,11 @@ def self_test():
         ("variant-single-quoted-verbatim", b"[doc('a,b'), unix]\ntest-win:\n    echo a\n", b"[doc('a, b'), unix]\ntest-win:\n    echo a\n", win),
         ("variant-quoted-empty-fragment-edited", b'[script("a,,b"), unix]\ntest-win:\n    echo a\n', b'[script("a,,b"), unix]\ntest-win:\n    echo b\n', win),
         ("variant-single-quoted-empty-fragment-edited", b"[script('a,,b'), unix]\ntest-win:\n    echo a\n", b"[script('a,,b'), unix]\ntest-win:\n    echo b\n", win),
+        ("variant-freebsd-edited", b"[freebsd]\ntest-win:\n    echo a\n", b"[freebsd]\ntest-win:\n    echo b\n", win),
+        ("variant-android-comma-edited", b"[private, android]\ntest-win:\n    echo a\n", b"[private, android]\ntest-win:\n    echo b\n", win),
+        ("variant-dragonfly-edited", b"[dragonfly]\ntest-win:\n    echo a\n", b"[dragonfly]\ntest-win:\n    echo b\n", win),
+        ("variant-call-form-gate-edited", b"[unix()]\ntest-win:\n    echo a\n", b"[unix()]\ntest-win:\n    echo b\n", win),
+        ("variant-call-form-spelling-free", b"[unix()]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    echo a\n", set()),
         ("variant-attr-spelled-edited", b"[unix]\t# note\ntest-win:\n    echo a\n", b"[unix]\t# note\ntest-win:\n    echo b\n", win),
         ("variant-macos-arm", b"no regions", b"[macos]\ntest:\n    echo a\n", zig),
         ("variant-crlf-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\r\ntest-win:\r\n    echo a\r\n", set()),
