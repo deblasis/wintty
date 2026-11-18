@@ -13,6 +13,10 @@ human) working in this repo uses the same contract:
   decision without running anything; `just signoff-full` runs every leg.
   The gate recomputes the requirement from the PR's own files, so a cheap
   record cannot stand in for an expensive one.
+- `just signoff-docs` - the same record for a change whose plan selects no
+  leg (a README or docs edit), run without the build lane. It exits 3
+  without running or recording anything when any leg is selected,
+  counting a rename's old path too; use `just signoff` in the lane then.
 - `just leg-cache plan` - the content digests behind signoff's carrying
   (`leg_cache.py`). Each leg has a digest over everything it consumes:
   the paths `gate_scope.py` routes to it, the justfile recipes it runs

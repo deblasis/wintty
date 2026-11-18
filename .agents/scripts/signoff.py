@@ -38,6 +38,9 @@ never as "the window did not move".
 Usage: just signoff          (scoped to what changed, greens carried)
        just signoff-full     (every leg, whatever changed)
        just signoff-fresh    (scoped, nothing carried)
+       just signoff-docs     (records only when no leg is selected;
+                              refuses otherwise, so it may run outside
+                              the build lane)
 """
 
 import datetime
@@ -46,6 +49,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -71,79 +75,306 @@ def changed_paths(base):
     return sorted(p.strip().replace("\\", "/") for p in out.stdout.splitlines() if p.strip())
 
 
-def _hunk_lines(diff_text, side):
-    """Line numbers touched on one side of a unified diff (side: '-' or '+')."""
-    lines = set()
-    for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff_text, re.M):
-        start = int(m.group(1) if side == "-" else m.group(3))
-        count = m.group(2) if side == "-" else m.group(4)
-        count = 1 if count is None else int(count)
-        for i in range(count):
-            lines.add(start + i)
-    return lines
-
-
-def _recipe_at(content_lines, lineno):
-    """Name of the recipe owning a 1-based line, or None for file preamble.
-
-    Body lines are indented, so the owning recipe is the nearest header at
-    column 0 above. A changed line that is itself at column 0 and not a
-    recipe header (a `set` directive, an assignment) belongs to no recipe
-    and is treated as preamble, which forces a full run.
-    """
-    idx = lineno - 1
-    if idx < 0 or idx >= len(content_lines):
+def _just_blob(rev):
+    """The justfile's exact bytes at `rev`, or None. Direct subprocess
+    rather than run(): run() decodes as text, and a lone carriage return
+    must survive into the file just reads, because just's lexer treats it
+    differently from a newline."""
+    try:
+        p = subprocess.run(["git", "-C", REPO_ROOT, "show", f"{rev}:justfile"],
+                           capture_output=True, timeout=leg_cache.GIT_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError):
         return None
-    header = gate_scope.RECIPE_HEADER
-    line = content_lines[idx]
-    if line and not line[0].isspace():
-        m = header.match(line)
-        return m.group(1) if m else None
-    for i in range(idx, -1, -1):
-        cur = content_lines[i]
-        if not cur or cur[0].isspace():
+    return p.stdout if p.returncode == 0 else None
+
+
+# Keys just's JSON dump may carry that name where the file was read from,
+# not what it means: `source` is the path of the file that was dumped, and
+# the top-level `doc` is the comment above the default recipe. The position
+# keys are not in today's dump but cost nothing to drop if a future just
+# adds them.
+_WHERE_KEYS = {"source", "doc"}
+_POSITION_KEYS = {"line", "col", "position", "offset"}
+# Dump sections keyed by author-chosen names, where a recipe or a variable
+# may legitimately be called `line`: the position keys are stripped from
+# the values inside these maps, never from their keys.
+_NAME_KEYED = {"assignments", "aliases", "recipes", "groups", "modules", "unexports"}
+
+
+def _strip_where(value, name_keyed=False):
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if not name_keyed and k in _POSITION_KEYS:
+                continue
+            out[k] = _strip_where(v, name_keyed=k in _NAME_KEYED)
+        return out
+    if isinstance(value, list):
+        return [_strip_where(v) for v in value]
+    return value
+
+
+def _recipe_semantics(recipe):
+    """A recipe's dump with comment-bearing fields removed: `doc` (the doc
+    comment above the recipe) and body lines that are nothing but a
+    comment, and only in a recipe just parses line by line on this host.
+    A script recipe's body is text an interpreter reads, where a `#` line
+    can be payload, so nothing is stripped there but the doc."""
+    if not isinstance(recipe, dict):
+        return recipe
+    r = {k: v for k, v in recipe.items() if k != "doc"}
+    body = r.get("body")
+    if isinstance(body, list) and not r.get("shebang"):
+        r["body"] = [line for line in body
+                     if not (isinstance(line, list) and len(line) == 1
+                             and isinstance(line[0], str)
+                             and line[0].lstrip().startswith("#"))]
+    return r
+
+
+_BRACKET_LINE = re.compile(r"^\[([^\]]*)\]\s*(?:#.*)?$")
+# A trailing zero-argument call pair, with any spacing inside it.
+_CALL_FORM = re.compile(r"\s*\(\s*\)$")
+
+_PLATFORMS = frozenset(
+    ("windows", "unix", "linux", "macos", "freebsd", "openbsd", "netbsd", "android",
+     "dragonfly")
+)
+
+
+def _attr_items(content):
+    """The comma-separated items of an attribute line's brackets, or None
+    when an item is left empty (a trailing comma, a lone zero-argument
+    pair). just accepts any spacing around the commas and inside a
+    zero-argument call pair, which reads as the bare name; an
+    argument-bearing item stays as written, and just refuses it, which
+    fails the dump and forces every leg."""
+    items = [item.strip() for item in content.split(",")]
+    # just accepts a zero-argument attribute in call syntax with any
+    # spacing inside the parens, so [unix()] and [unix ( )] gate exactly
+    # like [unix]; read all of those spellings as the one gate. An
+    # argument-bearing form is left raw: just refuses it, which fails the
+    # dump and forces every leg.
+    items = [_CALL_FORM.sub("", item) for item in items]
+    return items if all(items) else None
+
+
+def _canonical_attr(line):
+    """The canonical form of a column-0 attribute line, or None when the
+    line is not one: items sorted, spacing and any trailing comment gone.
+    `[private, unix]` and `[unix , private]` canonicalize the same,
+    because just reads them the same. A list carrying a quoted string is
+    kept as written: inside the quotes a comma or a space is an
+    argument's text, not spelling."""
+    m = _BRACKET_LINE.match(line)
+    if m is None:
+        return None
+    content = m.group(1)
+    if any(q in content for q in "\"'"):
+        # Quote-bearing content compares verbatim: a comma or a space
+        # inside a string is an argument's text, not spelling.
+        return "[" + content + "]"
+    items = _attr_items(content)
+    if items is None:
+        return None
+    return "[" + ", ".join(sorted(items)) + "]"
+
+
+def _gates_platform(line):
+    """True when an attribute line's list names a platform, which hides
+    the recipe that follows it from every host it does not match.
+
+    Quote-bearing content counts as gating too: the naive comma split
+    cannot find the platform name inside such a line, and a line that
+    turns out not to gate names a recipe the dump can see, so treating it
+    as gating only adds coverage."""
+    m = _BRACKET_LINE.match(line)
+    if m is None:
+        return False
+    content = m.group(1)
+    if any(q in content for q in "\"'"):
+        return True
+    items = _attr_items(content)
+    return items is not None and any(i in _PLATFORMS for i in items)
+
+
+def _normalized_region(lines):
+    """A region's lines reduced only by what cannot change meaning: the
+    carriage return of a CRLF ending, trailing blank lines, and the
+    spelling, order and trailing comment of attribute lines, whose quoted
+    content stays as written. Everything else counts, comments included:
+    in a definition this host cannot parse, nothing can tell a comment
+    from an interpreter's payload."""
+    out = []
+    for raw in lines:
+        line = raw[:-1] if raw.endswith("\r") else raw
+        canonical = _canonical_attr(line)
+        if canonical is not None:
+            out.append(canonical)
             continue
-        m = header.match(cur)
-        return m.group(1) if m else None
-    return None
+        out.append(line)
+    while out and not out[-1]:
+        out.pop()
+    return "\n".join(out)
+
+
+def _variant_regions(text):
+    """(regions, suspicious) for a justfile. regions maps a recipe name to
+    its platform-gated regions: from a column-0 attribute line whose list
+    names a platform, through any stacked attribute lines, the recipe
+    header and the body that follow. suspicious is True when a platform
+    attribute is followed by a header line this scanner cannot read, or an
+    attribute line appears that this scanner cannot read at all: the
+    region is real (the host dump cannot see it) but its name or its gate
+    is unknown, so the caller must force every leg rather than guess.
+
+    The dump shows each recipe in the definition valid on the host that
+    dumped it, so these regions are the one part of the file it cannot
+    see. The scan is lexical and deliberately dumb; the normalization is
+    as blind as it can be while keeping every real edit."""
+    regions = {}
+    suspicious = False
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("[") and _canonical_attr(line) is None:
+            # An attribute line this scanner cannot read may carry a
+            # platform gate it cannot see; distrust it rather than skip.
+            suspicious = True
+        if not line or not _gates_platform(line):
+            i += 1
+            continue
+        start = i
+        while start > 0 and lines[start - 1].startswith("["):
+            start -= 1
+        i += 1
+        header = None
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith("["):
+                i += 1
+                continue
+            if line and not line[0].isspace():
+                m = gate_scope.RECIPE_HEADER.match(line)
+                header = m.group(1) if m else None
+                if header is None:
+                    suspicious = True
+                i += 1
+            break
+        if header is None:
+            continue
+        while i < len(lines) and (not lines[i] or lines[i][0].isspace()):
+            i += 1
+        regions.setdefault(header, []).append(_normalized_region(lines[start:i]))
+    return regions, suspicious
+
+
+def _just_semantics(path):
+    """just's own reading of the justfile at `path`, or None when just
+    cannot load it. `--dump` parses the file without executing any of it,
+    so a justfile that just refuses to load, or a comment that changes
+    what a recipe is (a shebang no longer first, a continuation split),
+    is a difference this sees and a line reader cannot."""
+    try:
+        out = run(["just", f"--justfile={path}", "--dump", "--dump-format", "json"])
+    except Exception:  # noqa: BLE001 - no just on PATH, or it could not spawn
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        return json.loads(out.stdout)
+    except ValueError:
+        return None
+
+
+def _compared_semantics(sem):
+    """A dump reduced to what a change in meaning can touch: where-keys and
+    position keys gone, comment fields gone, per recipe."""
+    sem = {k: _strip_where(v, name_keyed=k in _NAME_KEYED)
+           for k, v in sem.items() if k not in _WHERE_KEYS}
+    recipes = sem.get("recipes")
+    if isinstance(recipes, dict):
+        sem["recipes"] = {name: _recipe_semantics(r) for name, r in recipes.items()}
+    return sem
 
 
 def justfile_legs(base):
     """Legs whose meaning a justfile edit could have changed.
 
     Editing the recipe a leg runs through invalidates that leg only; a
-    changed line outside every recipe (the shell preamble, a variable) can
-    reach any of them and forces all. Adding an unrelated recipe forces
-    nothing. Comment-only and blank-line changes never count, since a guard
-    that demands an hour of tests for a typo fix is the kind that gets
-    switched off. Both sides of the diff are inspected so a deleted recipe
-    cannot slip through by leaving no new lines.
+    change outside every recipe (a setting, an assignment) can reach any
+    of them and forces all. Adding an unrelated recipe forces nothing.
+    Comment lines and doc comments are free where just parses them as
+    comments; a script's body and a platform region keep every line,
+    because there a `#` line can be payload; a comment at the end of a
+    code line counts. A guard that demands an hour of tests for a typo
+    fix is the kind that gets switched off.
+
+    Both versions are read by just itself (`--dump`, which parses without
+    executing) and compared as JSON, comment fields stripped first. Every
+    earlier miss of this function came from a private reading of the file:
+    `git diff` output shaped by the reader's config, line numbers mapped
+    back onto the file, comments treated as inert when just's grammar
+    gives some of them meaning. just is the definition of what the file
+    means, so just is the parser.
+
+    The one part of the file the dump cannot see is a recipe defined once
+    per platform, which appears in the definition valid on this host only;
+    those regions are compared from the raw text, every line counting but
+    the trailing blanks and the spelling of readable attribute lines (a
+    list carrying a quoted string compares as written). A
+    missing justfile on either side, one just cannot load, or a gated
+    recipe whose attribute or header line this scanner cannot read, forces
+    every leg.
     """
-    diff = run(["git", "diff", "--unified=0", base, "HEAD", "--", "justfile"])
-    if diff.returncode != 0:
-        return set(gate_scope.ALL_LEGS)
-    if not diff.stdout.strip():
-        return set()
-
-    new_content = run(["git", "show", "HEAD:justfile"])
-    old_content = run(["git", "show", f"{base}:justfile"])
-    if new_content.returncode != 0 or old_content.returncode != 0:
-        return set(gate_scope.ALL_LEGS)
-
+    every = set(gate_scope.ALL_LEGS)
+    old_blob = _just_blob(base)
+    new_blob = _just_blob("HEAD")
+    if old_blob is None or new_blob is None:
+        return every
+    with tempfile.TemporaryDirectory() as td:
+        # Separate subdirectories, so an import in one version cannot
+        # resolve the other version's file.
+        old_path = os.path.join(td, "old", "justfile")
+        new_path = os.path.join(td, "new", "justfile")
+        for path, blob in ((old_path, old_blob), (new_path, new_blob)):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(blob)
+        old_sem = _just_semantics(old_path)
+        new_sem = _just_semantics(new_path)
+    if old_sem is None or new_sem is None:
+        return every
+    old_sem = _compared_semantics(old_sem)
+    new_sem = _compared_semantics(new_sem)
     legs = set()
-    for side, blob in (("+", new_content.stdout), ("-", old_content.stdout)):
-        content_lines = blob.splitlines()
-        for lineno in _hunk_lines(diff.stdout, side):
-            if lineno - 1 >= len(content_lines):
-                return set(gate_scope.ALL_LEGS)
-            text = content_lines[lineno - 1].strip()
-            if not text or text.startswith("#"):
-                continue
-            recipe = _recipe_at(content_lines, lineno)
-            if recipe is None:
-                return set(gate_scope.ALL_LEGS)
-            legs.update(gate_scope.RECIPE_LEGS.get(recipe, ()))
+    if old_sem != new_sem:
+        for key in (set(old_sem) | set(new_sem)) - {"recipes"}:
+            if old_sem.get(key) != new_sem.get(key):
+                return every
+        old_recipes = old_sem.get("recipes") or {}
+        new_recipes = new_sem.get("recipes") or {}
+        for name in set(old_recipes) | set(new_recipes):
+            if old_recipes.get(name) != new_recipes.get(name):
+                legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
+    old_regions, old_suspicious = _variant_regions(old_blob.decode("utf-8", "surrogateescape"))
+    new_regions, new_suspicious = _variant_regions(new_blob.decode("utf-8", "surrogateescape"))
+    if old_suspicious or new_suspicious:
+        return every
+    for name in set(old_regions) | set(new_regions):
+        if old_regions.get(name) != new_regions.get(name):
+            legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
     return legs
+
+
+def scoped_legs(base, paths):
+    """(legs, justfile_legs) a path list needs against `base`. The single
+    place a path list becomes legs, so every caller that scopes a list,
+    whatever produced it, applies the same rules, the justfile's
+    per-recipe reading included."""
+    jf = sorted(justfile_legs(base)) if "justfile" in paths else []
+    return gate_scope.required_legs(paths, justfile_legs=jf), jf
 
 
 def plan(full=False):
@@ -162,8 +393,7 @@ def plan(full=False):
         return every, None, every, "could not list changed paths", base
     if not paths:
         return every, [], every, "no changes against the base; nothing to scope", base
-    jf = sorted(justfile_legs(base)) if "justfile" in paths else []
-    legs = gate_scope.required_legs(paths, justfile_legs=jf)
+    legs, jf = scoped_legs(base, paths)
     unknown = gate_scope.unknown_paths(paths)
     if unknown:
         reason = f"unclassified path(s) force every leg: {', '.join(unknown[:5])}"
@@ -457,9 +687,86 @@ def _run_command(cmd):
         return 127
 
 
+def no_legs_refusal(legs):
+    """Why a --no-legs-only run must not proceed, or None when it may.
+
+    AGENTS.md has every signoff that runs a leg wrapped in the build lane.
+    A change whose scope selects no leg (a README, a docs page) runs
+    nothing heavy, so making it queue for build slots behind an exclusive
+    holder costs wall time and protects nothing. --no-legs-only is the
+    entry point that may be run without the lane, and this check is what
+    keeps it honest: the moment the plan selects any leg, it refuses
+    before running or recording anything, so the lane-free form cannot
+    become a way to run tests outside the lane.
+    """
+    if not legs:
+        return None
+    return (f"the plan selects {', '.join(legs)}, so this signoff runs tests and "
+            "belongs in the build lane: incoda run --queue wintty-build "
+            '--reason "..." -- just signoff')
+
+
+def legs_without_renames(base):
+    """Legs the change needs when every rename counts as a delete of its
+    old path plus an add of its new one, or None if git cannot say.
+
+    `git diff --name-only` (and GitHub's PR file list, which the merge gate
+    compares against) report a rename by its new path only, so moving a
+    file out of src/ into docs/ plans no leg even though src/ lost a file.
+    The split list goes through the same scoping as the plan, so a renamed
+    justfile is read as the justfile it was. The lane-free path refuses on
+    any of it; the record itself keeps the regular path list, so it stays
+    identical to what `just signoff` writes.
+    """
+    out = run(["git", "diff", "--no-renames", "--name-only", f"{base}...HEAD"])
+    if out.returncode != 0:
+        return None
+    paths = sorted(p.strip().replace("\\", "/") for p in out.stdout.splitlines() if p.strip())
+    return scoped_legs(base, paths)[0]
+
+
+def no_legs_gate(head, legs, base):
+    """Every refusal of the lane-free path, in order, or None to proceed:
+    an unknown HEAD, a plan with legs, a rename whose old side needs legs,
+    a split diff git cannot produce, and a HEAD that moved while the plan
+    was computed."""
+    if not head:
+        return "could not resolve HEAD"
+    refused = no_legs_refusal(legs)
+    if refused:
+        return refused
+    both_sides = legs_without_renames(base)
+    if both_sides is None:
+        return "could not list the changed paths with renames split; run `just signoff` in the build lane"
+    if both_sides:
+        return "counting each rename's old path, " + no_legs_refusal(both_sides)
+    now = run(["git", "rev-parse", "HEAD"]).stdout.strip()
+    if now != head:
+        return f"HEAD moved from {head[:10]} to {now[:10]} while planning; rerun"
+    return None
+
+
+# Flags whose handling exits before main() is reached, plus --full, which
+# selects every leg. None of them combines with the lane-free path.
+NO_LEGS_CONFLICTS = ("--full", "--plan", "--debt", "--post", "--defer", "--settle")
+
+
+def no_legs_conflict(argv):
+    """The first argument that cannot go with --no-legs-only, or None. A
+    misspelling such as `--no-legs-only=1` counts: otherwise it is ignored
+    and the run turns into a plain signoff that runs its legs."""
+    misspelt = next((a for a in argv if a.startswith("--no-legs-only") and a != "--no-legs-only"), None)
+    if misspelt:
+        return misspelt
+    if "--no-legs-only" not in argv:
+        return None
+    return next((f for f in NO_LEGS_CONFLICTS if f in argv), None)
+
+
 def main(argv):
     full = "--full" in argv
     no_cache = "--no-cache" in argv
+    no_legs_only = "--no-legs-only" in argv
     head = run(["git", "rev-parse", "HEAD"]).stdout.strip()
     dirty = run(["git", "status", "--porcelain"]).stdout.strip()
     if dirty:
@@ -470,6 +777,12 @@ def main(argv):
     legs, paths, jf, reason, base = plan(full)
     print(f"signoff: {reason}")
     print(f"signoff: legs: {', '.join(legs) if legs else '(none needed)'}")
+
+    if no_legs_only:
+        refused = no_legs_gate(head, legs, base)
+        if refused:
+            print(f"signoff: NOT recorded: {refused}")
+            return 3
 
     plans, ctx = None, None
     if legs:
@@ -558,54 +871,103 @@ def self_test():
             failed = True
         print(f"{'ok ' if ok else 'FAIL'} {label}{': ' + detail if detail else ''}")
 
-    justfile = [
-        "# preamble comment",
-        'set windows-shell := ["pwsh.exe"]',
-        "",
-        "test: test-lib-vt",
-        "    zig build test",
-        "",
-        "[windows]",
-        "gallery-verify:",
-        "    bash tools/gallery/verify.sh",
-        "",
-        "pr-gate pr:",                       # bare parameter
-        "    python .agents/scripts/pr_gate.py",
-        "",
-        'splash-race args="": build-win',    # defaulted parameter and a dep
-        "    pwsh -File x.ps1",
-        "",
-        "signoff-defer +reason:",            # variadic parameter
-        "    python .agents/scripts/signoff.py",
+    # justfile_legs: just's own dump of both versions decides. The seam is
+    # faked (_just_blob / _just_semantics), so these cases pin the decision
+    # rules; the real oracle is exercised against real git and real just
+    # outside the self-test. A None on either side is a justfile just
+    # cannot load, and that selects every leg.
+    every = set(gate_scope.ALL_LEGS)
+    zig = set(gate_scope.RECIPE_LEGS["test"])
+    win = set(gate_scope.RECIPE_LEGS["test-win"])
+
+    def sem(recipes=None, **top):
+        base = {"source": "somewhere", "settings": {}, "assignments": {},
+                "recipes": recipes if recipes is not None else {}}
+        base.update(top)
+        return base
+
+    def with_justfile_reading(old_blob, new_blob, old_sem, new_sem):
+        saved_blob, saved_sem = globals()["_just_blob"], globals()["_just_semantics"]
+
+        def fake_blob(rev):
+            return new_blob if rev.startswith("HEAD") else old_blob
+
+        def fake_sem(path):
+            return {"old": old_sem, "new": new_sem}["old" if "old" in path else "new"]
+        try:
+            globals()["_just_blob"], globals()["_just_semantics"] = fake_blob, fake_sem
+            return justfile_legs("b" * 40)
+        finally:
+            globals()["_just_blob"], globals()["_just_semantics"] = saved_blob, saved_sem
+
+    same = sem({"test": {"body": ["a"]}, "hello": {}})
+    oracle_cases = [
+        ("old-blob-missing", None, b"x", None, None, every),
+        ("new-blob-missing", b"x", None, None, None, every),
+        ("unparsable-old", b"x", b"y", None, sem(), every),
+        ("unparsable-new", b"x", b"y", sem(), None, every),
+        ("equal", b"x", b"y", same, sem({"test": {"body": ["a"]}, "hello": {}}), set()),
+        ("source-path-stripped", b"x", b"y", sem({"test": {"body": ["a"]}}, source="tmp1"),
+         sem({"test": {"body": ["a"]}}, source="tmp2"), set()),
+        ("settings-change", b"x", b"y", sem(), sem(settings={"x": 1}), every),
+        ("assignment-change", b"x", b"y", sem(), sem(assignments={"a": 1}), every),
+        ("default-recipe-change", b"x", b"y", sem(), sem(first="other"), every),
+        ("recipe-body", b"x", b"y", sem({"test": {"body": ["a"]}, "hello": {}}), sem({"test": {"body": ["b"]}, "hello": {}}), zig),
+        ("doc-comment-change", b"x", b"y", sem({"test": {"doc": "a"}}), sem({"test": {"doc": "b"}}), set()),
+        ("body-comment-change", b"x", b"y", sem({"test": {"body": [["# note"], ["zig build test"]]}}), sem({"test": {"body": [["zig build test"]]}}), set()),
+        ("shebang-flip", b"x", b"y", sem({"test": {"shebang": True, "body": [["#!/bin/sh"]]}}), sem({"test": {"shebang": False, "body": [["#!/bin/sh"]]}}), zig),
+        ("script-comment-line-counts", b"x", b"y", sem({"test": {"shebang": True, "body": [["#!/bin/sh"], ["# payload"]], "doc": "d"}}), sem({"test": {"shebang": True, "body": [["#!/bin/sh"], ["# payload 2"]], "doc": "d"}}), zig),
+        ("script-interpreter-line-counts", b"x", b"y", sem({"test": {"shebang": True, "body": [["#!/bin/sh"], ["echo a"]]}}), sem({"test": {"shebang": True, "body": [["#!/usr/bin/env python3"], ["echo a"]]}}), zig),
+        ("assignment-named-line", b"x", b"y", sem(assignments={"line": "1"}), sem(assignments={"line": "2"}), every),
+        ("recipe-added", b"x", b"y", sem({"hello": {}}), sem({"hello": {}, "test-win": {}}), win),
+        ("recipe-removed", b"x", b"y", sem({"test": {}, "hello": {}}), sem({"hello": {}}), zig),
+        ("unrelated-recipe-only", b"x", b"y", sem({"hello": {"body": ["a"]}}), sem({"hello": {"body": ["b"]}}), set()),
+        ("position-keys-stripped", b"x", b"y", sem({"test": {"body": ["a"], "line": 1}}), sem({"test": {"body": ["a"], "line": 9}}), set()),
     ]
-    owner_cases = [
-        (1, None),   # comment in the preamble
-        (2, None),   # set directive, not a recipe called "set"
-        (4, "test"),
-        (5, "test"),
-        (8, "gallery-verify"),
-        (9, "gallery-verify"),
-        (11, "pr-gate"),
-        (12, "pr-gate"),
-        (14, "splash-race"),
-        (15, "splash-race"),
-        (17, "signoff-defer"),
-        (18, "signoff-defer"),
+    for label, ob, nb, os_, ns_, expect in oracle_cases:
+        got = with_justfile_reading(ob, nb, os_, ns_)
+        report(got == expect, f"justfile-oracle-{label}", str(sorted(got)))
+
+    # Platform regions are compared from the raw text, because the host's
+    # dump shows only this host's definition of a recipe defined once per
+    # platform. Same dumps, different blobs.
+    same_sem = sem({"test": {"body": ["a"]}})
+    variant_blobs = [
+        ("variant-body-edited", b"no regions", b"[unix]\ntest-win:\n    echo a\n", win),
+        ("variant-added", b"no regions", b"[linux]\ntest:\n    echo a\n", zig),
+        ("variant-unmapped", b"no regions", b"[unix]\nhello:\n    echo a\n", set()),
+        ("variant-comment-counts", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    # note\n    echo a\n", win),
+        ("variant-attr-spelling-free", b"[unix] # note\ntest-win:\n    echo a\n", b"[ unix ]\ntest-win:\n    echo a\n", set()),
+        ("variant-attr-flip-counts", b"[unix]\ntest-win:\n    echo a\n", b"[linux]\ntest-win:\n    echo a\n", win),
+        ("variant-comma-attr-edited", b"[private, unix]\ntest-win:\n    echo a\n", b"[private, unix]\ntest-win:\n    echo b\n", win),
+        ("variant-comma-attr-order-free", b"[private, unix]\ntest-win:\n    echo a\n", b"[unix , private]\ntest-win:\n    echo a\n", set()),
+        ("variant-attr-above-removed", b"[private]\n[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    echo a\n", win),
+        ("variant-stacked-attrs-edited", b"[linux]\n[unix]\ntest-win:\n    echo a\n", b"[linux]\n[unix]\ntest-win:\n    echo b\n", win),
+        ("variant-unreadable-header-suspicious", b'[unix]\nrec x="a\\"b":\n    echo a\n', b'[unix]\nrec x="a\\"b":\n    echo b\n', every),
+        ("variant-inner-blank-counts", b"[unix]\ntest-win:\n    echo a\n\n    echo b\n", b"[unix]\ntest-win:\n    echo a\n    echo b\n", win),
+        ("variant-quoted-content-verbatim", b'[script("a,b"), unix]\ntest-win:\n    echo a\n', b'[script("a, b"), unix]\ntest-win:\n    echo a\n', win),
+        ("variant-unreadable-attr-suspicious", b'[unix]\ntest-win:\n    echo a\n', b'[doc("a]b"), unix]\ntest-win:\n    echo b\n', every),
+        ("variant-mixed-quoted-gate-edited", b'[script("a"), unix]\ntest-win:\n    echo a\n', b'[script("a"), unix]\ntest-win:\n    echo b\n', win),
+        ("variant-single-quoted-verbatim", b"[doc('a,b'), unix]\ntest-win:\n    echo a\n", b"[doc('a, b'), unix]\ntest-win:\n    echo a\n", win),
+        ("variant-quoted-empty-fragment-edited", b'[script("a,,b"), unix]\ntest-win:\n    echo a\n', b'[script("a,,b"), unix]\ntest-win:\n    echo b\n', win),
+        ("variant-single-quoted-empty-fragment-edited", b"[script('a,,b'), unix]\ntest-win:\n    echo a\n", b"[script('a,,b'), unix]\ntest-win:\n    echo b\n", win),
+        ("variant-freebsd-edited", b"[freebsd]\ntest-win:\n    echo a\n", b"[freebsd]\ntest-win:\n    echo b\n", win),
+        ("variant-android-comma-edited", b"[private, android]\ntest-win:\n    echo a\n", b"[private, android]\ntest-win:\n    echo b\n", win),
+        ("variant-dragonfly-edited", b"[dragonfly]\ntest-win:\n    echo a\n", b"[dragonfly]\ntest-win:\n    echo b\n", win),
+        ("variant-call-form-gate-edited", b"[unix()]\ntest-win:\n    echo a\n", b"[unix()]\ntest-win:\n    echo b\n", win),
+        ("variant-call-form-spelling-free", b"[unix()]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    echo a\n", set()),
+        ("variant-call-form-spaced-edited", b"[unix ( )]\ntest-win:\n    echo a\n", b"[unix ( )]\ntest-win:\n    echo b\n", win),
+        ("variant-call-form-spaced-list-edited", b"[private, unix\t()]\ntest-win:\n    echo a\n", b"[private, unix\t()]\ntest-win:\n    echo b\n", win),
+        ("variant-call-form-spaced-flip-free", b"[unix ()]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    echo a\n", set()),
+        ("variant-attr-spelled-edited", b"[unix]\t# note\ntest-win:\n    echo a\n", b"[unix]\t# note\ntest-win:\n    echo b\n", win),
+        ("variant-macos-arm", b"no regions", b"[macos]\ntest:\n    echo a\n", zig),
+        ("variant-crlf-free", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\r\ntest-win:\r\n    echo a\r\n", set()),
+        ("variant-shebang-counts", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    #!/bin/sh\n    echo a\n", win),
+        ("variant-indent-noise-ignored", b"[unix]\ntest-win:\n    echo a\n\n", b"[unix]\ntest-win:\n    echo a\n", set()),
     ]
-    for lineno, expect in owner_cases:
-        got = _recipe_at(justfile, lineno)
-        report(got == expect, "recipe-owner", f"line {lineno} -> {got}")
-
-    # A pure insertion (-10,0) touches no old line, so only the new side
-    # carries it; a replacement (-4 +4) appears on both.
-    hunk = "@@ -10,0 +11,2 @@\n+new line\n+another\n@@ -4 +4 @@\n-old\n+new\n"
-    report(_hunk_lines(hunk, "+") == {11, 12, 4}, "hunk-new", str(sorted(_hunk_lines(hunk, "+"))))
-    report(_hunk_lines(hunk, "-") == {4}, "hunk-old", str(sorted(_hunk_lines(hunk, "-"))))
-
-    deletion = "@@ -20,3 +19,0 @@\n-a\n-b\n-c\n"
-    report(_hunk_lines(deletion, "-") == {20, 21, 22}, "hunk-deletion", str(sorted(_hunk_lines(deletion, "-"))))
-    report(_hunk_lines(deletion, "+") == set(), "hunk-deletion-new", str(sorted(_hunk_lines(deletion, "+"))))
-
+    for label, ob, nb, expect in variant_blobs:
+        got = with_justfile_reading(ob, nb, same_sem, sem({"test": {"body": ["a"]}}))
+        report(got == expect, f"justfile-variant-{label}", str(sorted(got)))
     # The record must carry the window it was taken against: the merge guard
     # reads `base` next to `sha` to measure what moved on the branch. A None
     # base must still be PRESENT in the payload, so a reader distinguishing
@@ -668,6 +1030,96 @@ def self_test():
     report(ok and calls[-1] == "test" and "carried" not in results["zig-tests"],
            "run-legs-plans-without-context-run", str(calls))
 
+    # no_legs_refusal: the lane-free entry point proceeds only on an empty
+    # leg list. Any selected leg, a single one or the whole ladder (which
+    # is also what a failed scope computation falls back to), refuses and
+    # names the lane form to use instead.
+    report(no_legs_refusal([]) is None, "no-legs-proceeds", "an empty plan may record")
+    one = no_legs_refusal(["gates-selftest"])
+    report(one is not None and "gates-selftest" in one and "wintty-build" in one,
+           "no-legs-refuses-one-leg", str(one))
+    report(no_legs_refusal(sorted(gate_scope.ALL_LEGS)) is not None,
+           "no-legs-refuses-full-ladder", "the fail-closed every-leg plan refuses")
+
+    # main() --no-legs-only: the refusal must come before the leg cache, the
+    # legs and the record. plan, git, the runner, the status post and the
+    # record dir are stubbed, so this exercises main's ordering, not git.
+    import tempfile
+    import types as _types
+    mod = sys.modules[__name__]
+    stubbed = ("plan", "run", "run_legs", "post_github_status", "report_debt")
+    saved = {n: getattr(mod, n) for n in stubbed}
+    saved_common, saved_ctx = leg_cache.common_dir, leg_cache.Context
+
+    def drive(legs, split_paths, heads, argv=("--no-legs-only",), split_rc=0):
+        state = {"legs_calls": 0, "ctx": 0, "heads": list(heads)}
+        with tempfile.TemporaryDirectory() as td:
+            def fake_run(cmd, **kw):
+                if cmd[:2] == ["git", "rev-parse"]:
+                    h = state["heads"].pop(0) if len(state["heads"]) > 1 else state["heads"][0]
+                    return _types.SimpleNamespace(returncode=0, stdout=h + "\n")
+                if cmd[:2] == ["git", "diff"] and "--no-renames" in cmd:
+                    return _types.SimpleNamespace(returncode=split_rc, stdout="\n".join(split_paths))
+                # A justfile that is gone at HEAD (renamed or deleted) has
+                # no blob there.
+                if cmd[:2] == ["git", "show"] and cmd[2].startswith("HEAD:"):
+                    return _types.SimpleNamespace(returncode=128, stdout="")
+                return _types.SimpleNamespace(returncode=0, stdout="")
+
+            def fake_run_legs(ls, plans, ctx, runner):
+                state["legs_calls"] += 1
+                return {}, True
+
+            def fake_ctx(*a, **k):
+                state["ctx"] += 1
+                raise RuntimeError("leg cache must not be built")
+
+            mod.plan = lambda full=False: (list(legs), ["README.md"], [], "stub plan", "b" * 40)
+            mod.run = fake_run
+            mod.run_legs = fake_run_legs
+            mod.post_github_status = lambda record: None
+            mod.report_debt = lambda: None
+            leg_cache.common_dir = lambda root: td
+            leg_cache.Context = fake_ctx
+            try:
+                rc = main(list(argv))
+            finally:
+                for n, v in saved.items():
+                    setattr(mod, n, v)
+                leg_cache.common_dir, leg_cache.Context = saved_common, saved_ctx
+            records = os.listdir(os.path.join(td, "pr-signoff")) if os.path.isdir(os.path.join(td, "pr-signoff")) else []
+        return rc, state, records
+
+    head = "f" * 40
+    rc, st, recs = drive(["gates-selftest"], ["README.md"], [head])
+    report(rc == 3 and st["legs_calls"] == 0 and st["ctx"] == 0 and not recs,
+           "no-legs-main-refuses-before-legs-and-record",
+           f"rc={rc} legs_calls={st['legs_calls']} ctx={st['ctx']} records={recs}")
+    rc, st, recs = drive([], ["README.md"], [head])
+    report(rc == 0 and st["legs_calls"] == 1 and recs == [f"{head}.json"],
+           "no-legs-main-records-empty-plan", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["src/App.zig", "docs/moved.zig"], [head])
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-rename-out-of-src", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["README.md"], [head, "e" * 40])
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-moved-head", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["justfile", "justfile-notes.md"], [head])
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-renamed-justfile", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["README.md"], [head], split_rc=128)
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-failed-split-diff", f"rc={rc} records={recs}")
+    rc, st, recs = drive([], ["README.md"], [""])
+    report(rc == 3 and st["legs_calls"] == 0 and not recs,
+           "no-legs-main-refuses-unknown-head", f"rc={rc} records={recs}")
+    report(no_legs_conflict(["--no-legs-only", "--defer", "why"]) == "--defer"
+           and no_legs_conflict(["--no-legs-only", "--full"]) == "--full"
+           and no_legs_conflict(["--no-legs-only=1"]) == "--no-legs-only=1"
+           and no_legs_conflict(["--no-legs-only"]) is None
+           and no_legs_conflict(["--defer", "why"]) is None,
+           "no-legs-flag-conflicts", "dispatch flags, --full and misspellings refuse the lane-free path")
+
     # resolve_record: the records dir also holds superseded heads (a stack
     # rebuilt after a fix leaves the old SHAs behind), so a prefix must
     # match exactly one file, ambiguity is an error naming the candidates,
@@ -694,6 +1146,10 @@ def self_test():
 
 if __name__ == "__main__":
     argv = sys.argv[1:]
+    conflict = no_legs_conflict(argv)
+    if conflict:
+        print(f"signoff: {conflict} is not accepted with or in place of --no-legs-only")
+        sys.exit(2)
     if "--self-test" in argv:
         sys.exit(self_test())
     if "--plan" in argv:

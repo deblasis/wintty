@@ -748,6 +748,22 @@ signoff:
 signoff-plan:
     python .agents/scripts/signoff.py --plan
 
+# It records the same green `signoff` would, and exits 3 without recording
+# the moment the plan selects any leg (a rename's old path counts), so it
+# is the one recipe that records a green signoff outside the build lane
+# (AGENTS.md). signoff, signoff-full and signoff-fresh stay in the lane.
+# Two bodies because pwsh would turn exit 3 into 1 and sh cannot parse the
+# pwsh form.
+#
+# Signoff for a change whose plan selects no leg, outside the build lane
+[windows]
+signoff-docs:
+    python .agents/scripts/signoff.py --no-legs-only; exit ($LASTEXITCODE ?? 1)
+
+[unix]
+signoff-docs:
+    python .agents/scripts/signoff.py --no-legs-only
+
 # Run every leg regardless of what changed, and settle any deferred debt.
 # Legs still carry here; the debt settles only when HEAD contains
 # origin/windows (where the deferred merges live) and no carried green
