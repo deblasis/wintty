@@ -18,10 +18,12 @@
 
     Actuation is the in-process test seam: `open-profile` runs the real
     new-tab funnel, `screen-text` reads the viewport libghostty renders,
-    `screen-scroll` scrolls through the real binding-action path, and
-    `terminal-key` forwards one KeyDown through SendKeyCore -- no OS input is
-    synthesized and nothing holds the foreground. The staged command numbers
-    each run, so the restarted run's marker is distinct without a
+    `screen-scroll` scrolls through the real binding-action path,
+    `terminal-key` forwards one KeyDown through SendKeyCore, and `host-key`
+    drives OnKeyDown's and OnKeyUp's real decisions below their routing
+    gates (the armed offer before the residual chord table) -- no OS input
+    is synthesized and nothing holds the foreground. The staged command
+    numbers each run, so the restarted run's marker is distinct without a
     scrollback-total read.
 
     Each scenario gets a FRESH app process. Exits 0 on pass, 2 on a product
@@ -119,27 +121,38 @@ env = PATH=C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem
 env = SECRET=1
 profile.repro.name = Repro
 profile.repro.command = direct:"$ReproMain"
-profile.repro.retry-on-exit = true
+profile.repro.restart-on-exit = true
 profile.repro-live.name = Repro Live
 profile.repro-live.command = direct:"$ReproLive"
-profile.repro-live.retry-on-exit = true
+profile.repro-live.restart-on-exit = true
 profile.repro-env.name = Repro Env
 profile.repro-env.command = direct:C:\Windows\System32\cmd.exe /c "if defined SECRET (echo SECRET-SET) else (echo SECRET-UNSET)"
-profile.repro-env.retry-on-exit = true
+profile.repro-env.restart-on-exit = true
 profile.repro-alt.name = Repro Alt
 profile.repro-alt.command = direct:C:\Windows\System32\cmd.exe /c type "$ReproAltTxt"
-profile.repro-alt.retry-on-exit = true
+profile.repro-alt.restart-on-exit = true
 profile.repro-del.name = Repro Deleted
 profile.repro-del.command = direct:"$ReproExe" /c "echo DELETED-EXE-MARKER"
-profile.repro-del.retry-on-exit = true
+profile.repro-del.restart-on-exit = true
 "@
+
+# Per-scenario overrides for the round-A rows. `ctrl+shift+t` is one of
+# libghostty's OWN default bindings (paste_from_clipboard /
+# paste_from_selection): the bound-key row proves the offer outranks the
+# core's binding table too, not just the host's residual chords. The
+# reload row starts under ctrl+r and rewrites the file to f5.
+$ConfigCtrlShiftT = $Config + "`nrestart-on-exit-key = ctrl+shift+t`n"
 
 # The same staged config with repro's opt-in removed: the disabled
 # contract (today's notice, any key closes).
-$ConfigNoRetry = $Config.Replace("profile.repro.retry-on-exit = true`n", "")
+$ConfigNoRestart = $Config.Replace("profile.repro.restart-on-exit = true`n", "")
 
-# The per-scenario key override for the chord row.
-$ConfigCtrlR = $Config + "`nretry-on-exit-key = ctrl+r`n"
+# The per-scenario key overrides. ctrl+r is the custom-key row; the host
+# rows use chords the WindowsOnly residual table owns, so the row fails if
+# the host dispatches its app action instead of forwarding the key.
+$ConfigCtrlR = $Config + "`nrestart-on-exit-key = ctrl+r`n"
+$ConfigCtrlShiftZ = $Config + "`nrestart-on-exit-key = ctrl+shift+z`n"
+$ConfigCtrlShift5 = $Config + "`nrestart-on-exit-key = ctrl+shift+5`n"
 
 # The -e row needs a flagged default profile; the other rows must not get one
 # (a launch tab running repro would exit and shift their tab counts).
@@ -152,6 +165,10 @@ $script:Scenarios = [System.Collections.Generic.List[object]]::new()
 $RestartSentence = 'Process exited. Press Enter to restart, any other key to close.'
 $CtrlRSentence = 'Process exited. Press Ctrl+R to restart, any other key to close.'
 $CloseSentence = 'Process exited. Press any key to close the terminal.'
+$CtrlShiftTSentence = 'Process exited. Press Ctrl+Shift+T to restart, any other key to close.'
+$F5Sentence = 'Process exited. Press F5 to restart, any other key to close.'
+$CtrlShiftZSentence = 'Process exited. Press Ctrl+Shift+Z to restart, any other key to close.'
+$CtrlShift5Sentence = 'Process exited. Press Ctrl+Shift+5 to restart, any other key to close.'
 
 function Get-Screen($s, [Parameter(Mandatory)][int]$Index) {
     # The polling read is deliberately not Invoke-SeamCommand: its per-answer
@@ -301,9 +318,51 @@ function Press-CtrlR($s, [int]$Index) {
     })
 }
 
+function Press-CtrlShiftT($s, [int]$Index) {
+    # The bound-key row's chord: KeyDown T (VK 0x54) with Ctrl+Shift. A
+    # real Ctrl+Shift+T delivers no WM_CHAR, so the press is text-less: it
+    # buffers until the release, the way a real KeyDown/KeyUp pair flows.
+    # This is exactly what the row is about: the offer claims the chord
+    # before the new_tab binding sees it.
+    [void](Invoke-SeamCommand $s @{
+        op = 'terminal-key'; tab = $Index; vk = 0x54; ctrl = $true; shift = $true; action = 'press'
+    })
+    [void](Invoke-SeamCommand $s @{
+        op = 'terminal-key'; tab = $Index; vk = 0x54; ctrl = $true; shift = $true; action = 'release'
+    })
+}
+
+function Press-F5($s, [int]$Index) {
+    # The reload row's reloaded key: F5 (VK 0x74), no character; the
+    # buffered press flushes on the release.
+    [void](Invoke-SeamCommand $s @{
+        op = 'terminal-key'; tab = $Index; vk = 0x74; action = 'press'
+    })
+    [void](Invoke-SeamCommand $s @{
+        op = 'terminal-key'; tab = $Index; vk = 0x74; action = 'release'
+    })
+}
+
 function Press-Escape($s, [int]$Index) {
     [void](Invoke-SeamCommand $s @{
         op = 'terminal-key'; tab = $Index; vk = $VK_ESCAPE; action = 'press'
+    })
+}
+
+function Press-HostChordPair($s, [int]$Index, [int]$Vk, [bool]$Ctrl, [bool]$Shift) {
+    # Both halves through the HOST seam path: the press takes OnKeyDown's
+    # real decision (the armed offer before the WindowsOnly residual
+    # table), and the release takes OnKeyUp's, which forwards it because
+    # the press was forwarded. A residual chord delivers no WM_CHAR, so the
+    # core buffered the press; the release is what flushes it and restarts.
+    # A chord the residual table owns reaches its app action instead of the
+    # offer if either decision is wrong, and the row's restart marker never
+    # appears.
+    [void](Invoke-SeamCommand $s @{
+        op = 'host-key'; tab = $Index; vk = $Vk; ctrl = $Ctrl; shift = $Shift; action = 'press'
+    })
+    [void](Invoke-SeamCommand $s @{
+        op = 'host-key'; tab = $Index; vk = $Vk; ctrl = $Ctrl; shift = $Shift; action = 'release'
     })
 }
 
@@ -378,15 +437,15 @@ function Assert-RestartNotice([string]$screen, [string]$which) {
     }
 }
 
-function Assert-ProfileRetry($s, [string]$Id, [bool]$Expected) {
+function Assert-ProfileRestart($s, [string]$Id, [bool]$Expected) {
     $p = Invoke-SeamCommand $s @{ op = 'profiles' }
     $profile = @($p.profiles | Where-Object { $_.id -eq $Id }) | Select-Object -First 1
     if ($null -eq $profile) {
         throw ("HARNESS: no '{0}' profile in the registry" -f $Id)
     }
-    if ([bool]$profile.retriesOnExit -ne $Expected) {
-        throw ("PRODUCT_FAIL: profile {0} resolved retriesOnExit={1}, expected {2}" -f
-            $Id, $profile.retriesOnExit, $Expected)
+    if ([bool]$profile.restartsOnExit -ne $Expected) {
+        throw ("PRODUCT_FAIL: profile {0} resolved restartsOnExit={1}, expected {2}" -f
+            $Id, $profile.restartsOnExit, $Expected)
     }
 }
 
@@ -400,7 +459,7 @@ function Assert-Notice([string]$screen, [string]$Sentence, [string]$which) {
 Invoke-Scenario 'enter-restarts-the-same-command' {
     param($s)
     Assert-Profile $s 'repro'
-    Assert-ProfileRetry $s 'repro' $true
+    Assert-ProfileRestart $s 'repro' $true
     $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'repro' }
     $index = [int]$opened.state.active
     Write-Host ("opened: active={0} tabs={1} title={2}" -f $index, $opened.state.tabs.Count,
@@ -678,7 +737,7 @@ Invoke-Scenario 'env-revocation' {
 
 Invoke-Scenario 'disabled-profile-keeps-the-old-close' {
     param($s)
-    Assert-ProfileRetry $s 'repro' $false
+    Assert-ProfileRestart $s 'repro' $false
     $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'repro' }
     $index = [int]$opened.state.active
     $before = $opened.state.tabs.Count
@@ -687,11 +746,11 @@ Invoke-Scenario 'disabled-profile-keeps-the-old-close' {
     Press-Enter $s $index
     Wait-TabCountBelow $s $before 'Enter on a disabled exit'
     Write-Host 'a profile without the opt-in closed on Enter'
-} -ConfigText $ConfigNoRetry
+} -ConfigText $ConfigNoRestart
 
 Invoke-Scenario 'custom-key-restarts' {
     param($s)
-    Assert-ProfileRetry $s 'repro' $true
+    Assert-ProfileRestart $s 'repro' $true
     $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'repro' }
     $index = [int]$opened.state.active
     $screen = Wait-ScreenContains $s 'Process exited.' -Index $index
@@ -723,7 +782,7 @@ Invoke-Scenario 'custom-key-restarts' {
 
 Invoke-Scenario 'ad-hoc-launch-has-no-offer' {
     param($s)
-    Assert-ProfileRetry $s 'repro' $true
+    Assert-ProfileRestart $s 'repro' $true
     $st = Get-State $s
     $titles = ($st.tabs | ForEach-Object { $_.title }) -join '; '
     Write-Host ("launch state: tabs={0} titles=[{1}]" -f $st.tabs.Count, $titles)
@@ -735,6 +794,187 @@ Invoke-Scenario 'ad-hoc-launch-has-no-offer' {
     }
     Write-Host '-e exit showed the disabled notice and closed'
 } -ConfigText $ConfigEdge -Arguments @('-e', 'C:\Windows\System32\cmd.exe', '/c', 'exit 1') -ExpectAppExit
+
+# ---- round A: precedence over a core binding, and the reload snapshot -----
+
+Invoke-Scenario 'bound-key-still-restarts' {
+    param($s)
+    # ctrl+shift+t is one of libghostty's own Windows default bindings
+    # (new_tab). The offer must outrank the binding: the notice names the
+    # chord and the chord must restart, not open a tab and close the pane.
+    Assert-ProfileRestart $s 'repro' $true
+    $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'repro' }
+    $index = [int]$opened.state.active
+    $screen = Wait-ScreenContains $s 'Process exited.' -Index $index
+    Assert-Notice $screen $CtrlShiftTSentence 'the bound-key exit'
+    # The run counter is global across the probe run; capture this exit's
+    # number the way the custom-key row does.
+    $firstRun = [int]([regex]::Match($screen, 'RESTART-MARKER-RUN-(\d+)').Groups[1].Value)
+    if ($firstRun -lt 1) { throw "HARNESS: no RESTART-MARKER-RUN-n in the first exit screen" }
+    $wantMarker = "RESTART-MARKER-RUN-$($firstRun + 1)"
+
+    Press-CtrlShiftT $s $index
+    Assert-PaneAlive $s $index 'the bound-key restart'
+    $deadline = [datetime]::UtcNow.AddSeconds(20)
+    $sawNext = $false
+    while ([datetime]::UtcNow -lt $deadline) {
+        $r = Get-ScreenScroll $s $index
+        if ($r.text.Contains($wantMarker)) { $sawNext = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $sawNext) {
+        throw "PRODUCT_FAIL: Ctrl+Shift+T did not restart the profile command (no $wantMarker in the scroll)"
+    }
+    $notice2 = Wait-ScreenContains $s 'Process exited.' -Index $index
+    Assert-Notice $notice2 $CtrlShiftTSentence 'the restarted exit'
+    $before = (Get-State $s).tabs.Count
+    Press-Escape $s $index
+    Wait-TabCountBelow $s $before 'Escape after a bound-key restart'
+    Write-Host 'Ctrl+Shift+T (a bound new_tab chord) restarted; Escape closed'
+} -ConfigText $ConfigCtrlShiftT
+
+# ---- round B: the host path the notice's key actually takes ---------------
+
+# These rows drive OnKeyDown's and OnKeyUp's real decisions (`host-key`),
+# not the SendKeyCore shortcut `terminal-key` takes: the residual WindowsOnly
+# table is only in front of the host path, so only this path can prove the
+# offer outranks it. Both chords below ARE residual bindings (ctrl+shift+z ->
+# Undo, ctrl+shift+5 -> OpenProfile5); a host that dispatches the app action
+# swallows the key and the restart marker never appears. ctrl+shift+5 also
+# carries no WM_CHAR, so its row additionally proves the release flushes the
+# buffered press; ctrl+shift+z carries a Ctrl+letter character on a real keyboard but not through this seam.
+# The run counter is global across the probe run, so each row captures its
+# first exit's N and expects N+1.
+
+function Invoke-HostChordRestart(
+    [string]$Name,
+    [string]$ConfigText,
+    [int]$Vk,
+    [string]$Sentence
+) {
+    # GetNewClosure: Invoke-Scenario invokes the body with only the session,
+    # so the row's chord and expected sentence must be captured here.
+    $body = {
+        param($s)
+        Assert-ProfileRestart $s 'repro' $true
+        $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'repro' }
+        $index = [int]$opened.state.active
+        $screen = Wait-ScreenContains $s 'Process exited.' -Index $index
+        Assert-Notice $screen $Sentence 'the host-path exit'
+        $firstRun = [int]([regex]::Match($screen, 'RESTART-MARKER-RUN-(\d+)').Groups[1].Value)
+        if ($firstRun -lt 1) { throw "HARNESS: no RESTART-MARKER-RUN-n in the first exit screen" }
+        $wantMarker = "RESTART-MARKER-RUN-$($firstRun + 1)"
+
+        Press-HostChordPair $s $index $Vk -Ctrl $true -Shift $true
+        Assert-PaneAlive $s $index 'the host-path restart'
+        $deadline = [datetime]::UtcNow.AddSeconds(20)
+        $sawNext = $false
+        while ([datetime]::UtcNow -lt $deadline) {
+            $r = Get-ScreenScroll $s $index
+            if ($r.text.Contains($wantMarker)) { $sawNext = $true; break }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $sawNext) {
+            throw ("PRODUCT_FAIL: the host path did not forward '$Sentence' to the offer " +
+                   "(no $wantMarker in the scroll); the residual table ate the chord")
+        }
+        $notice2 = Wait-ScreenContains $s 'Process exited.' -Index $index
+        Assert-Notice $notice2 $Sentence 'the restarted exit'
+        $before = (Get-State $s).tabs.Count
+        Press-Escape $s $index
+        Wait-TabCountBelow $s $before 'Escape after a host-path restart'
+        Write-Host 'the chord restarted through OnKeyDown; Escape closed'
+    }.GetNewClosure()
+    Invoke-Scenario $Name $body -ConfigText $ConfigText
+}
+
+Invoke-HostChordRestart 'residual-chord-restarts' $ConfigCtrlShiftZ 0x5A $CtrlShiftZSentence
+Invoke-HostChordRestart 'digit-chord-restarts' $ConfigCtrlShift5 0x35 $CtrlShift5Sentence
+
+Invoke-Scenario 'reload-keeps-the-printed-key' {
+    param($s)
+    # Arm under ctrl+r, reload the staged config to f5: the on-screen
+    # notice still names Ctrl+R, Ctrl+R still restarts (the snapshot, not
+    # the reloaded parse, owns the armed offer), and the NEXT exit's
+    # notice names F5.
+    Assert-ProfileRestart $s 'repro' $true
+    $opened = Invoke-SeamCommand $s @{ op = 'open-profile'; id = 'repro' }
+    $index = [int]$opened.state.active
+    $screen = Wait-ScreenContains $s 'Process exited.' -Index $index
+    Assert-Notice $screen $CtrlRSentence 'the pre-reload exit'
+    $firstRun = [int]([regex]::Match($screen, 'RESTART-MARKER-RUN-(\d+)').Groups[1].Value)
+    if ($firstRun -lt 1) { throw "HARNESS: no RESTART-MARKER-RUN-n in the first exit screen" }
+
+    # Rewrite the SAME staged config the app reads, then reload the way
+    # the env-revocation row does.
+    $configPath = Join-Path $s.TempXdg 'wintty\config.wintty'
+    $generation0 = (Invoke-SeamCommand $s @{ op = 'config-state' }).appliedGeneration
+    # Set-Content stages the config with CRLF endings, so the anchor
+    # tolerates a trailing \r (.NET's $ does not match before one).
+    # The replacement removes the top-level key and appends an
+    # [os=windows] block carrying the new key at the END of the file: a
+    # block header mid-file would swallow every later top-level line into
+    # the conditional, and the point is only that the reloaded key must
+    # come through changeConditionalState, not the pre-conditional text --
+    # exactly the regression this row exists to catch.
+    $rewritten = ((Get-Content -Raw -LiteralPath $configPath) -replace
+        '(?m)^restart-on-exit-key[ \t]*=[ \t]*ctrl\+r[ \t]*\r?\n?', ''
+    ).TrimEnd("`r", "`n") +
+        "`n[os=windows]`nrestart-on-exit-key = f5`n"
+    [System.IO.File]::WriteAllText(
+        $configPath, $rewritten, [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-SeamCommand $s @{ op = 'reload-config' })
+    $deadline = [datetime]::UtcNow.AddSeconds(20)
+    while ((Invoke-SeamCommand $s @{ op = 'config-state' }).appliedGeneration -eq $generation0) {
+        if ([datetime]::UtcNow -gt $deadline) {
+            throw 'HARNESS: the config reload never applied'
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    # Let the surface's change_config message land before the restart.
+    Start-Sleep -Milliseconds 1000
+
+    # The printed offer keeps its own key: the notice already on screen
+    # still names Ctrl+R after the reload.
+    $still = Get-Screen $s $index
+    Assert-Notice $still $CtrlRSentence 'the armed notice after the reload'
+
+    # And Ctrl+R (not F5) is what restarts the armed offer.
+    Press-CtrlR $s $index
+    Assert-PaneAlive $s $index 'the post-reload restart'
+    $wantMarker = "RESTART-MARKER-RUN-$($firstRun + 1)"
+    $deadline = [datetime]::UtcNow.AddSeconds(20)
+    $sawNext = $false
+    while ([datetime]::UtcNow -lt $deadline) {
+        $r = Get-ScreenScroll $s $index
+        if ($r.text.Contains($wantMarker)) { $sawNext = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $sawNext) {
+        throw "PRODUCT_FAIL: Ctrl+R did not restart the armed offer after the reload (no $wantMarker)"
+    }
+
+    # The NEXT exit re-arms from the reloaded parse: its notice names F5.
+    $notice2 = Wait-ScreenContains $s 'Process exited.' -Index $index
+    Assert-Notice $notice2 $F5Sentence 'the post-reload restarted exit'
+    # And F5 is what restarts THAT offer.
+    Press-F5 $s $index
+    Assert-PaneAlive $s $index 'the F5 restart'
+    $wantMarker2 = "RESTART-MARKER-RUN-$($firstRun + 2)"
+    $deadline = [datetime]::UtcNow.AddSeconds(20)
+    $sawNext2 = $false
+    while ([datetime]::UtcNow -lt $deadline) {
+        $r = Get-ScreenScroll $s $index
+        if ($r.text.Contains($wantMarker2)) { $sawNext2 = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $sawNext2) {
+        throw "PRODUCT_FAIL: F5 did not restart the reloaded offer (no $wantMarker2)"
+    }
+    $notice3 = Wait-ScreenContains $s 'Process exited.' -Index $index
+    Assert-Notice $notice3 $F5Sentence 'the F5 restarted exit'
+    Write-Host 'reload kept the printed Ctrl+R for the armed offer; the next exit offered F5'
+} -ConfigText $ConfigCtrlR
 
 # ---- verdict ---------------------------------------------------------------
 

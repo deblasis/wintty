@@ -1328,7 +1328,7 @@ internal static class TestSeam
                         json.WriteString("name", p.Name);
                         json.WriteString("command", p.Command);
                         json.WriteBoolean("default", p.IsDefault);
-                        json.WriteBoolean("retriesOnExit", p.RetryOnExit);
+                        json.WriteBoolean("restartsOnExit", p.RestartOnExit);
                         json.WriteEndObject();
                     }
                     json.WriteEndArray();
@@ -1873,17 +1873,28 @@ internal static class TestSeam
             }
 
             case "terminal-key":
+            case "host-key":
             {
-                // The KeyDown half of a key press, in process: the same
-                // retire OnKeyDown runs first and the same
-                // ghostty_surface_key forward SendKey makes, with the
+                // The KeyDown/KeyUp halves of a key event, in process: the
+                // retire OnKeyDown runs first (the release leg carries it
+                // too, which a real OnKeyUp does not; HandleKeyUp reads
+                // nothing it touches) and the same
+                // ghostty_surface_key forward SendKeyCore makes, with the
                 // scancode derived the same way from the virtual key (a
                 // KeyRoutedEventArgs cannot be constructed in process).
+                // `terminal-key` forwards straight to SendKeyCore;
+                // `host-key` takes OnKeyDown's or OnKeyUp's real decision
+                // below its routing gates, so the armed restart offer is
+                // consulted before the WindowsOnly residual table -- the
+                // path a user's key actually takes. `host-key` drives
+                // press and release only; a repeat has no decision of its
+                // own and is refused rather than forwarded blind.
                 // char= delivers the WM_CHAR half right after, the order a
                 // real press delivers them in, through the same
                 // HandleCharacter the terminal-character op drives. A key
                 // that reaches a live shell is send-text's power, so this
-                // shares its opt-in. Non-extended keys only.
+                // shares its opt-in. Non-extended keys only unless
+                // extended=1.
                 if (!_inputAllowed)
                     return Error(op, $"terminal-key is off; set {InputEnvVar}=1 to arm it");
                 var vk = ArgInt(args, "vk", -1);
@@ -1903,8 +1914,12 @@ internal static class TestSeam
                     : Ghostty.Core.Interop.GhosttyInputAction.Press;
                 if (LeafTerminal(manager, args) is not { } terminal)
                     return Error(op, "no such tab or leaf");
-                var handled = terminal.TestSeamKeyDown(
-                    (Windows.System.VirtualKey)vk, mods, action);
+                var extended = ArgBool(args, "extended", false);
+                var handled = op == "host-key"
+                    ? terminal.TestSeamKeyDownViaHost(
+                        (Windows.System.VirtualKey)vk, mods, action, extended)
+                    : terminal.TestSeamKeyDown(
+                        (Windows.System.VirtualKey)vk, mods, action, extended);
                 bool? suppressed = null;
                 if (ArgString(args, "char") is { Length: > 0 } ch)
                     suppressed = terminal.TestSeamCharacter(ch[0]);

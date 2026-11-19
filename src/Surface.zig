@@ -197,17 +197,17 @@ restart_abort: std.atomic.Value(bool) = .init(false),
 restart_offered: bool = false,
 
 /// The trigger that restarts the exited child when the profile opted
-/// in. Parsed once from `retry-on-exit-key`; Enter by default.
-retry_key: input.Binding.Trigger = .{ .key = .{ .physical = .enter } },
+/// in. Parsed once from `restart-on-exit-key`; Enter by default.
+restart_offer_key: input.Binding.Trigger = .{ .key = .{ .physical = .enter } },
 
 /// The trigger the printed offer names, snapshotted when the offer arms.
-/// A config reload changes `retry_key`; the notice already on screen must
-/// keep its own press until consumed.
-restart_key: ?input.Binding.Trigger = null,
+/// A config reload changes `restart_offer_key`; the notice already on
+/// screen must keep its own press until consumed.
+armed_restart_key: ?input.Binding.Trigger = null,
 
-/// The host's per-profile opt-in (`profile.<id>.retry-on-exit`). A
+/// The host's per-profile opt-in (`profile.<id>.restart-on-exit`). A
 /// profile that leaves it false keeps the old exit notice and close.
-retry_on_exit: bool = false,
+restart_on_exit: bool = false,
 
 /// Close on a clean exit even when `wait-after-command` holds the surface
 /// open: exit code 0 closes it, any other code keeps it open to show the
@@ -702,8 +702,8 @@ pub fn init(
         .app = app,
         .rt_app = rt_app,
         .rt_surface = rt_surface,
-        .retry_key = retryKeyFromConfig(config),
-        .restart_key = null,
+        .restart_offer_key = restartOfferKeyFromConfig(config),
+        .armed_restart_key = null,
         .font_grid_key = font_grid_key,
         .font_size = font_size,
         .font_size_adjusted = false,
@@ -1662,7 +1662,7 @@ fn restartChild(self: *Surface) bool {
             self.restart_abort.store(false, .release);
             self.child_exited = false;
             self.restart_offered = false;
-            // restart_key is kept: a failed spawn re-arms the same printed
+            // armed_restart_key is kept: a failed spawn re-arms the same printed
             // trigger, not the reloaded one.
             proceed = true;
         }
@@ -1846,7 +1846,7 @@ fn restartChildInner(self: *Surface) !bool {
 
 /// A restart's new IO thread failed before it entered. The failed thread
 /// drains and waits for stop; the surface is the only state owner and
-/// re-arms the notice so Enter can retry. `!readonly` is never baked in:
+/// re-arms the notice so the offered key can restart again. `!readonly` is never baked in:
 /// the key predicate gates read-only.
 fn restartFailed(self: *Surface) void {
     self.renderer_state.mutex.lockUncancelable(global.io());
@@ -1878,7 +1878,7 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
             self.restart_offered = false;
-            self.restart_key = null;
+            self.armed_restart_key = null;
         }
 
         // Try and show a GUI message. If it returns true, don't do anything else.
@@ -1921,7 +1921,7 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
         dormant = self.renderer_state.dormant.load(.acquire);
         if (dormant) {
             self.restart_offered = false;
-            self.restart_key = null;
+            self.armed_restart_key = null;
         } else {
             // The dead child's notice lands on the screen that owns the
             // scrollback, never on the alternate screen a TUI left behind.
@@ -1929,11 +1929,11 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
             if (t.screens.active_key == .alternate) t.screens.switchTo(.primary);
             self.restart_offered = restartOffered(
                 keep_open,
-                self.retry_on_exit,
+                self.restart_on_exit,
                 self.restart_spec != null,
                 self.readonly,
             );
-            self.restart_key = if (self.restart_offered) self.retry_key else null;
+            self.armed_restart_key = if (self.restart_offered) self.restart_offer_key else null;
             if (self.restart_offered) {
                 // The offer owns its key: a leader sequence or key table
                 // armed when the child died must not complete across the
@@ -1978,21 +1978,17 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
         t.carriageReturn();
         t.linefeed() catch break :terminal;
         // The offer decides the sentence: only a pane that can actually
-        // restart promises it.
-        if (self.restart_offered) {
-            var key_buf: [48]u8 = undefined;
-            const key = self.retryKeyLabel(&key_buf);
-            var msg_buf: [128]u8 = undefined;
-            const msg = std.fmt.bufPrint(
-                &msg_buf,
-                "Process exited. Press {s} to restart, any other key to close.",
-                .{key},
-            ) catch "Process exited. Press Enter to restart, any other key to close.";
-            t.printString(msg) catch break :terminal;
-        } else {
-            t.printString("Process exited. Press any key to close the terminal.") catch
-                break :terminal;
-        }
+        // restart promises it, and the promised key is the armed snapshot
+        // (never the reloaded parse) so the notice cannot name a key the
+        // matcher would refuse.
+        var key_buf: [restart_label_capacity]u8 = undefined;
+        var msg_buf: [restart_notice_capacity]u8 = undefined;
+        const msg = restartExitNotice(
+            self.armedRestartKey(),
+            &key_buf,
+            &msg_buf,
+        );
+        t.printString(msg) catch break :terminal;
         t.modes.set(.cursor_visible, false);
 
         // We also want to ensure that normal keyboard encoding is on
@@ -2011,15 +2007,15 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
     self.close();
 }
 
-/// Whether a normally-exited, held-open pane offers the retry key. Pure so
+/// Whether a normally-exited, held-open pane offers the restart key. Pure so
 /// the truth table can be tested without a Surface.
 fn restartOffered(
     keep_open: bool,
-    retry_on_exit: bool,
+    restart_on_exit: bool,
     has_spec: bool,
     readonly: bool,
 ) bool {
-    return keep_open and retry_on_exit and has_spec and !readonly;
+    return keep_open and restart_on_exit and has_spec and !readonly;
 }
 
 test "restartOffered truth table" {
@@ -2042,32 +2038,32 @@ fn keepOpenAfterExit(
     return !(close_on_clean_exit and exit_code == 0);
 }
 
-/// Parse `retry-on-exit-key`, falling back to Enter. The config field is a
+/// Parse `restart-on-exit-key`, falling back to Enter. The config field is a
 /// raw string because a single trigger has no config type of its own; the
 /// parse happens once, here, and an invalid value cannot disable a profile's
 /// opt-in.
-fn retryKeyFromConfig(config: *const configpkg.Config) input.Binding.Trigger {
-    const raw = config.@"retry-on-exit-key" orelse
+fn restartOfferKeyFromConfig(config: *const configpkg.Config) input.Binding.Trigger {
+    const raw = config.@"restart-on-exit-key" orelse
         return .{ .key = .{ .physical = .enter } };
-    return parseRetryKey(raw);
+    return parseRestartOfferKey(raw);
 }
 
-/// The retry-key value -> trigger gate, split from the config so the
+/// The restart-offer-key value -> trigger gate, split from the config so the
 /// rejection rows are testable. Any value the matcher can never fire falls
 /// back to Enter with a warning: a parse error, an unset key (`ctrl`),
 /// `catch_all`, lock-modifier chords (`caps_lock+enter`), and a bare
 /// codepoint a plain press does not produce (`X`, `?`, `ctrl+X`).
-fn parseRetryKey(raw: []const u8) input.Binding.Trigger {
+fn parseRestartOfferKey(raw: []const u8) input.Binding.Trigger {
     const fallback: input.Binding.Trigger = .{ .key = .{ .physical = .enter } };
     const trigger = input.Binding.Trigger.parse(raw) catch |err| {
-        log.warn("invalid retry-on-exit-key \"{s}\" err={t}; using enter", .{ raw, err });
+        log.warn("invalid restart-on-exit-key \"{s}\" err={t}; using enter", .{ raw, err });
         return fallback;
     };
     // A parse can succeed without naming a key: `ctrl` is all modifiers
     // (unset key) and `catch_all` matches everything, which would break the
     // "any other key closes" contract. Neither can be offered.
     if (trigger.isKeyUnset() or trigger.key == .catch_all) {
-        log.warn("invalid retry-on-exit-key \"{s}\": not a single key; using enter", .{raw});
+        log.warn("invalid restart-on-exit-key \"{s}\": not a single key; using enter", .{raw});
         return fallback;
     }
     // A bare codepoint must be one a plain press produces: a lowercase letter
@@ -2077,12 +2073,26 @@ fn parseRetryKey(raw: []const u8) input.Binding.Trigger {
     // caps_lock+enter chord would leave the notice saying Enter while Enter
     // closes. Require the parsed mods to be canonical.
     if (!std.meta.eql(trigger.mods, trigger.mods.binding())) {
-        log.warn("invalid retry-on-exit-key \"{s}\": lock modifiers cannot match; using enter", .{raw});
+        log.warn("invalid restart-on-exit-key \"{s}\": lock modifiers cannot match; using enter", .{raw});
         return fallback;
     }
     switch (trigger.key) {
+        // A modifier key can never be the trigger: its own press carries
+        // the modifier it is, so a trigger naming it could never match a
+        // notice it printed (`left_shift` would promise Shift+Shift).
+        // A modifier key can never be the trigger: its own press carries
+        // the modifier it is, so a trigger naming it could never match a
+        // notice it printed (`left_shift` would promise Shift+Shift). And
+        // the Windows host's system-menu hook discards every Alt+Space
+        // edge before the pane sees a key, so an offer naming that chord
+        // could never fire either; reject it beside the others instead of
+        // printing a promise the platform eats.
+        .physical => |k| if (k.modifier() or (k == .space and trigger.mods.alt)) {
+            log.warn("invalid restart-on-exit-key \"{s}\": not a key the pane can receive; using enter", .{raw});
+            return fallback;
+        },
         .unicode => |cp| if (!((cp >= 'a' and cp <= 'z') or (cp >= '0' and cp <= '9'))) {
-            log.warn("invalid retry-on-exit-key \"{s}\": bare codepoint is not a plain key; using enter", .{raw});
+            log.warn("invalid restart-on-exit-key \"{s}\": bare codepoint is not a plain key; using enter", .{raw});
             return fallback;
         },
         else => {},
@@ -2090,15 +2100,24 @@ fn parseRetryKey(raw: []const u8) input.Binding.Trigger {
     return trigger;
 }
 
-test "retry key parsing rejects unmatchable values" {
+test "restart key parsing rejects unmatchable values" {
     const testing = std.testing;
     const fallback: input.Binding.Trigger = .{ .key = .{ .physical = .enter } };
 
     // Valid forms keep their key.
-    try testing.expect(std.meta.eql(fallback, parseRetryKey("enter")));
-    const ctrlr = parseRetryKey("ctrl+r");
+    try testing.expect(std.meta.eql(fallback, parseRestartOfferKey("enter")));
+    const ctrlr = parseRestartOfferKey("ctrl+r");
     try testing.expect(ctrlr.mods.ctrl);
     try testing.expect(ctrlr.key == .unicode and ctrlr.key.unicode == 'r');
+
+    // A chord over a digit is a plain codepoint too: the notice names the
+    // digit and the press carries it as the unshifted codepoint.
+    const ctrlshift5 = parseRestartOfferKey("ctrl+shift+5");
+    try testing.expect(ctrlshift5.mods.ctrl and ctrlshift5.mods.shift);
+    try testing.expect(ctrlshift5.key == .unicode and ctrlshift5.key.unicode == '5');
+    const ctrlshiftz = parseRestartOfferKey("ctrl+shift+z");
+    try testing.expect(ctrlshiftz.mods.ctrl and ctrlshiftz.mods.shift);
+    try testing.expect(ctrlshiftz.key == .unicode and ctrlshiftz.key.unicode == 'z');
 
     // Unmatchable forms fall back.
     for ([_][]const u8{
@@ -2111,29 +2130,208 @@ test "retry key parsing rejects unmatchable values" {
         "ctrl+X",
         "alt+,",
         "not-a-key!!",
+        // A modifier as the key: the press carries the modifier it names,
+        // so the trigger could never match the notice it printed.
+        "left_shift",
+        "right_control",
+        "left_alt",
+        "alt+space", // the Windows system-menu hook eats it before the pane
+        "right_super",
+        "ctrl+left_shift",
     }) |raw| {
-        try testing.expect(std.meta.eql(fallback, parseRetryKey(raw)));
+        try testing.expect(std.meta.eql(fallback, parseRestartOfferKey(raw)));
     }
 
     // A lowercase unicode key and an explicit numpad enter are pressable.
-    const lower = parseRetryKey("x");
+    const lower = parseRestartOfferKey("x");
     try testing.expect(lower.key == .unicode and lower.key.unicode == 'x');
-    const numpad = parseRetryKey("numpad_enter");
+    const numpad = parseRestartOfferKey("numpad_enter");
     try testing.expect(numpad.key == .physical and numpad.key.physical == .numpad_enter);
 }
 
-test "retry label spellings" {
+test "restart label spellings" {
     const testing = std.testing;
     var buf: [48]u8 = undefined;
 
-    try testing.expectEqualStrings("Enter", retryLabel(.{ .key = .{ .physical = .enter } }, &buf));
+    try testing.expectEqualStrings("Enter", restartLabel(.{ .key = .{ .physical = .enter } }, &buf));
     try testing.expectEqualStrings(
         "Ctrl+R",
-        retryLabel(try input.Binding.Trigger.parse("ctrl+r"), &buf),
+        restartLabel(try input.Binding.Trigger.parse("ctrl+r"), &buf),
     );
     try testing.expectEqualStrings(
         "Numpad Enter",
-        retryLabel(try input.Binding.Trigger.parse("numpad_enter"), &buf),
+        restartLabel(try input.Binding.Trigger.parse("numpad_enter"), &buf),
+    );
+}
+
+test "restartTriggerPressed match rows" {
+    const testing = std.testing;
+
+    // The default enter matches both the main and the numpad Enter...
+    const enter: input.Binding.Trigger = .{ .key = .{ .physical = .enter } };
+    try testing.expect(restartTriggerPressed(enter, .{
+        .action = .press,
+        .key = .enter,
+    }));
+    try testing.expect(restartTriggerPressed(enter, .{
+        .action = .press,
+        .key = .numpad_enter,
+    }));
+    // ...but an explicit numpad_enter matches only the numpad key.
+    const numpad = try input.Binding.Trigger.parse("numpad_enter");
+    try testing.expect(restartTriggerPressed(numpad, .{
+        .action = .press,
+        .key = .numpad_enter,
+    }));
+    try testing.expect(!restartTriggerPressed(numpad, .{
+        .action = .press,
+        .key = .enter,
+    }));
+
+    // A chord matches through the unshifted codepoint: `ctrl+r` is a
+    // unicode trigger, not a physical key enum member, and a real Ctrl+R
+    // press carries no printable text.
+    const ctrl_r = try input.Binding.Trigger.parse("ctrl+r");
+    try testing.expect(restartTriggerPressed(ctrl_r, .{
+        .action = .press,
+        .key = .key_r,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = 'r',
+    }));
+    // The text a layout delivers also matches, when it is exactly the
+    // trigger's codepoint.
+    try testing.expect(restartTriggerPressed(ctrl_r, .{
+        .action = .press,
+        .key = .key_r,
+        .mods = .{ .ctrl = true },
+        .utf8 = "r",
+    }));
+    // Text that is not valid UTF-8 cannot name a codepoint, so the match
+    // falls back to the unshifted one instead of refusing a key the
+    // notice named.
+    try testing.expect(restartTriggerPressed(ctrl_r, .{
+        .action = .press,
+        .key = .key_r,
+        .mods = .{ .ctrl = true },
+        .utf8 = "\xff",
+        .unshifted_codepoint = 'r',
+    }));
+
+    // Wrong modifiers, wrong key, and the release action never match.
+    try testing.expect(!restartTriggerPressed(ctrl_r, .{
+        .action = .press,
+        .key = .key_r,
+        .mods = .{ .ctrl = true, .shift = true },
+        .unshifted_codepoint = 'r',
+    }));
+
+    // A digit chord matches through the unshifted codepoint: the same
+    // shape as ctrl+r, and the row that proves the host does not need a
+    // letter-only mirror of this rule.
+    const ctrl_shift_5 = try input.Binding.Trigger.parse("ctrl+shift+5");
+    try testing.expect(restartTriggerPressed(ctrl_shift_5, .{
+        .action = .press,
+        .key = .digit_5,
+        .mods = .{ .ctrl = true, .shift = true },
+        .unshifted_codepoint = '5',
+    }));
+    try testing.expect(!restartTriggerPressed(ctrl_shift_5, .{
+        .action = .press,
+        .key = .digit_4,
+        .mods = .{ .ctrl = true, .shift = true },
+        .unshifted_codepoint = '4',
+    }));
+    try testing.expect(!restartTriggerPressed(ctrl_r, .{
+        .action = .press,
+        .key = .key_r,
+        .unshifted_codepoint = 'r',
+    }));
+    try testing.expect(!restartTriggerPressed(ctrl_r, .{
+        .action = .press,
+        .key = .key_t,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = 't',
+    }));
+    try testing.expect(!restartTriggerPressed(ctrl_r, .{
+        .action = .release,
+        .key = .key_r,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = 'r',
+    }));
+
+    // Lock bits are dropped by mods.binding(), so CapsLock/NumLock on the
+    // event do not stop the configured key from matching.
+    try testing.expect(restartTriggerPressed(enter, .{
+        .action = .press,
+        .key = .enter,
+        .mods = .{ .caps_lock = true, .num_lock = true },
+    }));
+    // A trigger that (somehow) carried lock bits can never match, the
+    // same rule the parse gate enforces at config time.
+    const caps_enter: input.Binding.Trigger = .{
+        .key = .{ .physical = .enter },
+        .mods = .{ .caps_lock = true },
+    };
+    try testing.expect(!restartTriggerPressed(caps_enter, .{
+        .action = .press,
+        .key = .enter,
+        .mods = .{ .caps_lock = true },
+    }));
+}
+
+test "restart exit notice sentences" {
+    const testing = std.testing;
+
+    // The three sentences the product owns: the default offer, a custom
+    // key offer, and no offer at all.
+    var key_buf: [restart_label_capacity]u8 = undefined;
+    var msg_buf: [restart_notice_capacity]u8 = undefined;
+    try testing.expectEqualStrings(
+        "Process exited. Press Enter to restart, any other key to close.",
+        restartExitNotice(.{ .key = .{ .physical = .enter } }, &key_buf, &msg_buf),
+    );
+    try testing.expectEqualStrings(
+        "Process exited. Press Ctrl+R to restart, any other key to close.",
+        restartExitNotice(
+            try input.Binding.Trigger.parse("ctrl+r"),
+            &key_buf,
+            &msg_buf,
+        ),
+    );
+    // A digit chord and a residual-table chord (undo) are offered with the
+    // same spelling the notice prints everywhere else.
+    try testing.expectEqualStrings(
+        "Process exited. Press Ctrl+Shift+Z to restart, any other key to close.",
+        restartExitNotice(
+            try input.Binding.Trigger.parse("ctrl+shift+z"),
+            &key_buf,
+            &msg_buf,
+        ),
+    );
+    try testing.expectEqualStrings(
+        "Process exited. Press Ctrl+Shift+5 to restart, any other key to close.",
+        restartExitNotice(
+            try input.Binding.Trigger.parse("ctrl+shift+5"),
+            &key_buf,
+            &msg_buf,
+        ),
+    );
+    try testing.expectEqualStrings(
+        "Process exited. Press any key to close the terminal.",
+        restartExitNotice(null, &key_buf, &msg_buf),
+    );
+
+    // The longest accepted trigger still fits both buffers: the offered
+    // sentence formats without truncation and its label round-trips the
+    // matcher's trigger.
+    const longest = try input.Binding.Trigger.parse(
+        "super+ctrl+alt+shift+numpad_memory_subtract",
+    );
+    const notice = restartExitNotice(longest, &key_buf, &msg_buf);
+    try testing.expectEqualStrings(
+        "Process exited. Press Super+Ctrl+Alt+Shift+Numpad Memory Subtract " ++
+            "to restart, any other key to close.",
+        notice,
     );
 }
 
@@ -2698,9 +2896,9 @@ pub fn updateConfig(
         .{ .title = title },
     );
 
-    // Re-parse the retry key: a corrected key must reach held-open panes,
-    // whose notice already names the old one.
-    self.retry_key = retryKeyFromConfig(config);
+    // Re-parse the restart-offer key: a corrected key must reach held-open
+    // panes, whose notice already names the old one.
+    self.restart_offer_key = restartOfferKeyFromConfig(config);
 
     // Notify the window
     _ = try self.rt_app.performAction(
@@ -3679,23 +3877,37 @@ pub fn keyEventIsBinding(
     };
 }
 
-/// Whether this event is the configured retry key. The physical key is
-/// tried first, then a single-codepoint unicode key (the same order
-/// `Binding.Set.getEvent` uses); the default `enter` also matches the numpad
-/// Enter, and an explicit `numpad_enter` matches only that key.
-fn retryKeyPressed(self: *const Surface, event: input.KeyEvent) bool {
+/// Whether this event presses the given trigger. Pure (no
+/// Surface) so the match rows are testable. The trigger kind decides the
+/// comparison: a physical trigger matches the event's physical key (the
+/// default `enter` also accepts the numpad Enter, while an explicit
+/// `numpad_enter` matches only that key), and a unicode trigger matches
+/// the event's text when it is exactly that codepoint, falling back to
+/// the unshifted codepoint (so a layout that types the key unshifted
+/// still matches, and a Ctrl chord, which carries no printable text,
+/// matches through the codepoint). `mods.binding()` drops lock bits, so
+/// CapsLock/NumLock never make the configured key stop matching; only a
+/// press restarts.
+fn restartTriggerPressed(
+    trigger: input.Binding.Trigger,
+    event: input.KeyEvent,
+) bool {
     if (event.action != .press) return false;
-    const trigger = self.restart_key orelse self.retry_key;
     if (!std.meta.eql(event.mods.binding(), trigger.mods)) return false;
     return switch (trigger.key) {
         .physical => |k| event.key == k or (k == .enter and event.key == .numpad_enter),
         .unicode => |cp| unicode: {
             if (event.utf8.len > 0) {
-                const view = std.unicode.Utf8View.init(event.utf8) catch
-                    break :unicode false;
-                var it = view.iterator();
-                const c = it.nextCodepoint() orelse break :unicode false;
-                if (it.nextCodepoint() == null and c == cp) return true;
+                // Invalid UTF-8 cannot name one codepoint; fall through to
+                // the unshifted fallback the doc promises rather than
+                // refusing a key the notice named.
+                const view: ?std.unicode.Utf8View = std.unicode.Utf8View.init(event.utf8) catch null;
+                if (view) |v| {
+                    var it = v.iterator();
+                    const c = it.nextCodepoint() orelse
+                        break :unicode event.unshifted_codepoint == cp;
+                    if (it.nextCodepoint() == null and c == cp) return true;
+                }
             }
             break :unicode event.unshifted_codepoint == cp;
         },
@@ -3703,18 +3915,49 @@ fn retryKeyPressed(self: *const Surface, event: input.KeyEvent) bool {
     };
 }
 
-/// The retry key as it appears in the notice. The trigger formatter writes
-/// lower-case config words (`enter`, `ctrl+r`); the notice title-cases each
-/// chord segment. The default reads `Enter`.
-fn retryKeyLabel(self: *const Surface, buf: []u8) []const u8 {
-    return retryLabel(self.restart_key orelse self.retry_key, buf);
+/// The armed offer's snapshot, or null when no offer is armed. Every use
+/// of the printed trigger (the press predicate, the notice, the host's
+/// chord routing) goes through here, so an unarmed pane can never read a
+/// stale `armed_restart_key`: the field stays optional precisely because
+/// the armed state is what proves it.
+fn armedRestartKey(self: *const Surface) ?input.Binding.Trigger {
+    if (!self.restart_offered) return null;
+    return self.armed_restart_key;
+}
+
+/// Whether this event is the restart key of the ARMED offer. The snapshot,
+/// not the live config parse, decides: a reload may have re-parsed a
+/// different `restart_offer_key`, but the notice already on screen names
+/// the one this pane must keep accepting until it closes or restarts.
+fn armedRestartTriggerPressed(self: *const Surface, event: input.KeyEvent) bool {
+    const trigger = self.armedRestartKey() orelse return false;
+    return restartTriggerPressed(trigger, event);
+}
+
+/// Whether `keyCallback` would restart this surface's armed offer on this
+/// event, with the same key remaps it applies. An embedder that dispatches
+/// its own app-level chords asks this before consuming one, so a chord the
+/// exit notice named still reaches the surface; asking the core (rather
+/// than re-deriving the match host-side) is what keeps the answer and the
+/// printed notice the same key on every layout.
+pub fn restartOfferKeyPressed(self: *const Surface, event_orig: input.KeyEvent) bool {
+    if (!self.child_exited or self.readonly) return false;
+    var event = event_orig;
+    if (self.config.key_remaps.isRemapped(event_orig.mods)) {
+        event.mods = self.config.key_remaps.apply(event_orig.mods);
+    }
+    return self.armedRestartTriggerPressed(event);
 }
 
 /// The notice spelling of one trigger: the config formatter's words with
 /// each `+` segment title-cased and `_` as a space (`Enter`, `Ctrl+R`,
 /// `Numpad Enter`). Split from the Surface so the spelling is testable.
-fn retryLabel(trigger: input.Binding.Trigger, buf: []u8) []const u8 {
-    const raw = std.fmt.bufPrint(buf, "{f}", .{trigger}) catch return "Enter";
+/// The caller's buffer must be `restart_label_capacity` bytes, comptime-
+/// sized from the longest trigger the parse gate accepts, so the `{f}`
+/// write provably fits; a buffer too small is a caller bug, not a notice
+/// that may silently name a different key than the matcher matches.
+fn restartLabel(trigger: input.Binding.Trigger, buf: []u8) []const u8 {
+    const raw = std.fmt.bufPrint(buf, "{f}", .{trigger}) catch unreachable;
     var upper = true;
     for (raw) |*ch| {
         if (upper) {
@@ -3731,6 +3974,57 @@ fn retryLabel(trigger: input.Binding.Trigger, buf: []u8) []const u8 {
     }
     return raw;
 }
+
+/// The longest label any accepted trigger can format to. The parse gate
+/// (`parseRestartOfferKey`) accepts at most four modifier words plus one key
+/// name. The trigger formatter prints `super+ctrl+alt+shift+` (21
+/// bytes) before the key, and the longest `input.Key` spelling is the
+/// 22-byte `numpad_memory_subtract`; title-casing (`Numpad Memory
+/// Subtract`) never changes the byte count, so 43 is the exact worst
+/// case and 48 leaves headroom for a future longer key name. A unicode
+/// key is at most 4 UTF-8 bytes. Held to the enum at compile time in the
+/// comptime block below, so a longer key name added upstream fails the
+/// build instead of silently truncating the notice.
+const restart_label_capacity: usize = 48;
+
+comptime {
+    // The exact worst case the doc comment above derives, computed from
+    // the enum itself so a rename or an insertion cannot outgrow the
+    // buffer silently.
+    var longest_key: usize = 0;
+    for (@typeInfo(input.Key).@"enum".field_names) |name| {
+        if (name.len > longest_key) longest_key = name.len;
+    }
+    assert("super+ctrl+alt+shift+".len + longest_key <= restart_label_capacity);
+}
+
+/// One exit notice, built from the offer's armed snapshot. A null offer
+/// is the disabled sentence; an armed one names the exact trigger the
+/// matcher accepts, from the same snapshot. `label_buf` must be
+/// `restart_label_capacity` bytes (see `restartLabel`); `msg_buf` must be
+/// `restart_notice_capacity` bytes. Both writes provably fit, so there is
+/// no fallback path that could print a key the matcher would not take.
+fn restartExitNotice(
+    offer: ?input.Binding.Trigger,
+    label_buf: *[restart_label_capacity]u8,
+    msg_buf: []u8,
+) []const u8 {
+    const trigger = offer orelse
+        return "Process exited. Press any key to close the terminal.";
+    const key = restartLabel(trigger, label_buf);
+    return std.fmt.bufPrint(
+        msg_buf,
+        "Process exited. Press {s} to restart, any other key to close.",
+        .{key},
+    ) catch unreachable;
+}
+
+/// The byte length of the longest offered notice: the fixed sentence
+/// around a `restart_label_capacity`-byte label.
+const restart_notice_capacity: usize =
+    "Process exited. Press ".len +
+    restart_label_capacity +
+    " to restart, any other key to close.".len;
 
 /// Called for any key events. This handles keybindings, encoding and
 /// sending to the terminal, etc.
@@ -3797,7 +4091,7 @@ pub fn keyCallback(
     // must not make the configured key stop matching; read-only is gated
     // here, at the press.
     if (self.child_exited) {
-        if (self.retryKeyPressed(event) and
+        if (self.armedRestartTriggerPressed(event) and
             !self.readonly and
             self.restart_offered)
         {

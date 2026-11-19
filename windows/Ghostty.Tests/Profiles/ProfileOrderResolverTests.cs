@@ -21,9 +21,9 @@ public sealed class ProfileOrderResolverTests
         => new(Id: id, Name: id, Command: $"{id}.exe", ProbeId: probe);
 
     [Fact]
-    public void Resolve_CarriesRetryOnExitToSnapshot()
+    public void Resolve_CarriesRestartOnExitToSnapshot()
     {
-        var user = User("alpha") with { RetryOnExit = true };
+        var user = User("alpha") with { RestartOnExit = true };
         var resolved = ProfileOrderResolver.Resolve(
             user: new[] { user },
             overrides: NoOverrides,
@@ -32,8 +32,8 @@ public sealed class ProfileOrderResolverTests
             defaultProfileId: null,
             hiddenIds: new HashSet<string>()).Visible.Single();
 
-        Assert.True(resolved.RetryOnExit);
-        Assert.True(ProfileSnapshotStore.From(resolved, version: 1).RetryOnExit);
+        Assert.True(resolved.RestartOnExit);
+        Assert.True(ProfileSnapshotStore.From(resolved, version: 1).RestartOnExit);
     }
 
     [Fact]
@@ -41,7 +41,7 @@ public sealed class ProfileOrderResolverTests
     {
         var overrides = new Dictionary<string, ProfileOverride>
         {
-            ["beta"] = new(Id: "beta", RetryOnExit: true),
+            ["beta"] = new(Id: "beta", RestartOnExit: true),
         };
         var resolved = ProfileOrderResolver.Resolve(
             user: Array.Empty<ProfileDef>(),
@@ -51,8 +51,8 @@ public sealed class ProfileOrderResolverTests
             defaultProfileId: null,
             hiddenIds: new HashSet<string>()).Visible.Single();
 
-        Assert.True(resolved.RetryOnExit);
-        Assert.True(ProfileSnapshotStore.From(resolved, version: 1).RetryOnExit);
+        Assert.True(resolved.RestartOnExit);
+        Assert.True(ProfileSnapshotStore.From(resolved, version: 1).RestartOnExit);
     }
 
     [Fact]

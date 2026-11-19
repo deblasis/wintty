@@ -1083,6 +1083,25 @@ internal static partial class NativeMethods
     internal static bool SurfaceProcessExited(GhosttySurface surface)
         => SurfaceProcessExitedNative(surface) != 0;
 
+    // ghostty_surface_restart_offer_key(surface, const ghostty_input_key_s*)
+    // True when libghostty would restart this surface's armed exit offer
+    // on this key event: the core answers with its own predicate over the
+    // event the host forwards, so the host never re-derives the match.
+    // OnKeyDown consults it BEFORE the WindowsOnly residual table so an
+    // offered chord that would otherwise run an app action is forwarded
+    // to the surface instead; OnKeyUp asks the same question so the
+    // release of that forwarded (often text-less) press flushes it.
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_restart_offer_key")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceRestartOfferKeyNative(
+        GhosttySurface surface,
+        in GhosttyInputKey key);
+
+    internal static bool SurfaceRestartOfferKey(
+        GhosttySurface surface,
+        in GhosttyInputKey key)
+        => SurfaceRestartOfferKeyNative(surface, key) != 0;
+
     // ghostty_surface_complete_clipboard_request(surface, complete_s*, state)
     // Called once per read/confirm request to return clipboard contents to
     // libghostty and release its internal request state. Must be called

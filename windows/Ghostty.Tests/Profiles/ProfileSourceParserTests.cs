@@ -7,50 +7,50 @@ namespace Ghostty.Tests.Profiles;
 public sealed class ProfileSourceParserTests
 {
     [Fact]
-    public void Parse_RetryOnExit_TrueFalseAbsent()
+    public void Parse_RestartOnExit_TrueFalseAbsent()
     {
         const string config = """
             profile.a.name = A
             profile.a.command = a.exe
-            profile.a.retry-on-exit = true
+            profile.a.restart-on-exit = true
             profile.b.name = B
             profile.b.command = b.exe
-            profile.b.retry-on-exit = false
+            profile.b.restart-on-exit = false
             profile.c.name = C
             profile.c.command = c.exe
             """;
 
         var result = ProfileSourceParser.Parse(config);
 
-        Assert.True(result.Profiles["a"].RetryOnExit);
-        Assert.False(result.Profiles["b"].RetryOnExit);
-        Assert.False(result.Profiles["c"].RetryOnExit);
+        Assert.True(result.Profiles["a"].RestartOnExit);
+        Assert.False(result.Profiles["b"].RestartOnExit);
+        Assert.False(result.Profiles["c"].RestartOnExit);
     }
 
     [Fact]
-    public void Parse_MalformedRetryOnExit_ReadsFalse()
+    public void Parse_MalformedRestartOnExit_ReadsFalse()
     {
         const string config = """
             profile.a.name = A
             profile.a.command = a.exe
-            profile.a.retry-on-exit = yes-please
+            profile.a.restart-on-exit = yes-please
             """;
 
-        Assert.False(ProfileSourceParser.Parse(config).Profiles["a"].RetryOnExit);
+        Assert.False(ProfileSourceParser.Parse(config).Profiles["a"].RestartOnExit);
     }
 
     [Fact]
-    public void Parse_Override_CarriesTriStateRetryOnExit()
+    public void Parse_Override_CarriesTriStateRestartOnExit()
     {
         const string config = """
-            profile.a.retry-on-exit = true
-            profile.b.retry-on-exit = false
+            profile.a.restart-on-exit = true
+            profile.b.restart-on-exit = false
             """;
 
         var result = ProfileSourceParser.Parse(config);
 
-        Assert.True(result.Overrides["a"].RetryOnExit);
-        Assert.False(result.Overrides["b"].RetryOnExit);
+        Assert.True(result.Overrides["a"].RestartOnExit);
+        Assert.False(result.Overrides["b"].RestartOnExit);
     }
 
     [Fact]

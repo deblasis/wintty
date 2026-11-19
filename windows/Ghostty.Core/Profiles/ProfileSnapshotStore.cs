@@ -78,5 +78,5 @@ public static class ProfileSnapshotStore
             Icon: profile.Icon,
             Visuals: profile.Visuals,
             TabIconTracksForeground: profile.TabIconTracksForeground,
-            RetryOnExit: profile.RetryOnExit);
+            RestartOnExit: profile.RestartOnExit);
 }

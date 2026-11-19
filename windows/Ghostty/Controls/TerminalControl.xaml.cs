@@ -204,6 +204,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // requiring CharacterReceived to re-derive the original VirtualKey.
     private bool _suppressNextCharacter;
 
+    // The armed restart offer claimed a chord on its press. Auto-repeats
+    // of that press arrive while the pane is still dead (the buffered
+    // press only dispatches on the release that flushes it), but once the
+    // restart lands the pane is live and the offer is gone -- a repeat that
+    // re-asked the (now false) offer would fall to the residual table and
+    // run its action (search, a profile slot) over the restarted child.
+    // The chord is latched here from press to release so every auto-repeat
+    // of an offered press is forwarded, never dispatched.
+    private bool _restartOfferChordHeld;
+
     // High surrogate held across CharacterReceived events. WinUI delivers
     // supplementary-plane scalars as two events; see WmCharUtf8.
     private char _pendingWmCharHigh;
@@ -697,16 +707,47 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// only path, as it is for keys WinUI 3 strips a scancode from).
     /// Non-extended keys only: the seam cannot know IsExtendedKey.
     /// </summary>
-    internal bool TestSeamKeyDown(Windows.System.VirtualKey key, GhosttyMods mods, GhosttyInputAction action)
+    internal bool TestSeamKeyDown(Windows.System.VirtualKey key, GhosttyMods mods, GhosttyInputAction action, bool extended = false)
     {
         // OnKeyDown's first statement: an arm left over from a consumed
         // close elsewhere must not decide this key's character's fate.
         RetireStaleCharacterSuppress();
 
-        uint scancode = PInvoke.MapVirtualKey(
+        var scancode = PInvoke.MapVirtualKey(
             (uint)key,
             MAP_VIRTUAL_KEY_TYPE.MAPVK_VK_TO_VSC);
+        if (extended) scancode |= 0xE000;
         return SendKeyCore(scancode, action, mods);
+    }
+
+    /// <summary>
+    /// The host decision path for the key-down/key-up halves, in process:
+    /// the same retire, then the real <see cref="HandleKeyDown"/> or
+    /// <see cref="HandleKeyUp"/> a user's key takes below the routing
+    /// gates, so the armed restart offer is genuinely consulted before the
+    /// WindowsOnly residual table. A repeat has no decision of its own
+    /// (OnKeyDown receives it as a press) and is refused rather than
+    /// forwarded blind.
+    /// </summary>
+    internal bool TestSeamKeyDownViaHost(
+        Windows.System.VirtualKey key,
+        GhosttyMods mods,
+        GhosttyInputAction action,
+        bool extended = false)
+    {
+        RetireStaleCharacterSuppress();
+        var scancode = PInvoke.MapVirtualKey(
+            (uint)key,
+            MAP_VIRTUAL_KEY_TYPE.MAPVK_VK_TO_VSC);
+        if (extended) scancode |= 0xE000;
+        return action switch
+        {
+            GhosttyInputAction.Press => HandleKeyDown(scancode, key, mods),
+            GhosttyInputAction.Release => HandleKeyUp(scancode, key, mods),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(action), action,
+                "the host-key seam drives the press and release decisions only"),
+        };
     }
 
     /// <summary>
@@ -1562,8 +1603,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // keeps libghostty's wait-after-command behaviour.
         surfaceConfig.CloseOnCleanExit =
             Ghostty.Core.Profiles.PaneCommandPolicy.ClosesOnCleanExit(Snapshot) ? (byte)1 : (byte)0;
-        surfaceConfig.RetryOnExit =
-            Ghostty.Core.Profiles.PaneCommandPolicy.RetriesOnExit(Snapshot) ? (byte)1 : (byte)0;
+        surfaceConfig.RestartOnExit =
+            Ghostty.Core.Profiles.PaneCommandPolicy.RestartsOnExit(Snapshot) ? (byte)1 : (byte)0;
 
         // Pin a managed handle to `this` and pass it as per-surface userdata.
         // libghostty echoes this pointer back through close_surface_cb and the
@@ -2063,6 +2104,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (_surfaceDisposed) return;
         _surfaceDisposed = true;
+        _restartOfferChordHeld = false;
 
         // Tell the holders of surface-keyed native state first, while nothing
         // has been unwound yet: what they have to hand back is written through
@@ -2997,29 +3039,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // the visual border and clearing the tab indicator (matches macOS).
         AcknowledgeBell();
 
-        // Windows-only residual match: a handful of chords have no
-        // libghostty action (search-bar widget, vertical-tabs pin,
-        // tab-layout switch, profile slots), so the apprt matches them
-        // itself. A hit is dispatched through GhosttyHost.PaneActionRequested
-        // -- the same event MainWindow forwards to PaneActionRouter for
-        // libghostty-matched actions -- and the key is NOT forwarded to
-        // libghostty. We mark the event handled so it stops here; every
-        // standard chord falls through to SendKey and is matched inside
-        // libghostty.
-        //
-        // We also set _suppressNextCharacter so the matching
-        // OnCharacterReceived (which fires independently with the
-        // WM_CHAR text) does not forward a control char to libghostty as
-        // text. Without this, the shell sees the C0 control char even
-        // though we filtered the key event itself.
-        if (KeyBindings.WindowsOnly.Match(CurrentChordModifiers(), e.Key) is { } residualAction)
-        {
-            Host?.RequestPaneAction(residualAction);
-            _suppressNextCharacter = true;
-            e.Handled = true;
-            return;
-        }
-        SendKey(e, GhosttyInputAction.Press);
+        if (HandleKeyDown(KeycodeFor(e), e.Key, CurrentMods())) e.Handled = true;
     }
 
     private void OnKeyUp(object sender, KeyRoutedEventArgs e)
@@ -3053,18 +3073,57 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // never saw. Swallow every key-up on a preview surface.
         if (_isPreviewSurface) return;
 
-        // Same short-circuit so the matching key-up never reaches
-        // libghostty either. Without this, libghostty would see a
-        // stray release for a press it never saw. Assumes every bound
-        // chord has at least one modifier; a plain unmodified bound
-        // key would swallow its key-up silently here.
-        var mods = CurrentChordModifiers();
-        if (KeyBindings.WindowsOnly.Match(mods, e.Key) is not null)
+        if (HandleKeyUp(KeycodeFor(e), e.Key, CurrentMods())) e.Handled = true;
+    }
+
+    /// <summary>
+    /// The key-up decision below OnKeyUp's routing gates, shared with the
+    /// test seam (a <see cref="KeyRoutedEventArgs"/> cannot be constructed
+    /// in process). Returns whether the release was handled.
+    ///
+    /// A leftover chord the press did NOT forward is swallowed, so
+    /// libghostty never sees a release for a press it never got. But when
+    /// the armed offer claimed the chord, the press WAS forwarded -- and
+    /// most residual chords carry no WM_CHAR, so the core buffers that
+    /// press until a later text, keydown, focus loss or release flushes
+    /// it. Swallowing this release would leave the pane dead until an
+    /// unrelated key flushed the buffered press; forward it instead. The
+    /// offer is asked with the press shape (the same call
+    /// <see cref="HandleKeyDown"/> makes), so the release is forwarded
+    /// exactly when the press was.
+    /// </summary>
+    internal bool HandleKeyUp(
+        uint scancode,
+        Windows.System.VirtualKey key,
+        GhosttyMods mods)
+    {
+        if (_restartOfferChordHeld)
         {
-            e.Handled = true;
-            return;
+            // The release of the press the offer claimed: forward it (it
+            // flushes the buffered press), then drop the latch.
+            _restartOfferChordHeld = false;
+            return SendKeyCore(scancode, GhosttyInputAction.Release, mods);
         }
-        SendKey(e, GhosttyInputAction.Release);
+        if (KeyBindings.WindowsOnly.Match(ChordModifiers(mods), key) is not null &&
+            !RestartOfferKeyPressed(scancode, mods))
+            return true;
+        return SendKeyCore(scancode, GhosttyInputAction.Release, mods);
+    }
+
+    /// <summary>
+    /// Whether libghostty would restart this pane's armed exit offer on
+    /// this key event. The core answers with its own predicate over the
+    /// event SendKeyCore delivers (physical key from the scancode, unshifted
+    /// codepoint backfilled from it), so the host never re-derives the
+    /// match and cannot drift from the key the notice names -- on any
+    /// layout, for letters and digits alike. False when no offer is armed.
+    /// </summary>
+    private bool RestartOfferKeyPressed(uint scancode, GhosttyMods mods)
+    {
+        if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return false;
+        return NativeMethods.SurfaceRestartOfferKey(
+            _surface,
+            BuildKey(scancode, GhosttyInputAction.Press, mods));
     }
 
     // Internal so the window's frame-chord router reads the modifier state
@@ -3101,64 +3160,133 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         return mods;
     }
 
-    private void SendKey(KeyRoutedEventArgs e, GhosttyInputAction action)
-    {
-        if (_surface.Handle == IntPtr.Zero) return;
 
-        // The embedded apprt (src/apprt/embedded.zig) implements key+text
-        // combining on Windows at comptime: ghostty_surface_key buffers a
-        // keydown with no text, and the next ghostty_surface_text attaches
-        // the text and dispatches through the full key encoding pipeline.
-        // Keys WinUI delivers without a character (Escape, Ctrl+[) are
-        // dispatched immediately; a character that still arrives for them
-        // is dropped instead of being typed twice.
-        // We just forward WM_KEYDOWN/WM_KEYUP here and forward WM_CHAR from
-        // OnCharacterReceived - embedders do not implement the combining
-        // themselves.
+    /// <summary>
+    /// The pane-chord decision below OnKeyDown's routing gates, shared with
+    /// the test seam (a <see cref="KeyRoutedEventArgs"/> cannot be
+    /// constructed in process). Returns whether the key was handled.
+    ///
+    /// The armed restart offer outranks the residual table: when this
+    /// pane's exit notice named a restart key and THIS key is that key, it
+    /// must reach libghostty (which restarts the child), not run the app
+    /// action the same chord is otherwise bound to. The notice is the
+    /// contract; consuming its key here would break it. Precisely scoped:
+    /// only the armed trigger skips the table, so a dead pane keeps every
+    /// other chord (search, profiles, undo...). The press falls through to
+    /// SendKeyCore below.
+    /// </summary>
+    internal bool HandleKeyDown(
+        uint scancode,
+        Windows.System.VirtualKey key,
+        GhosttyMods mods)
+    {
+        if (RestartOfferKeyPressed(scancode, mods))
+        {
+            _restartOfferChordHeld = true;
+            return SendKeyCore(scancode, GhosttyInputAction.Press, mods);
+        }
+        if (_restartOfferChordHeld)
+        {
+            // An auto-repeat of the press the offer claimed: forward it the
+            // way the press was forwarded (the core flushes the buffered
+            // press first), never the residual action.
+            return SendKeyCore(scancode, GhosttyInputAction.Press, mods);
+        }
+
+        // Windows-only residual match: a handful of chords have no
+        // libghostty action (search-bar widget, vertical-tabs pin,
+        // tab-layout switch, profile slots), so the apprt matches them
+        // itself. A hit is dispatched through GhosttyHost.PaneActionRequested
+        // -- the same event MainWindow forwards to PaneActionRouter for
+        // libghostty-matched actions -- and the key is NOT forwarded to
+        // libghostty. We mark the event handled so it stops here; every
+        // standard chord falls through to SendKeyCore and is matched inside
+        // libghostty.
         //
-        // The Keycode field carries the native Windows *scancode* (not a
-        // VirtualKey). embedded.zig matches it against keycodes.entries
-        // where the native column is the Win32 scancode, and derives
-        // unshifted_codepoint via MapVirtualKeyW when we pass 0.
-        //
-        // Two scancode adjustments are required to match what the C
-        // example/c-win32-terminal/src/main.c (the canonical Win32
-        // embedder) computes from raw lParam:
-        //
-        //  1. Extended keys (arrows, navigation cluster, numpad enter,
-        //     right-side modifiers) need the 0xE000 prefix or'd in.
-        //     PhysicalKeyStatus.ScanCode only returns the low byte;
-        //     IsExtendedKey tells us whether to set the prefix.
-        //     Without this, Up/Down/Left/Right/Home/End/PgUp/PgDn never
-        //     find a match in input.keycodes.entries (the table uses
-        //     0xE048 etc on the Windows column) and the dispatch returns
-        //     .ignored.
-        //
-        //  2. WinUI 3 strips ScanCode entirely for some keys that the
-        //     framework treats as "navigation" (most notably Tab),
-        //     reporting 0 even on the press path. Fall back to
-        //     MapVirtualKey(VK, MAPVK_VK_TO_VSC) using e.Key as the
-        //     virtual-key when ScanCode is 0, so the apprt sees the
-        //     real scancode.
+        // We also set _suppressNextCharacter so the matching
+        // OnCharacterReceived (which fires independently with the
+        // WM_CHAR text) does not forward a control char to libghostty as
+        // text. Without this, the shell sees the C0 control char even
+        // though we filtered the key event itself.
+        if (KeyBindings.WindowsOnly.Match(ChordModifiers(mods), key) is { } residualAction)
+        {
+            Host?.RequestPaneAction(residualAction);
+            _suppressNextCharacter = true;
+            return true;
+        }
+        return SendKeyCore(scancode, GhosttyInputAction.Press, mods);
+    }
+
+    /// <summary>
+    /// The chord-modifier view of a modifier set: base flags only, in the
+    /// <see cref="Windows.System.VirtualKeyModifiers"/> shape
+    /// <see cref="KeyBindings.WindowsOnly"/> matches against. Lock bits
+    /// and sides do not take part, exactly as the core's
+    /// <c>mods.binding()</c> trims them.
+    /// </summary>
+    private static Windows.System.VirtualKeyModifiers ChordModifiers(GhosttyMods mods)
+    {
+        var chord = Windows.System.VirtualKeyModifiers.None;
+        if (mods.HasFlag(GhosttyMods.Shift))
+            chord |= Windows.System.VirtualKeyModifiers.Shift;
+        if (mods.HasFlag(GhosttyMods.Ctrl))
+            chord |= Windows.System.VirtualKeyModifiers.Control;
+        if (mods.HasFlag(GhosttyMods.Alt))
+            chord |= Windows.System.VirtualKeyModifiers.Menu;
+        if (mods.HasFlag(GhosttyMods.Super))
+            chord |= Windows.System.VirtualKeyModifiers.Windows;
+        return chord;
+    }
+
+    /// <summary>
+    /// The scancode a <see cref="KeyRoutedEventArgs"/> carries, made whole:
+    /// WinUI 3 strips ScanCode for some keys the framework classes as
+    /// "navigation" (Tab most notably), so a zero falls back to
+    /// MapVirtualKey(VK, MAPVK_VK_TO_VSC), and the extended-key bit is
+    /// restored from KeyStatus (the table uses 0xE0xx for the keypad and
+    /// navigation keys).
+    /// </summary>
+    private static uint KeycodeFor(KeyRoutedEventArgs e)
+    {
         uint scancode = e.KeyStatus.ScanCode;
         if (scancode == 0)
         {
-            // Recover the OEM scancode from the VirtualKey. This handles
-            // Tab and any other key WinUI 3 strips ScanCode for.
             scancode = PInvoke.MapVirtualKey((uint)e.Key, MAP_VIRTUAL_KEY_TYPE.MAPVK_VK_TO_VSC);
         }
         if (e.KeyStatus.IsExtendedKey)
         {
             scancode |= 0xE000;
         }
+        return scancode;
+    }
 
-        if (SendKeyCore(scancode, action, CurrentMods())) e.Handled = true;
+    /// <summary>
+    /// The one <see cref="GhosttyInputKey"/> shape every forward and the
+    /// restart-offer query send: scancode keycode, no text (WM_CHAR is a
+    /// separate event), no consumed-modifier set (Windows reports none;
+    /// embedded.zig derives it when text attaches), unshifted codepoint
+    /// left to the core's scancode backfill.
+    /// </summary>
+    private GhosttyInputKey BuildKey(uint scancode, GhosttyInputAction action, GhosttyMods mods)
+    {
+        return new GhosttyInputKey
+        {
+            Action = action,
+            Mods = mods,
+            ConsumedMods = GhosttyMods.None,
+            Keycode = scancode,
+            Text = IntPtr.Zero,
+            UnshiftedCodepoint = 0,
+            Composing = (byte)(_imeForwarder.Composing ? 1 : 0),
+        };
     }
 
     /// <summary>
     /// The forward half below the event: one ghostty_surface_key carrying
-    /// the scancode, action and modifiers a press or release holds. Split
-    /// out of <see cref="SendKey"/> so the test seam drives the same call
+    /// the scancode, action and modifiers a press or release holds, built
+    /// by <see cref="BuildKey"/> -- the one shape the restart-offer query
+    /// sends too, so the question and the forward cannot describe
+    /// different keys. Split out so the test seam drives the same call
     /// without constructing a <see cref="KeyRoutedEventArgs"/> (which
     /// cannot be built in process). Returns whether libghostty marked the
     /// key handled.
@@ -3167,20 +3295,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (_surface.Handle == IntPtr.Zero) return false;
 
-        var key = new GhosttyInputKey
-        {
-            Action = action,
-            Mods = mods,
-            // The Windows embedder does not know yet which modifiers the
-            // layout consumed to produce this key's text: WM_CHAR has not
-            // arrived. embedded.zig derives the consumed set when the text
-            // attaches (see ghostty_surface_text).
-            ConsumedMods = GhosttyMods.None,
-            Keycode = scancode,
-            Text = IntPtr.Zero,
-            UnshiftedCodepoint = 0,
-            Composing = (byte)(_imeForwarder.Composing ? 1 : 0),
-        };
+        var key = BuildKey(scancode, action, mods);
         return NativeMethods.SurfaceKey(_surface, key);
     }
 

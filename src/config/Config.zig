@@ -1449,11 +1449,12 @@ input: RepeatableReadableIO = .{},
 @"wait-after-command": bool = false,
 
 /// The key that restarts a pane whose profile opted in with
-/// `profile.<id>.retry-on-exit`. A single key or chord (`enter`, `ctrl+r`,
-/// `shift+insert`) parsed like a keybind trigger. Defaults to Enter.
-/// An invalid value logs and falls back to Enter; it never disables the
-/// profile's opt-in.
-@"retry-on-exit-key": ?[]const u8 = null,
+/// `profile.<id>.restart-on-exit` (the Windows host's per-profile key;
+/// without it this key does nothing). A single key or chord (`enter`,
+/// `ctrl+r`, `shift+insert`) parsed like a keybind trigger. Defaults to
+/// Enter. An invalid value logs and falls back to Enter; it never
+/// disables the profile's opt-in.
+@"restart-on-exit-key": ?[]const u8 = null,
 
 /// The number of milliseconds of runtime below which we consider a process exit
 /// to be abnormal. This is used to show an error message when the process exits

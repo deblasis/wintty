@@ -167,7 +167,7 @@ public static class PaneCommandPolicy
             ResolvedCommand = command,
             CommandIsArgv = isArgv,
             CommandOrigin = PaneCommandOrigin.LaunchCommand,
-            RetryOnExit = false,
+            RestartOnExit = false,
         };
     }
 
@@ -225,11 +225,11 @@ public static class PaneCommandPolicy
     /// <summary>
     /// Whether an exited, held-open pane may offer a one-key restart. Only a
     /// profile-origin pane whose profile opted in: <c>-e</c>/<c>initial-command</c>
-    /// keep their snapshot with RetryOnExit cleared, and a pane with no
+    /// keep their snapshot with RestartOnExit cleared, and a pane with no
     /// profile starts false.
     /// </summary>
-    public static bool RetriesOnExit(ProfileSnapshot? snapshot)
-        => snapshot is { CommandOrigin: PaneCommandOrigin.Profile, RetryOnExit: true };
+    public static bool RestartsOnExit(ProfileSnapshot? snapshot)
+        => snapshot is { CommandOrigin: PaneCommandOrigin.Profile, RestartOnExit: true };
 
     private static ProfileSnapshot? WithWorkingDirectory(ProfileSnapshot? snapshot, string? workingDirectory)
         => snapshot is not null && !string.IsNullOrEmpty(workingDirectory)

@@ -180,7 +180,7 @@ public static partial class ProfileSourceParser
                 // the profile load -- the same way the parser treats every
                 // other bad value here.
                 TabIconTracksForeground: block.TabIconTracksForeground ?? true,
-                RetryOnExit: block.RetryOnExit ?? false);
+                RestartOnExit: block.RestartOnExit ?? false);
         }
 
         return new ProfileParseResult(profiles, warnings, overrides);
@@ -206,7 +206,7 @@ public static partial class ProfileSourceParser
             VisualsOrNull: visuals.HasAny ? visuals.Value : null,
             TabIconTracksForeground: ParseBoolOrNull(
                 bag.GetValueOrDefault("tab-icon-tracks-foreground")),
-            RetryOnExit: ParseBoolOrNull(bag.GetValueOrDefault("retry-on-exit")));
+            RestartOnExit: ParseBoolOrNull(bag.GetValueOrDefault("restart-on-exit")));
     }
 
     /// <summary>

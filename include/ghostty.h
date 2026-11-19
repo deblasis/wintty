@@ -619,11 +619,11 @@ typedef struct {
   // "graceful"). Ignored when the user set wait-after-command themselves.
   bool close_on_clean_exit;
 
-  // The host's per-profile `retry-on-exit` opt-in. When true, the exit
-  // notice offers the configured retry key (see the retry-on-exit-key
+  // The host's per-profile `restart-on-exit` opt-in. When true, the exit
+  // notice offers the configured restart key (see the restart-on-exit-key
   // config) instead of the any-key close. Appended after the fields above;
   // an embedder must be rebuilt against this header.
-  bool retry_on_exit;
+  bool restart_on_exit;
 } ghostty_surface_config_s;
 
 typedef struct {
@@ -1464,6 +1464,15 @@ GHOSTTY_API void ghostty_surface_free_inherited_config(ghostty_surface_config_s*
 GHOSTTY_API void ghostty_surface_update_config(ghostty_surface_t, ghostty_config_t);
 GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_process_exited(ghostty_surface_t);
+// Whether this key event would restart the surface's armed exit offer:
+// the same predicate ghostty_surface_key applies, over the same
+// ghostty_input_key_s. An embedder that dispatches its own app-level
+// chords must ask this before consuming one and forward a true answer to
+// ghostty_surface_key, or its exit notice would name a key the app eats.
+// False when no offer is armed (the pane is alive, or it exited without
+// the profile's restart-on-exit opt-in, or the exit was abnormal).
+GHOSTTY_API bool ghostty_surface_restart_offer_key(ghostty_surface_t,
+                                                   const ghostty_input_key_s*);
 GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_draw(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);

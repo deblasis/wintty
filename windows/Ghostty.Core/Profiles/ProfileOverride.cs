@@ -31,4 +31,4 @@ public sealed record ProfileOverride(
     bool Hidden = false,
     EffectiveVisualOverrides? VisualsOrNull = null,
     bool? TabIconTracksForeground = null,
-    bool? RetryOnExit = null);
+    bool? RestartOnExit = null);

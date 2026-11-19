@@ -27,7 +27,7 @@ public sealed record ProfileSnapshot(
     bool TabIconTracksForeground = true,
     bool CommandIsArgv = false,
     PaneCommandOrigin CommandOrigin = PaneCommandOrigin.Profile,
-    bool RetryOnExit = false);
+    bool RestartOnExit = false);
 
 /// <summary>Where a pane's command came from.</summary>
 public enum PaneCommandOrigin

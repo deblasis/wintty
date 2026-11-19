@@ -20,35 +20,35 @@ public sealed class PaneCommandPolicyTests
         Visuals: EffectiveVisualOverrides.Empty);
 
     [Fact]
-    public void RetriesOnExit_RequiresProfileOriginAndOptIn()
+    public void RestartsOnExit_RequiresProfileOriginAndOptIn()
     {
-        var opted = DefaultProfile() with { RetryOnExit = true };
-        Assert.True(PaneCommandPolicy.RetriesOnExit(opted));
-        Assert.False(PaneCommandPolicy.RetriesOnExit(
+        var opted = DefaultProfile() with { RestartOnExit = true };
+        Assert.True(PaneCommandPolicy.RestartsOnExit(opted));
+        Assert.False(PaneCommandPolicy.RestartsOnExit(
             opted with { CommandOrigin = PaneCommandOrigin.LaunchCommand }));
-        Assert.False(PaneCommandPolicy.RetriesOnExit(
+        Assert.False(PaneCommandPolicy.RestartsOnExit(
             opted with { CommandOrigin = PaneCommandOrigin.ConfiguredCommand }));
-        Assert.False(PaneCommandPolicy.RetriesOnExit(DefaultProfile()));
-        Assert.False(PaneCommandPolicy.RetriesOnExit(null));
+        Assert.False(PaneCommandPolicy.RestartsOnExit(DefaultProfile()));
+        Assert.False(PaneCommandPolicy.RestartsOnExit(null));
     }
 
     [Fact]
-    public void ApplyLaunchCommand_ClearsRetryOnExit()
+    public void ApplyLaunchCommand_ClearsRestartOnExit()
     {
-        var opted = DefaultProfile() with { RetryOnExit = true };
+        var opted = DefaultProfile() with { RestartOnExit = true };
 
         var pane = PaneCommandPolicy.ApplyLaunchCommand(opted, "cmd /c exit 1", @"C:\x");
 
         Assert.NotNull(pane);
-        Assert.False(pane!.RetryOnExit);
+        Assert.False(pane!.RestartOnExit);
         Assert.Equal(PaneCommandOrigin.LaunchCommand, pane.CommandOrigin);
-        Assert.True(PaneCommandPolicy.RetriesOnExit(opted));
+        Assert.True(PaneCommandPolicy.RestartsOnExit(opted));
     }
 
     [Fact]
-    public void InitialCommand_ClearsRetryOnExit()
+    public void InitialCommand_ClearsRestartOnExit()
     {
-        var opted = DefaultProfile() with { RetryOnExit = true };
+        var opted = DefaultProfile() with { RestartOnExit = true };
 
         var pane = PaneCommandPolicy.LaunchFirstPane(
             opted,
@@ -59,19 +59,19 @@ public sealed class PaneCommandPolicyTests
             initialCommand: new ConfiguredCommand("cmd /c exit 1", IsArgv: true));
 
         Assert.NotNull(pane);
-        Assert.False(pane!.RetryOnExit);
-        Assert.False(PaneCommandPolicy.RetriesOnExit(pane));
+        Assert.False(pane!.RestartOnExit);
+        Assert.False(PaneCommandPolicy.RestartsOnExit(pane));
     }
 
     [Fact]
-    public void Inherit_KeepsTheProfilesRetryOnExit()
+    public void Inherit_KeepsTheProfilesRestartOnExit()
     {
-        var opted = DefaultProfile() with { RetryOnExit = true };
+        var opted = DefaultProfile() with { RestartOnExit = true };
 
         var pane = PaneCommandPolicy.Inherit(opted, () => opted);
 
         Assert.NotNull(pane);
-        Assert.True(pane!.RetryOnExit);
+        Assert.True(pane!.RestartOnExit);
     }
 
     private static readonly ConfiguredCommand Nu = new("nu.exe --login", IsArgv: false);

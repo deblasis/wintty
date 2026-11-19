@@ -17,4 +17,4 @@ public sealed record ResolvedProfile(
     int OrderIndex,
     bool IsDefault,
     bool TabIconTracksForeground = true,
-    bool RetryOnExit = false);
+    bool RestartOnExit = false);
