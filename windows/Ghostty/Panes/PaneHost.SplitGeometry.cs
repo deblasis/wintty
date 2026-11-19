@@ -161,9 +161,21 @@ internal sealed class SplitGeometryTransition
             return false;
         }
 
-        // 1 / (1 - ratio) is finite for every model ratio (PaneNode
-        // clamps writers to [0.1, 0.9], so the bound is in [1.11, 10]).
+        // 1 / (1 - ratio) is finite for every model ratio the product's
+        // writers produce (the Splitter drag, the keyboard resize and the
+        // session restore each clamp to [0.1, 0.9], so the bound is in
+        // [1.11, 10] - Ratio itself carries no invariant). A degenerate
+        // ratio or a non-finite sample is outside the hold's domain: a NaN
+        // weight would disarm the foreign-weight belt and a non-positive
+        // clamp bound would throw on the rendering tick, so the hold
+        // settles to the model instead of writing either.
         var maxProgress = 1.0 / (1.0 - _split.Ratio);
+        if (!double.IsFinite(progress) || !double.IsFinite(maxProgress) || maxProgress <= 1.0)
+        {
+            Settle("bound");
+            return false;
+        }
+
         var weight = 1.0 + System.Math.Clamp(progress, 0.0, maxProgress) * (_split.Ratio - 1.0);
         WriteWeights(weight);
         _lastWritten = weight;
