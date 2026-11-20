@@ -160,19 +160,19 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         }
     }
 
-    // Themes
+    // Themes. Copied into the repository rather than fetched by the build:
+    // the upstream archive has theme names with a colon in them, which are
+    // not valid Windows file names, so Zig cannot unpack it there. See
+    // vendor/iterm2-color-schemes/README.md.
     if (cfg.emit_themes) {
-        if (b.lazyDependency("iterm2_themes", .{})) |upstream| {
-            const install_step = b.addInstallDirectory(.{
-                .source_dir = upstream.path(""),
-                .install_dir = .{ .custom = "share" },
-                .install_subdir = b.pathJoin(&.{ "ghostty", "themes" }),
-                .exclude_extensions = &.{".md"},
-            });
-            try steps.append(b.allocator, &install_step.step);
-            if (os_tag == .windows) {
-                try windows_steps.append(b.allocator, &install_step.step);
-            }
+        const install_step = b.addInstallDirectory(.{
+            .source_dir = b.path("vendor/iterm2-color-schemes/ghostty"),
+            .install_dir = .{ .custom = "share" },
+            .install_subdir = b.pathJoin(&.{ "ghostty", "themes" }),
+        });
+        try steps.append(b.allocator, &install_step.step);
+        if (os_tag == .windows) {
+            try windows_steps.append(b.allocator, &install_step.step);
         }
     }
 

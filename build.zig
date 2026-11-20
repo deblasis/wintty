@@ -140,10 +140,9 @@ pub fn build(b: *std.Build) !void {
     );
 
     // Ghostty resources like terminfo, shell integration, themes, etc.
-    // Only the app uses them, so a libghostty-vt build skips them, which
-    // also keeps it from downloading the themes package. This is null only
-    // when emit_lib_vt is set without emit_exe, and every use below is in
-    // an app-only branch.
+    // Only the app uses them, so a libghostty-vt build skips them. This is
+    // null only when emit_lib_vt is set without emit_exe, and every use
+    // below is in an app-only branch.
     const resources: ?buildpkg.GhosttyResources = if (config.emit_lib_vt and
         !config.emit_exe)
         null
