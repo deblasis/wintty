@@ -607,8 +607,10 @@ typedef struct {
   // a placeholder size until the first ghostty_surface_set_size.
   //
   // Fields are only ever appended here, and an embedder must be rebuilt
-  // against this header: a library built with these fields reads them past
-  // the end of a struct from an older build.
+  // against this header. A newer library reading a struct from an older
+  // build sees the old tail padding as uninitialized memory (an appended
+  // bool can read true by accident); a zero-initializing older embedder
+  // reads zero. Rebuilding is the supported path.
   uint32_t width;
   uint32_t height;
 
@@ -616,6 +618,12 @@ typedef struct {
   // exits 0, keep it open on any other exit (Windows Terminal's closeOnExit
   // "graceful"). Ignored when the user set wait-after-command themselves.
   bool close_on_clean_exit;
+
+  // The host's per-profile `restart-on-exit` opt-in. When true, the exit
+  // notice offers the configured restart key (see the restart-on-exit-key
+  // config) instead of the any-key close. Appended after the fields above;
+  // an embedder must be rebuilt against this header.
+  bool restart_on_exit;
 } ghostty_surface_config_s;
 
 typedef struct {
@@ -1456,6 +1464,15 @@ GHOSTTY_API void ghostty_surface_free_inherited_config(ghostty_surface_config_s*
 GHOSTTY_API void ghostty_surface_update_config(ghostty_surface_t, ghostty_config_t);
 GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_process_exited(ghostty_surface_t);
+// Whether this key event would restart the surface's armed exit offer:
+// the same predicate ghostty_surface_key applies, over the same
+// ghostty_input_key_s. An embedder that dispatches its own app-level
+// chords must ask this before consuming one and forward a true answer to
+// ghostty_surface_key, or its exit notice would name a key the app eats.
+// False when no offer is armed (the pane is alive, or it exited without
+// the profile's restart-on-exit opt-in, or the exit was abnormal).
+GHOSTTY_API bool ghostty_surface_restart_offer_key(ghostty_surface_t,
+                                                   const ghostty_input_key_s*);
 GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_draw(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);

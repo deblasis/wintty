@@ -534,6 +534,87 @@ public sealed class FirstPaneCommandWiringTests
         return reader.ReadToEnd().Replace("\r\n", "\n");
     }
 
+    [Fact]
+    public void LaunchPane_RestartOnExit_EndToEndWiring()
+    {
+        // Host: the surface config carries the origin-gated opt-in, set from
+        // the same first layout pass as CloseOnCleanExit.
+        var control = ShellSource.Load("Controls.TerminalControl.xaml.cs");
+        var create = control.Method("TryCreateSurface").Body!.ToString();
+        Assert.Contains("surfaceConfig.RestartOnExit =", create);
+        Assert.Contains("PaneCommandPolicy.RestartsOnExit(Snapshot)", create);
+
+        // Native: the opt-in reaches the core surface config.
+        var text = EmbeddedZig();
+        Assert.Contains("restart_on_exit: bool = false,", text);
+        Assert.Contains("self.core_surface.restart_on_exit = opts.restart_on_exit;", text);
+    }
+
+    [Fact]
+    public void KeyDecisions_ConsultTheRestartOffer_BeforeTheResidualChordTable()
+    {
+        // The notice is the contract: when a dead pane's exit offer named
+        // a key that is ALSO one of the app's WindowsOnly residual chords
+        // (e.g. ctrl+shift+z -> undo), BOTH halves must forward that key to
+        // libghostty instead of dispatching the app action. The press
+        // restarts; the release is what flushes a text-less press the core
+        // buffered (Ctrl+Shift+5 produces no WM_CHAR), so swallowing it
+        // would leave the pane dead until an unrelated keydown. Each
+        // decision consults the offer BEFORE KeyBindings.WindowsOnly.Match,
+        // and the CORE answers it: the host keeps no mirror of the trigger
+        // match, which is what let a digit chord and a non-US layout drift
+        // from the key the notice printed.
+        var control = ShellSource.Load("Controls.TerminalControl.xaml.cs");
+
+        // The press decision: the offer returns before the residual table,
+        // so an offered chord never reaches the app action.
+        var down = control.Method("HandleKeyDown").Body!.ToString();
+        var offerAt = down.IndexOf(
+            "RestartOfferKeyPressed(", System.StringComparison.Ordinal);
+        var residualAt = down.IndexOf(
+            "KeyBindings.WindowsOnly.Match(", System.StringComparison.Ordinal);
+        Assert.True(offerAt >= 0, "HandleKeyDown no longer consults the armed restart offer");
+        Assert.True(residualAt >= 0, "HandleKeyDown no longer matches the residual chord table");
+        Assert.True(
+            offerAt < residualAt,
+            "the restart-offer check in HandleKeyDown must precede the residual match");
+
+        // The release decision: the residual swallow is guarded by the
+        // SAME offer query, so the release of an offered (and therefore
+        // forwarded) press is forwarded too -- that release is what
+        // flushes a text-less press the core buffered.
+        var up = control.Method("HandleKeyUp").Body!.ToString();
+        Assert.Contains("KeyBindings.WindowsOnly.Match(", up);
+        Assert.Contains("!RestartOfferKeyPressed(", up);
+
+        // Both routed handlers reach those decisions; neither has a
+        // second, decision-free forward of its own.
+        var routedDown = control.Method("OnKeyDown").Body!.ToString();
+        Assert.Contains("HandleKeyDown(", routedDown);
+        Assert.DoesNotContain("SendKeyCore(", routedDown);
+        var routedUp = control.Method("OnKeyUp").Body!.ToString();
+        Assert.Contains("HandleKeyUp(", routedUp);
+        Assert.DoesNotContain("SendKeyCore(", routedUp);
+
+        // The query is the ABI call over the same event struct SendKeyCore
+        // builds -- not a host-side re-derivation of the trigger match.
+        var query = control.Method("RestartOfferKeyPressed").Body!.ToString();
+        Assert.Contains("NativeMethods.SurfaceRestartOfferKey(", query);
+        Assert.Contains("BuildKey(", query);
+        Assert.Contains("GhosttyInputAction.Press", query);
+
+        // The interop is a real export of libghostty, spelled the same as
+        // the header's ghostty_surface_restart_offer_key, and it takes the
+        // key struct SendKeyCore passes (EntryPointParityTests holds the
+        // import against the zig export fn corpus).
+        var native = ShellSource.Load("Interop.Imports.NativeMethods.cs");
+        var entryPoint = native.Root.DescendantNodes()
+            .OfType<MethodDeclarationSyntax>()
+            .Single(m => m.Identifier.ValueText == "SurfaceRestartOfferKeyNative");
+        Assert.Contains("ghostty_surface_restart_offer_key", entryPoint.ToString());
+        Assert.Contains("GhosttyInputKey", entryPoint.ParameterList.ToString());
+    }
+
     private static string EmbeddedZig()
     {
         var asm = typeof(FirstPaneCommandWiringTests).Assembly;

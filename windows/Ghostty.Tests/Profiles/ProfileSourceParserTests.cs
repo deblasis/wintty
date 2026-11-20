@@ -7,6 +7,53 @@ namespace Ghostty.Tests.Profiles;
 public sealed class ProfileSourceParserTests
 {
     [Fact]
+    public void Parse_RestartOnExit_TrueFalseAbsent()
+    {
+        const string config = """
+            profile.a.name = A
+            profile.a.command = a.exe
+            profile.a.restart-on-exit = true
+            profile.b.name = B
+            profile.b.command = b.exe
+            profile.b.restart-on-exit = false
+            profile.c.name = C
+            profile.c.command = c.exe
+            """;
+
+        var result = ProfileSourceParser.Parse(config);
+
+        Assert.True(result.Profiles["a"].RestartOnExit);
+        Assert.False(result.Profiles["b"].RestartOnExit);
+        Assert.False(result.Profiles["c"].RestartOnExit);
+    }
+
+    [Fact]
+    public void Parse_MalformedRestartOnExit_ReadsFalse()
+    {
+        const string config = """
+            profile.a.name = A
+            profile.a.command = a.exe
+            profile.a.restart-on-exit = yes-please
+            """;
+
+        Assert.False(ProfileSourceParser.Parse(config).Profiles["a"].RestartOnExit);
+    }
+
+    [Fact]
+    public void Parse_Override_CarriesTriStateRestartOnExit()
+    {
+        const string config = """
+            profile.a.restart-on-exit = true
+            profile.b.restart-on-exit = false
+            """;
+
+        var result = ProfileSourceParser.Parse(config);
+
+        Assert.True(result.Overrides["a"].RestartOnExit);
+        Assert.False(result.Overrides["b"].RestartOnExit);
+    }
+
+    [Fact]
     public void Parse_SingleProfile_AllRequiredKeys()
     {
         const string config = """

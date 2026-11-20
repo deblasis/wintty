@@ -1268,8 +1268,9 @@ internal sealed partial class GhosttyHost : IDisposable
                         if (req is not null) _toasts.Show(req);
                     });
                     // Return 0 ("not handled") so the core keeps its in-terminal
-                    // "Process exited. Press any key to close" fallback. The
-                    // toast is additive, not a replacement for that affordance.
+                    // exit notice (it may offer an Enter restart; any other key
+                    // closes) as the fallback. The toast is additive, not a
+                    // replacement for that affordance.
                     return 0;
                 }
 

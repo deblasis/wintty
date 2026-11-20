@@ -16,4 +16,5 @@ public sealed record ResolvedProfile(
     string? ProbeId,
     int OrderIndex,
     bool IsDefault,
-    bool TabIconTracksForeground = true);
+    bool TabIconTracksForeground = true,
+    bool RestartOnExit = false);

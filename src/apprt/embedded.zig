@@ -732,6 +732,10 @@ pub const Surface = struct {
         /// Terminal's `closeOnExit: graceful` does. Ignored when the user set
         /// `wait-after-command` themselves, which then holds as configured.
         close_on_clean_exit: bool = false,
+
+        /// The host's per-profile `restart-on-exit` opt-in. The core adds it
+        /// to the exit-offer predicate; false keeps today's notice.
+        restart_on_exit: bool = false,
     };
 
     // Options is declared three times: here, as ghostty_surface_config_s in
@@ -762,6 +766,7 @@ pub const Surface = struct {
         .{ .name = "width", .offset = 120 },
         .{ .name = "height", .offset = 124 },
         .{ .name = "close_on_clean_exit", .offset = 128 },
+        .{ .name = "restart_on_exit", .offset = 129 },
     };
 
     comptime {
@@ -976,6 +981,10 @@ pub const Surface = struct {
         // close on any exit (#1176). The record comes from the force
         // sites themselves, so it cannot drift from what creation did.
         self.core_surface.wait_after_command_forced = wait_forced_by_host;
+
+        // The host's per-profile opt-in. Set before the mailbox drain, like
+        // the close flag above.
+        self.core_surface.restart_on_exit = opts.restart_on_exit;
 
         // If our options requested a specific font-size, set that.
         if (opts.font_size != 0) {
@@ -2765,6 +2774,23 @@ pub const CAPI = struct {
     /// Returns true if the surface process has exited.
     export fn ghostty_surface_process_exited(surface: *Surface) bool {
         return surface.core_surface.child_exited;
+    }
+
+    /// Whether this key event would restart the surface's armed exit
+    /// offer: the same predicate `ghostty_surface_key` applies, over the
+    /// same `ghostty_input_key_s`. An embedder that dispatches its own
+    /// app-level chords asks this before consuming one, so a chord the
+    /// exit notice named still reaches the surface. Asking the core
+    /// (rather than re-deriving the match host-side) keeps the answer and
+    /// the printed notice the same key on every layout: the physical key
+    /// comes from the scancode table and the unshifted codepoint is
+    /// backfilled from the scancode, exactly as a forwarded event is.
+    export fn ghostty_surface_restart_offer_key(
+        surface: *Surface,
+        event: *const KeyEvent,
+    ) bool {
+        const core_event = event.keyEvent().core() orelse return false;
+        return surface.core_surface.restartOfferKeyPressed(core_event);
     }
 
     /// Returns true if the surface has a selection.

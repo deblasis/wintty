@@ -19,6 +19,61 @@ public sealed class PaneCommandPolicyTests
         Icon: new IconSpec.BundledKey("pwsh"),
         Visuals: EffectiveVisualOverrides.Empty);
 
+    [Fact]
+    public void RestartsOnExit_RequiresProfileOriginAndOptIn()
+    {
+        var opted = DefaultProfile() with { RestartOnExit = true };
+        Assert.True(PaneCommandPolicy.RestartsOnExit(opted));
+        Assert.False(PaneCommandPolicy.RestartsOnExit(
+            opted with { CommandOrigin = PaneCommandOrigin.LaunchCommand }));
+        Assert.False(PaneCommandPolicy.RestartsOnExit(
+            opted with { CommandOrigin = PaneCommandOrigin.ConfiguredCommand }));
+        Assert.False(PaneCommandPolicy.RestartsOnExit(DefaultProfile()));
+        Assert.False(PaneCommandPolicy.RestartsOnExit(null));
+    }
+
+    [Fact]
+    public void ApplyLaunchCommand_ClearsRestartOnExit()
+    {
+        var opted = DefaultProfile() with { RestartOnExit = true };
+
+        var pane = PaneCommandPolicy.ApplyLaunchCommand(opted, "cmd /c exit 1", @"C:\x");
+
+        Assert.NotNull(pane);
+        Assert.False(pane!.RestartOnExit);
+        Assert.Equal(PaneCommandOrigin.LaunchCommand, pane.CommandOrigin);
+        Assert.True(PaneCommandPolicy.RestartsOnExit(opted));
+    }
+
+    [Fact]
+    public void InitialCommand_ClearsRestartOnExit()
+    {
+        var opted = DefaultProfile() with { RestartOnExit = true };
+
+        var pane = PaneCommandPolicy.LaunchFirstPane(
+            opted,
+            launchArgv: null,
+            Nu,
+            defaultProfileSet: true,
+            workingDirectory: null,
+            initialCommand: new ConfiguredCommand("cmd /c exit 1", IsArgv: true));
+
+        Assert.NotNull(pane);
+        Assert.False(pane!.RestartOnExit);
+        Assert.False(PaneCommandPolicy.RestartsOnExit(pane));
+    }
+
+    [Fact]
+    public void Inherit_KeepsTheProfilesRestartOnExit()
+    {
+        var opted = DefaultProfile() with { RestartOnExit = true };
+
+        var pane = PaneCommandPolicy.Inherit(opted, () => opted);
+
+        Assert.NotNull(pane);
+        Assert.True(pane!.RestartOnExit);
+    }
+
     private static readonly ConfiguredCommand Nu = new("nu.exe --login", IsArgv: false);
 
     // ---- default-profile set: it beats `command` everywhere ---------------

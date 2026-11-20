@@ -107,6 +107,20 @@ terminal_stream: StreamHandler.Stream,
 /// renderer_state is what lock-free readers check instead.
 dormant_snapshot: ?DormantSnapshot = null,
 
+/// True while a restart's new IO thread is starting and has not yet
+/// entered. Read and cleared by the IO thread once `threadEnter`
+/// succeeds; a loop failure while it is set is reported as a failed
+/// restart (the notice is re-armed) instead of the startup error screen.
+restarting: bool = false,
+
+/// Set for the duration of one restart attempt: from the entry check
+/// until the new thread starts (or the failed attempt ends). `goDormant`
+/// refuses to tear the terminal down while it is set: the restarted child
+/// inherits that very terminal, and dormancy would free it under the
+/// restart. Written and cleared under `renderer_state.mutex` by `Surface`,
+/// which is the lock `goDormant` checks it under.
+dormancy_blocked: std.atomic.Value(bool) = .init(false),
+
 /// Last time the cursor was reset. This is used to prevent message
 /// flooding with cursor resets.
 last_cursor_reset: ?std.Io.Timestamp = null,
@@ -360,6 +374,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     var osc7 = internal_os.windows_shell.osc7ContextFromArgs(
         alloc,
         switch (backend) {
+            .none => &.{},
             .exec => |*exec| exec.subprocess.args,
         },
     );
@@ -483,11 +498,20 @@ pub fn threadEnter(
         .renderer_state = self.renderer_state,
         .surface_mailbox = self.surface_mailbox,
         .mailbox = &self.mailbox,
-        .backend = undefined, // Backend must replace this on threadEnter
+        // Every backend replaces this on a successful threadEnter. A
+        // failed enter leaves `.none`, so the errdefer below is a no-op
+        // and no half-built backend is ever deinited.
+        .backend = .{ .none = {} },
     };
+    // Declared before the enter so a failure there still deinits the
+    // (still `.none`) thread data; the backend owns its own cleanup until
+    // it reports success, then the errdefer below takes over.
+    errdefer data.deinit();
 
     // Setup our backend
     try self.backend.threadEnter(self.alloc, self, data);
+    // Post-enter failures (e.g. the `input` loop's InputFailed) must tear
+    // down the installed run. LIFO order runs this before `data.deinit`.
     errdefer self.backend.threadExit(data);
 
     // If we have inputs, then queue them all up.
@@ -815,6 +839,33 @@ pub fn deepIdleTrim(self: *Termio) void {
     h.kittyClipboardWriteAbort();
 }
 
+/// Print why a restart failed, on the line below the exit notice.
+///
+/// CALLER HOLDS `renderer_state.mutex` (every call site is on the UI
+/// thread inside one critical section, or on the IO thread under the lock
+/// `Thread.threadMain` already holds). A dormant terminal is skipped: its
+/// field is torn down into bytes, so printing would walk freed pages. That
+/// check is defensive -- the ordinary loop-failure branch is the guarded
+/// one; this is reached from a `threadEnter` failure, which cannot dispatch
+/// a dormancy transition.
+pub fn restartFailed(self: *Termio, err: anyerror) void {
+    if (self.renderer_state.dormant.load(.acquire)) {
+        log.warn("restart failed while dormant err={}", .{err});
+        return;
+    }
+
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "Restart failed: {s}",
+        .{@errorName(err)},
+    ) catch "Restart failed";
+    const t = &self.terminal;
+    t.carriageReturn();
+    t.linefeed() catch {};
+    t.printString(msg) catch {};
+}
+
 /// Tier C dormancy: tear the terminal down into snapshot bytes. The
 /// eligibility gates here are the ones only the terminal in hand can
 /// answer; the surface-side gates (an active search) are checked before
@@ -832,6 +883,14 @@ pub fn goDormant(self: *Termio) void {
     defer self.renderer_state.mutex.unlock(global.io());
 
     if (self.dormant_snapshot != null) return;
+    // A restart in flight owns this terminal: it is about to hand it to a
+    // new child, and tearing it down here would free it under the restart.
+    // The flag and this check share `renderer_state.mutex` with the
+    // restart's begin, so one of the two always commits first.
+    if (self.dormancy_blocked.load(.acquire)) {
+        log.info("dormancy refused: restart in progress", .{});
+        return;
+    }
     if (self.dormantBlocker()) |reason| {
         log.info("dormancy refused: {s}", .{reason});
         return;

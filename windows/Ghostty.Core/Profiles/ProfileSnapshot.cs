@@ -26,7 +26,8 @@ public sealed record ProfileSnapshot(
     EffectiveVisualOverrides Visuals,
     bool TabIconTracksForeground = true,
     bool CommandIsArgv = false,
-    PaneCommandOrigin CommandOrigin = PaneCommandOrigin.Profile);
+    PaneCommandOrigin CommandOrigin = PaneCommandOrigin.Profile,
+    bool RestartOnExit = false);
 
 /// <summary>Where a pane's command came from.</summary>
 public enum PaneCommandOrigin

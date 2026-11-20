@@ -179,6 +179,15 @@ pub fn threadEnter(
             break :blk dup;
         } else {};
 
+    // The duplicate is ours until the wait-thread context takes it; every
+    // failure before that ownership transfer must close it.
+    var win_proc_handle_owned = comptime builtin.target.os.tag == .windows;
+    errdefer if (win_proc_handle_owned) {
+        if (comptime builtin.target.os.tag == .windows) {
+            windows.CloseHandle(win_proc_handle);
+        }
+    };
+
     // Track our process start time for abnormal exits
     const process_start: std.Io.Timestamp = .now(global.io(), .awake);
 
@@ -254,6 +263,13 @@ pub fn threadEnter(
         .termios_timer = termios_timer,
     } };
 
+    // The backend is installed in the thread data from here on. A later
+    // failure must leave `.none`: the errdefers above already own the
+    // stream, timer, process and read thread, so `Termio.threadEnter`'s
+    // `errdefer data.deinit` must not deinit this half-built copy (it would
+    // double free those). LIFO order makes this run before them.
+    errdefer td.backend = .{ .none = {} };
+
     // On Windows, spawn a dedicated thread that blocks on WaitForSingleObject
     // for the child process. This replaces the xev.Process watcher which does
     // not work under ConPTY because the child is already in ConPTY's job object
@@ -267,6 +283,7 @@ pub fn threadEnter(
             windows.CloseHandle(ctx.handle);
             io.alloc.destroy(ctx);
         }
+        win_proc_handle_owned = false;
         const wt = try std.Thread.spawn(.{}, winProcessWaitThread, .{ io.alloc, ctx });
         wt.setName(global.io(), "proc-wait") catch {};
         td.backend.exec.process_wait_thread = wt;
@@ -933,6 +950,153 @@ pub const Config = struct {
     rt_post_fork_info: Command.RtPostForkInfo,
 };
 
+/// Everything needed to spawn the same command again in the same surface
+/// after its child exits.
+///
+/// Built once from the config the first spawn used and owned by the
+/// surface: every string is duplicated (and the command cloned) because the
+/// config arena is freed right after `Surface.init`. The environment is not
+/// part of the spec -- it is recaptured per spawn by the surface, so a config
+/// reload can revoke a value (`Surface.childEnv`). Nothing here is mutated
+/// after construction except `env_override`, refreshed on config reload.
+pub const RestartSpec = struct {
+    command: ?configpkg.Command,
+    working_directory: ?[]const u8,
+    working_directory_defaulted: bool,
+    env_override: configpkg.RepeatableStringMap,
+    shell_integration: configpkg.Config.ShellIntegration,
+    shell_integration_features: configpkg.Config.ShellIntegrationFeatures,
+    cursor_blink: ?bool,
+    utf8_console: if (builtin.os.tag == .windows) configpkg.Config.Utf8Console else void,
+    resources_dir: ?[]const u8,
+    term: []const u8,
+    rt_pre_exec_info: Command.RtPreExecInfo,
+    rt_post_fork_info: Command.RtPostForkInfo,
+
+    /// The borrowed values a spec is built from, shaped like `Config`.
+    pub const Options = struct {
+        command: ?configpkg.Command = null,
+        working_directory: ?[]const u8 = null,
+        working_directory_defaulted: bool = false,
+        env_override: configpkg.RepeatableStringMap = .{},
+        shell_integration: configpkg.Config.ShellIntegration = .detect,
+        shell_integration_features: configpkg.Config.ShellIntegrationFeatures = .{},
+        cursor_blink: ?bool = null,
+        utf8_console: if (builtin.os.tag == .windows)
+            configpkg.Config.Utf8Console
+        else
+            void = if (builtin.os.tag == .windows) .auto else {},
+        resources_dir: ?[]const u8 = null,
+        term: []const u8,
+        rt_pre_exec_info: Command.RtPreExecInfo,
+        rt_post_fork_info: Command.RtPostForkInfo,
+    };
+
+    /// Clone/dupe everything the spec keeps. On failure nothing is leaked:
+    /// each allocation is disarmed by the one errdefer after it.
+    pub fn init(alloc: Allocator, opts: Options) !RestartSpec {
+        const command: ?configpkg.Command = if (opts.command) |cmd|
+            try cmd.clone(alloc)
+        else
+            null;
+        errdefer if (command) |cmd| cmd.deinit(alloc);
+
+        const working_directory: ?[]const u8 = if (opts.working_directory) |wd|
+            try alloc.dupe(u8, wd)
+        else
+            null;
+        errdefer if (working_directory) |wd| alloc.free(wd);
+
+        const resources_dir: ?[]const u8 = if (opts.resources_dir) |dir|
+            try alloc.dupe(u8, dir)
+        else
+            null;
+        errdefer if (resources_dir) |dir| alloc.free(dir);
+
+        const term = try alloc.dupe(u8, opts.term);
+        errdefer alloc.free(term);
+
+        var env_override = try opts.env_override.clone(alloc);
+        errdefer freeEnvOverride(alloc, &env_override);
+
+        return .{
+            .command = command,
+            .working_directory = working_directory,
+            .working_directory_defaulted = opts.working_directory_defaulted,
+            .env_override = env_override,
+            .shell_integration = opts.shell_integration,
+            .shell_integration_features = opts.shell_integration_features,
+            .cursor_blink = opts.cursor_blink,
+            .utf8_console = opts.utf8_console,
+            .resources_dir = resources_dir,
+            .term = term,
+            .rt_pre_exec_info = opts.rt_pre_exec_info,
+            .rt_post_fork_info = opts.rt_post_fork_info,
+        };
+    }
+
+    /// Free every allocation the spec owns.
+    ///
+    /// `RepeatableStringMap` has no deinit (its allocator is always the
+    /// config arena), so its clone's keys, values and backing storage are
+    /// released here by hand.
+    pub fn deinit(self: *const RestartSpec, alloc: Allocator) void {
+        if (self.command) |cmd| cmd.deinit(alloc);
+        if (self.working_directory) |wd| alloc.free(wd);
+        if (self.resources_dir) |dir| alloc.free(dir);
+        alloc.free(self.term);
+        var env_override = self.env_override;
+        freeEnvOverride(alloc, &env_override);
+    }
+
+    /// The `Exec.Config` for a new run. Borrows the spec's allocations and
+    /// hands `env` to `Subprocess.init`, which owns it from entry.
+    pub fn toConfig(self: *const RestartSpec, env: EnvMap) Config {
+        return .{
+            .command = self.command,
+            .env = env,
+            .env_override = self.env_override,
+            .shell_integration = self.shell_integration,
+            .shell_integration_features = self.shell_integration_features,
+            .cursor_blink = self.cursor_blink,
+            .working_directory = self.working_directory,
+            .working_directory_defaulted = self.working_directory_defaulted,
+            .resources_dir = self.resources_dir,
+            .term = self.term,
+            .utf8_console = self.utf8_console,
+            .rt_pre_exec_info = self.rt_pre_exec_info,
+            .rt_post_fork_info = self.rt_post_fork_info,
+        };
+    }
+
+    /// Replace the cloned `env` override with a fresh clone of the reloaded
+    /// config's map, so a reload that removes a value revokes it for the next
+    /// restart. The old clone is kept when cloning fails.
+    pub fn updateEnvOverride(
+        self: *RestartSpec,
+        alloc: Allocator,
+        map: configpkg.RepeatableStringMap,
+    ) void {
+        const clone = map.clone(alloc) catch |err| {
+            log.warn("error cloning restart env override err={}", .{err});
+            return;
+        };
+        freeEnvOverride(alloc, &self.env_override);
+        self.env_override = clone;
+    }
+
+    /// Release a cloned `RepeatableStringMap` and its entries.
+    fn freeEnvOverride(alloc: Allocator, map: *configpkg.RepeatableStringMap) void {
+        var it = map.iterator();
+        while (it.next()) |entry| {
+            alloc.free(entry.key_ptr.*);
+            alloc.free(entry.value_ptr.*);
+        }
+        map.map.deinit(alloc);
+        map.* = .{};
+    }
+};
+
 const Subprocess = struct {
     const c = if (builtin.target.os.tag != .windows) @import("posix_c") else {};
 
@@ -987,6 +1151,9 @@ const Subprocess = struct {
         // Get our env. If a default env isn't provided by the caller
         // then we get it ourselves.
         var env = cfg.env;
+        // We own `cfg.env` from entry (the caller must not free it if this
+        // fails): every `put` below can fail, and the arena's errdefer does
+        // not free the map itself or its entry allocations.
         errdefer env.deinit();
 
         // If we have a resources dir then set our env var
@@ -6879,4 +7046,30 @@ test "init frees the env when it fails" {
         };
         try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
+}
+
+test "RestartSpec.init frees a partially built spec on every allocation failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var env: configpkg.RepeatableStringMap = .{};
+    try env.parseCLI(arena.allocator(), "A=B");
+    var argv = [_][:0]const u8{ "one", "two" };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(
+            alloc: std.mem.Allocator,
+            args: []const [:0]const u8,
+            env_override: configpkg.RepeatableStringMap,
+        ) !void {
+            var spec = try RestartSpec.init(alloc, .{
+                .command = .{ .direct = args },
+                .working_directory = "/work",
+                .resources_dir = "/res",
+                .env_override = env_override,
+                .term = "xterm-256color",
+                .rt_pre_exec_info = undefined,
+                .rt_post_fork_info = undefined,
+            });
+            spec.deinit(alloc);
+        }
+    }.run, .{ argv[0..], env });
 }

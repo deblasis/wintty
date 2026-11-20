@@ -179,7 +179,8 @@ public static partial class ProfileSourceParser
                 // malformed value retains the default rather than failing
                 // the profile load -- the same way the parser treats every
                 // other bad value here.
-                TabIconTracksForeground: block.TabIconTracksForeground ?? true);
+                TabIconTracksForeground: block.TabIconTracksForeground ?? true,
+                RestartOnExit: block.RestartOnExit ?? false);
         }
 
         return new ProfileParseResult(profiles, warnings, overrides);
@@ -204,7 +205,8 @@ public static partial class ProfileSourceParser
             Hidden: ParseBool(bag.GetValueOrDefault("hidden")),
             VisualsOrNull: visuals.HasAny ? visuals.Value : null,
             TabIconTracksForeground: ParseBoolOrNull(
-                bag.GetValueOrDefault("tab-icon-tracks-foreground")));
+                bag.GetValueOrDefault("tab-icon-tracks-foreground")),
+            RestartOnExit: ParseBoolOrNull(bag.GetValueOrDefault("restart-on-exit")));
     }
 
     /// <summary>

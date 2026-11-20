@@ -15,7 +15,8 @@ public sealed record ProfileDef(
     bool Hidden = false,
     string? ProbeId = null,
     EffectiveVisualOverrides? VisualsOrNull = null,
-    bool TabIconTracksForeground = true)
+    bool TabIconTracksForeground = true,
+    bool RestartOnExit = false)
 {
     /// <summary>
     /// Non-null view of <see cref="VisualsOrNull"/>; returns

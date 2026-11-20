@@ -21,6 +21,41 @@ public sealed class ProfileOrderResolverTests
         => new(Id: id, Name: id, Command: $"{id}.exe", ProbeId: probe);
 
     [Fact]
+    public void Resolve_CarriesRestartOnExitToSnapshot()
+    {
+        var user = User("alpha") with { RestartOnExit = true };
+        var resolved = ProfileOrderResolver.Resolve(
+            user: new[] { user },
+            overrides: NoOverrides,
+            discovered: Array.Empty<DiscoveredProfile>(),
+            profileOrder: null,
+            defaultProfileId: null,
+            hiddenIds: new HashSet<string>()).Visible.Single();
+
+        Assert.True(resolved.RestartOnExit);
+        Assert.True(ProfileSnapshotStore.From(resolved, version: 1).RestartOnExit);
+    }
+
+    [Fact]
+    public void Resolve_OverrideEnablesRetryOnDiscoveredProfile()
+    {
+        var overrides = new Dictionary<string, ProfileOverride>
+        {
+            ["beta"] = new(Id: "beta", RestartOnExit: true),
+        };
+        var resolved = ProfileOrderResolver.Resolve(
+            user: Array.Empty<ProfileDef>(),
+            overrides: overrides,
+            discovered: new[] { Disc("beta") },
+            profileOrder: null,
+            defaultProfileId: null,
+            hiddenIds: new HashSet<string>()).Visible.Single();
+
+        Assert.True(resolved.RestartOnExit);
+        Assert.True(ProfileSnapshotStore.From(resolved, version: 1).RestartOnExit);
+    }
+
+    [Fact]
     public void Resolve_NoProfileOrder_UserFirstThenDiscoveredAlpha()
     {
         var users = new[] { User("alpha"), User("zulu") };
