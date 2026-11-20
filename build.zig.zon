@@ -195,16 +195,10 @@
         // Other
         .apple_sdk = .{ .path = "./pkg/apple-sdk" },
         .android_ndk = .{ .path = "./pkg/android-ndk" },
-        .iterm2_themes = .{
-            .url = "https://deps.files.ghostty.org/ghostty-themes-release-20261102-150615-3d8a6a1.tgz",
-            .hash = "N-V-__8AAFpzBgAPo4OIKKdP0WTD6scDoaBGVGTdltSyA2Hp",
-            .lazy = true,
-        },
     },
     // The license and version of the third-party code above, for
     // packagers. Zig ignores this field. See src/build/LibVtPackages.zig.
     .third_party = .{
-        .{ .name = "iterm2_themes", .license = "MIT" },
         .{ .name = "uucode", .license = "MIT AND Unicode-3.0" },
         .{ .name = "zigimg", .license = "MIT" },
     },

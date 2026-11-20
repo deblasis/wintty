@@ -148,6 +148,20 @@ pub fn init(b: *std.Build, versions: Versions) !Config {
             result = b.resolveTargetQuery(query);
         }
 
+        // On Windows, default to the baseline CPU when none was requested.
+        // Zig's own default is the build machine's CPU, so a build made on a
+        // host with AVX-512 (a hosted CI runner, say) dies with an illegal
+        // instruction (0xC000001D) on every machine without it, before it
+        // can print anything (#1462). `-Dcpu=native` still opts in to the
+        // build machine's CPU.
+        if (result.result.os.tag == .windows and
+            result.query.cpu_model == .determined_by_arch_os)
+        {
+            var query = result.query;
+            query.cpu_model = .baseline;
+            result = b.resolveTargetQuery(query);
+        }
+
         // On wasm, default to enabling the simd128 feature. Every
         // browser engine has supported it since 2023 or earlier
         // (Chrome 91, Firefox 89, Safari 16.4) and it is a large
@@ -637,16 +651,7 @@ pub fn init(b: *std.Build, versions: Versions) !Config {
         bool,
         "emit-themes",
         "Install bundled iTerm2-Color-Schemes Ghostty themes",
-    ) orelse switch (target.result.os.tag) {
-        // There is no Windows app to install themes for, and asking for the
-        // themes package downloads and unpacks it on every build, whichever
-        // steps were requested. Some theme names (e.g. ones with a colon)
-        // aren't valid Windows file names, so unpacking it there fails and
-        // takes builds that never use the themes, such as
-        // `zig build test-lib-vt`, down with it.
-        .windows => false,
-        else => true,
-    };
+    ) orelse true;
 
     config.emit_webdata = b.option(
         bool,

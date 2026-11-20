@@ -67,12 +67,6 @@
   },
   {
     "type": "archive",
-    "url": "https://deps.files.ghostty.org/ghostty-themes-release-20261102-150615-3d8a6a1.tgz",
-    "dest": "vendor/p/N-V-__8AAFpzBgAPo4OIKKdP0WTD6scDoaBGVGTdltSyA2Hp",
-    "sha256": "b61b297e4245e0a5e46ac1e8d92ec8f7390d4394db4bafc93cfa3209f215435e"
-  },
-  {
-    "type": "archive",
     "url": "https://deps.files.ghostty.org/JetBrainsMono-2.304.tar.gz",
     "dest": "vendor/p/N-V-__8AAIC5lwAVPJJzxnCAahSvZTIlG-HhtOvnM1uh-66x",
     "sha256": "c57a691e8b82ad098b5963f3959032e4038f391087af7715885ba59046105cc4"

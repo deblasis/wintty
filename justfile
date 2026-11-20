@@ -171,8 +171,9 @@ build-dll:
 
 # Build libghostty DLL optimized. Much slower to compile; the only build
 # worth drawing timing conclusions from, since a Debug DLL is several times
-# slower at runtime. Distributed DLLs must not inherit the build host CPU
-# (for example AVX-512).
+# slower at runtime. -Dcpu=baseline is also the Windows default
+# (src/build/Config.zig); spelled out because distributed DLLs must not
+# inherit the build host CPU (for example AVX-512).
 build-dll-release:
     zig build -Dapp-runtime=none -Doptimize=ReleaseFast -Dcpu=baseline
 

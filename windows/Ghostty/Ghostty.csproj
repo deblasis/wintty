@@ -462,6 +462,36 @@
   </ItemGroup>
 
   <!--
+    The licence record for the bundled themes (share\ghostty\themes). Staged
+    from vendor\iterm2-color-schemes, which is also where the build takes the
+    themes from, rather than copied into licenses\, so it cannot drift from
+    the files it covers. LICENSE covers the collection and says each theme
+    stays under its author's own licence; licenses.yml is upstream's record
+    of those per-theme licences and CREDITS.md its list of authors.
+
+    No Exists() condition, deliberately: a literal Include creates the item
+    whether or not the file is there, so a missing notice fails the copy
+    instead of shipping the themes without it.
+  -->
+  <ItemGroup>
+    <None Include="..\..\vendor\iterm2-color-schemes\LICENSE">
+      <Link>licenses\iterm2-color-schemes-LICENSE.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="..\..\vendor\iterm2-color-schemes\licenses.yml">
+      <Link>licenses\iterm2-color-schemes-licenses.yml</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="..\..\vendor\iterm2-color-schemes\CREDITS.md">
+      <Link>licenses\iterm2-color-schemes-CREDITS.md</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <!--
     Fail the build if dxcompiler.dll is missing. Its absence is invisible in
     a build log and only shows up as the custom-shader setting quietly doing
     nothing at runtime, which is the failure this whole change exists to
