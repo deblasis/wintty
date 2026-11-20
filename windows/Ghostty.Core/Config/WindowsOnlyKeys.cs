@@ -65,6 +65,10 @@ public static class WindowsOnlyKeys
             "Id of the profile every new pane runs when you do not pick one. When set, it takes precedence over `command`; when unset, `command` (if set) runs in new panes instead."),
         new("profile-order",
             "Comma-separated list of profile ids defining the order shown in the tab picker and command palette."),
+        new("ssh-hosts-discovery",
+            "When true, every Host alias in your ~/.ssh/config and every named host in your ~/.ssh/known_hosts becomes a new-tab profile (id ssh-<host>) that runs ssh to it. Off by default; hashed, wildcard and IP-only entries are skipped. Saved connections (ssh.<id>.host and friends) are always listed."),
+        new("ssh-hosts-user",
+            "Login used for the ssh-hosts-discovery profiles (ssh <user>@<host>). Unset lets ssh choose: your ~/.ssh/config, else your Windows user name."),
         new("no-color-override",
             "How Wintty reacts to a NO_COLOR value inherited from the environment: notify (default -- honor NO_COLOR but show a one-time notice offering to enable color), strip (enable color by removing NO_COLOR from spawned shells), or keep (honor NO_COLOR silently)."),
         new("windows-single-instance",
@@ -154,6 +158,14 @@ public static class WindowsOnlyKeys
         var sep = key.IndexOf('.', Prefix.Length);
         return sep > Prefix.Length && sep < key.Length - 1;
     }
+
+    /// <summary>
+    /// Returns true when <paramref name="key"/> is a saved-connection key
+    /// of the shape <c>ssh.&lt;id&gt;.&lt;subkey&gt;</c>. Absorbed by the
+    /// diagnostic filter the same way profile blocks are.
+    /// </summary>
+    public static bool IsSshConnectionKey(string key)
+        => Ghostty.Core.Ssh.SshConnectionParser.IsConnectionKey(key);
 
     /// <summary>
     /// Returns true when <paramref name="key"/> is an internal-namespace
