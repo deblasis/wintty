@@ -10,8 +10,16 @@ namespace Ghostty.Panes;
 /// A held split-geometry transition: the layout-side capability the
 /// unified split choreography (a registered motion coordinator) drives.
 /// Motion-neutral on purpose - this file knows curves exist only as a
-/// [0, 1] progress the OWNER samples; it never names an easing family,
-/// a duration, or a policy itself.
+/// progress the OWNER samples; it never names an easing family, a
+/// duration, or an amplitude policy itself. The progress domain is
+/// geometry, not taste: 1 is the model's final ratio, and values ABOVE 1
+/// (the owner's own overshoot past the final boundary) are legal up to
+/// the ratio-derived bound <c>1 / (1 - ratio)</c> - the largest progress
+/// at which both star weights are still non-negative (the origin's cell
+/// is exactly zero at the bound; past it a NEGATIVE star weight
+/// degenerates the grid). The bound is computed from the model's own
+/// ratio; the authored amplitude that stays well inside it is the
+/// owner's business, never this file's.
 ///
 /// The contract, in one paragraph: a split's commit can be HELD at its
 /// start geometry (the origin pane whole in its pre-split rect, the
@@ -40,6 +48,7 @@ internal sealed class SplitGeometryTransition
     private readonly double _startedAtMs;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _boundTimer;
     private double _lastWritten = double.NaN;
+    private double _drivenRatio = double.NaN;
 
     /// <summary>The split this transition holds (the overlay's claim
     /// check: the hold must parent the born leaf it is claimed for).</summary>
@@ -91,20 +100,34 @@ internal sealed class SplitGeometryTransition
     {
         WriteWeights(1.0);
         _lastWritten = 1.0;
+        _drivenRatio = _split.Ratio;
         _boundTimer.Start();
     }
 
     /// <summary>
-    /// Drive the boundary to <paramref name="progress"/> in [0, 1]
-    /// along the hold's own axis (0 = the start geometry, 1 = the
-    /// model's final ratio): write the interpolated star weights and
-    /// settle the layout synchronously, so the drive's geometry is
-    /// measured (and presented) before the next frame. Answers false
-    /// when the transition is gone (settled, or its grid left the
-    /// tree) - the owner stands down, never drives into a dead hold.
-    /// A weight the owner did not write since the last drive (a divider
-    /// drag landed between frames) settles the transition: the drag
-    /// owns the boundary now.
+    /// Drive the boundary to <paramref name="progress"/> along the
+    /// hold's own axis (0 = the start geometry, 1 = the model's final
+    /// ratio; values above 1 - an overshoot past the final boundary,
+    /// the owner's own policy - are legal up to the ratio-derived bound
+    /// <c>1 / (1 - ratio)</c>, clamped there): write the interpolated
+    /// star weights and settle the layout synchronously, so the drive's
+    /// geometry is measured (and presented) before the next frame. The
+    /// upper clamp is pure geometry, not taste: at the bound the
+    /// origin's star weight reaches exactly zero (its cell collapsed -
+    /// legal), and any progress past it would write a NEGATIVE star
+    /// weight, which a WinUI Grid distributes as degenerate layout.
+    /// The owner's sampler is expected to stay far below the bound (a
+    /// few percent past 1); the clamp is the net that keeps a runaway
+    /// sampler from breaking the grid. Answers false when the
+    /// transition is gone (settled, or its grid left the tree) - the
+    /// owner stands down, never drives into a dead hold.
+    /// A divider drag that landed between drives settles the
+    /// transition: the drag owns the boundary now. Every product path
+    /// that moves a boundary under a hold writes the MODEL ratio first
+    /// and the weights second (the Splitter's pointer move, a keyboard
+    /// resize, an equalize), so the drag is detected on the model
+    /// ratio's own move - a weight-only check exempts exactly those
+    /// writers, because their weight is always the model's own.
     /// </summary>
     internal bool Drive(double progress)
     {
@@ -120,6 +143,12 @@ internal sealed class SplitGeometryTransition
             return false;
         }
 
+        if (ForeignModelRatio())
+        {
+            Settle("drag");
+            return false;
+        }
+
         if (ForeignWeight(grid))
         {
             Settle("drag");
@@ -132,9 +161,25 @@ internal sealed class SplitGeometryTransition
             return false;
         }
 
-        var weight = 1.0 + System.Math.Clamp(progress, 0.0, 1.0) * (_split.Ratio - 1.0);
+        // 1 / (1 - ratio) is finite for every model ratio the product's
+        // writers produce (the Splitter drag, the keyboard resize and the
+        // session restore each clamp to [0.1, 0.9], so the bound is in
+        // [1.11, 10] - Ratio itself carries no invariant). A degenerate
+        // ratio or a non-finite sample is outside the hold's domain: a NaN
+        // weight would disarm the foreign-weight belt and a non-positive
+        // clamp bound would throw on the rendering tick, so the hold
+        // settles to the model instead of writing either.
+        var maxProgress = 1.0 / (1.0 - _split.Ratio);
+        if (!double.IsFinite(progress) || !double.IsFinite(maxProgress) || maxProgress <= 1.0)
+        {
+            Settle("bound");
+            return false;
+        }
+
+        var weight = 1.0 + System.Math.Clamp(progress, 0.0, maxProgress) * (_split.Ratio - 1.0);
         WriteWeights(weight);
         _lastWritten = weight;
+        _drivenRatio = _split.Ratio;
         Drives++;
         _boundTimer.Stop();
         _boundTimer.Start();
@@ -166,9 +211,24 @@ internal sealed class SplitGeometryTransition
 
     private bool PastBound() => NowMs() - _startedAtMs > SettleBoundMs;
 
+    /// <summary>Whether the model ratio moved since this transition
+    /// last drove toward it: a divider drag or a keyboard resize
+    /// rewrites the model FIRST and re-applies the weights second
+    /// (Splitter.OnPointerMoved, ResizeSplit, EqualizeSplits), so the
+    /// move is visible on the ratio before anywhere else - and a
+    /// foreign ratio means a foreign hand owns the boundary: settle,
+    /// and let the settle write whatever the model now says.</summary>
+    private bool ForeignModelRatio()
+        => !double.IsNaN(_drivenRatio)
+            && System.Math.Abs(_split.Ratio - _drivenRatio) > 1e-4;
+
     /// <summary>Whether the grid's boundary weight is one this
-    /// transition did not write (and is not the model's own): someone
-    /// else - a divider drag - owns the boundary.</summary>
+    /// transition did not write: someone else owns the boundary. The
+    /// model-equal exemption this check used to carry exempted every
+    /// real writer (all of them write the model's own value - the
+    /// ForeignModelRatio check above catches those); what remains here
+    /// is the belt for a weight write with no model move behind it, an
+    /// in-place ratio re-apply that stomps the held grid's weights.</summary>
     private bool ForeignWeight(Grid grid)
     {
         var current = BoundaryWeightOf(grid);
@@ -177,8 +237,7 @@ internal sealed class SplitGeometryTransition
             return false;
         }
 
-        return System.Math.Abs(current - _lastWritten) > 1e-4
-            && System.Math.Abs(current - _split.Ratio) > 1e-4;
+        return System.Math.Abs(current - _lastWritten) > 1e-4;
     }
 
     private double BoundaryWeightOf(Grid grid)
@@ -318,13 +377,10 @@ internal sealed partial class PaneHost
 
     private static Grid? FindSplitGrid(FrameworkElement visual, SplitPane split)
     {
-        if (visual is Splitter splitter)
-        {
-            return ReferenceEquals(splitter.Split, split)
-                ? splitter.Parent as Grid
-                : null;
-        }
-
+        // The root of the walk is BuildVisual's answer (a terminal or a
+        // split Grid, never a bare Splitter), and a matching Splitter is
+        // answered by the loop below before it could recurse into one -
+        // so this needs no splitter case of its own.
         if (visual is not Grid grid)
         {
             return null;
