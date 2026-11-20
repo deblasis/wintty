@@ -62,6 +62,18 @@ embedded on other platforms even though the Windows build guards it out. OFL
 and MIT both require the copyright line specifically, so each of those files
 carries the holders, which the bare upstream templates do not.
 
+**Bundled themes.** `iterm2-color-schemes-LICENSE.txt` (MIT) covers the
+collection the themes under `share\ghostty\themes` come from, and says itself
+that each theme stays under its author's own licence.
+`iterm2-color-schemes-licenses.yml` is upstream's record of those per-theme
+licences and `iterm2-color-schemes-CREDITS.md` its list of authors. All three
+are staged from `vendor/iterm2-color-schemes`, where the themes are copied
+from, rather than kept here, so they cannot drift from the files they cover.
+Upstream lists most themes as `unknown` and has not finished checking the
+rest; the themes it marks `nonfree` are not shipped. Like
+`Ghostty-LICENSE.txt`, these three are upstream's files verbatim, so they
+carry no `Applies to:` line.
+
 ## What this does not cover
 
 Tier-specific dependencies added by the release repo's overlays — the Pro
