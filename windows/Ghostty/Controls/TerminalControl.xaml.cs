@@ -4016,7 +4016,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // panel, UIA, the text command menu) is an insertion the user did not
         // type at the prompt, so it goes through the product's paste policy:
         // isSafe, the confirmation dialog and the paste encoder. Composition
-        // text keeps ghostty_surface_text, which must pair with its key. An
+        // text is typed text and leaves as key presses below. An
         // ASCII-only insertion never takes this branch -- the TextChanged arm
         // waits for non-ASCII so ordinary typing is not committed per
         // keystroke -- and is delivered by the next key's commit instead,
@@ -4027,19 +4027,41 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             return;
         }
 
-        Span<byte> buf = stackalloc byte[4];
-        foreach (var ch in text)
+        // Committed text is typed text, so it goes out as a key press that
+        // carries it, the way GTK's im-commit does. ghostty_surface_text is
+        // the paste path when no key is pending, and none is for a commit:
+        // under bracketed paste (mode 2004) every syllable then left as a
+        // paste of its own, ESC[200~ 가 ESC[201~, where every other terminal
+        // sends the character. A program that handles pastes off its key
+        // path loses the syllable to the Space typed right behind it.
+        Span<byte> buf = stackalloc byte[5];
+        foreach (var rune in text.EnumerateRunes())
         {
             // A committed composition never contains a control character. One
-            // that does would become Enter (CR), or reach the pty's paste
-            // encoder as a line terminator, so drop it here.
-            if (ch < (char)0x20 || ch == (char)0x7f) continue;
-            if (!WmCharUtf8.TryEncode(ch, ref _pendingWmCharHigh, buf, out var len))
-                continue;
+            // that does would become Enter (CR), so drop it here.
+            if (rune.Value < 0x20 || rune.Value == 0x7f) continue;
+            // An unpaired surrogate enumerates as U+FFFD; it is not text.
+            if (rune.Value == System.Text.Rune.ReplacementChar.Value) continue;
+            var len = rune.EncodeToUtf8(buf);
+            buf[len] = 0;
             unsafe
             {
                 fixed (byte* p = buf)
-                    NativeMethods.SurfaceText(_surface, (IntPtr)p, (UIntPtr)len);
+                {
+                    var key = new GhosttyInputKey
+                    {
+                        Action = GhosttyInputAction.Press,
+                        Mods = GhosttyMods.None,
+                        ConsumedMods = GhosttyMods.None,
+                        // No physical key: the keys that composed this went
+                        // to the IME. Scancode 0 is the unidentified key.
+                        Keycode = 0,
+                        Text = (IntPtr)p,
+                        UnshiftedCodepoint = 0,
+                        Composing = 0,
+                    };
+                    NativeMethods.SurfaceKey(_surface, key);
+                }
             }
         }
     }
