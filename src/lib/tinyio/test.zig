@@ -676,13 +676,14 @@ test "deleteFile edge cases" {
     try testing.expectError(error.IsDir, dir.deleteFile(test_io, "subdir"));
 
     // Deleting a symlink removes the link, not its target. Creating one
-    // on Windows needs a privilege that plain users and CI lack.
+    // on Windows needs a privilege that plain users and CI lack; Zig 0.17
+    // reports its absence (PRIVILEGE_NOT_HELD) as PermissionDenied.
     try tmp_dir.dir.writeFile(testing.io, .{
         .sub_path = "target.txt",
         .data = "x",
     });
     tmp_dir.dir.symLink(testing.io, "target.txt", "link.txt", .{}) catch |err| switch (err) {
-        error.AccessDenied => if (comptime is_windows) return error.SkipZigTest else return err,
+        error.AccessDenied, error.PermissionDenied => if (comptime is_windows) return error.SkipZigTest else return err,
         else => return err,
     };
     try dir.deleteFile(test_io, "link.txt");
