@@ -73,7 +73,7 @@ public class ImeCompositionWiringTests
             Assert.Contains(vk, code);
 
         // Non-composition insertion goes through the paste policy; composition
-        // text must keep SurfaceText so it pairs with its key.
+        // text leaves as key presses (see the commit test below).
         Assert.Contains("SendImePaste", code);
         Assert.Contains("SurfacePasteText", code);
         // The wiring of the round-4 fixes: three cancel sites discard the text
@@ -91,6 +91,23 @@ public class ImeCompositionWiringTests
         var native = File.ReadAllText(Path.Combine(
             RepoRoot(), "windows", "Ghostty", "Interop", "NativeMethods.cs"));
         Assert.Contains("ghostty_surface_paste_text", native);
+    }
+
+    [Fact]
+    public void Committed_Composition_Text_Leaves_As_A_Key_Not_A_Paste()
+    {
+        // ghostty_surface_text is the paste path when no key is pending, so
+        // under bracketed paste every committed syllable left as a paste of
+        // its own. The commit has to be a key press that carries the text.
+        var code = ReadEmbedded("TerminalControl.xaml.cs");
+        var start = code.IndexOf("private void ForwardImeText(string text)", StringComparison.Ordinal);
+        var end = code.IndexOf("private void UpdateSurfacePreedit", StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start);
+        var body = code[start..end];
+        Assert.Contains("NativeMethods.SurfaceKey(_surface, key)", body);
+        Assert.Contains("Action = GhosttyInputAction.Press", body);
+        Assert.Contains("Composing = 0", body);
+        Assert.DoesNotContain("NativeMethods.SurfaceText(", body);
     }
 
     private static int Count(string haystack, string needle)
