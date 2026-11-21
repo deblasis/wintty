@@ -84,7 +84,7 @@ public sealed class ImeForwarder
     /// <summary>The display-only tail of the sink, or null when there is none.</summary>
     public string? Preedit { get; private set; }
 
-    /// <summary>Committed text, in order, ready for SurfaceText / the preview sink.</summary>
+    /// <summary>Committed text, in order, ready for the surface or the preview sink.</summary>
     public event Action<string>? ForwardedText;
 
     /// <summary>The preedit to display, or null to clear it.</summary>

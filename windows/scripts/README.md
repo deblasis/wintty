@@ -157,6 +157,21 @@ reload from the op's answer and later reloads from a change log, and it says
 nothing about the watcher path or a locked file. It launches its own instance
 on a temp config root and private state base, like `contrast-oracle.ps1`.
 
+## IME commit bytes
+
+`seam-ime-bytes.ps1` (suite name `ime-bytes`) is the byte-level gate for
+#1468 and its fix. A raw-VT echo program in the pane pushes one keyboard
+protocol (bracketed paste, kitty disambiguate, kitty event types) and
+hex-prints everything the pty delivers; the seam drives the real
+composition lifecycle — started/changed/ended, the settle timer, the
+commit — plus the real key and character halves. Two things must hold:
+committed composition characters arrive as plain UTF-8, never wrapped in
+a paste frame and never dropped (including when a textless key is held
+across the commit), and a non-ASCII character typed directly on a layout
+arrives alone under kitty disambiguate, with no phantom `CSI u` ahead of
+it. It synthesizes no OS input and asserts exact bytes, so a wrong exit
+cannot pass it.
+
 ## Not in the suite
 
 | script | why |

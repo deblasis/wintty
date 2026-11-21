@@ -254,6 +254,12 @@ function Add-WinttyHarnessConfigDefaults([AllowEmptyString()][string]$ConfigText
 function Get-WinttyInstances {
     return @(Get-Process Wintty -ErrorAction SilentlyContinue | ForEach-Object {
         $p = $_
+        # A process whose handle is still held by a teardown parent
+        # (a harness between scenarios, a crashed runner) answers HasExited
+        # but keeps its pid visible with no readable image; it is gone, not
+        # running, and treating it as an unidentifiable instance would
+        # wedge every later launch behind the coexistence guard.
+        if ($p.HasExited) { return }
         $path = try { $p.Path } catch { $null }
         $started = try { $p.StartTime } catch { $null }
         [pscustomobject]@{ Id = $p.Id; Path = $path; StartTime = $started }

@@ -250,6 +250,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // a composition, so ForwardImeText sends it through the paste path.
     private bool _imeTextIsPaste;
 
+    // True while the forwarder is committing text at a character event the
+    // box already applied (the non-ASCII arm of HandleCharacterReceived):
+    // that character's own KeyDown press is still pending in libghostty,
+    // waiting for its text, so the commit must go through ghostty_surface_text
+    // and attach to it rather than flush it textless as a key press would.
+    private bool _imeTextIsCharactersKey;
+
     // A chord the sink refused in PreviewKeyDown, waiting for the bubbling
     // KeyDown to forward it. Cleared by that KeyDown, or by the release when
     // no KeyDown followed.
@@ -2962,7 +2969,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
             // Never hand libghostty a text-less key while a tracked
             // composition is live: the apprt buffers it and the next
-            // SurfaceText attaches that text to it, so the user's commit would
+            // text it receives attaches to it, so the user's commit would
             // be paired with a key they did not type it for. Space/Enter are
             // delivered by the character path, which commits first; every other
             // key's character must be suppressed with it.
@@ -3338,7 +3345,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     _imeTextChangedCommitQueued = false;
-                    if (!_imeForwarder.Composing) CommitImeText();
+                    if (_imeForwarder.Composing) return;
+                    // This commit is the character a key press is still
+                    // waiting for: it must attach to that pending press, so
+                    // it takes the text exit, not the commit-as-key one.
+                    _imeTextIsCharactersKey = true;
+                    try { CommitImeText(); }
+                    finally { _imeTextIsCharactersKey = false; }
                 });
             }
             return;
@@ -3998,7 +4011,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // A preview surface's keyboard belongs to its fake session, so
         // committed IME text goes through the sink like any other
         // printable (same filtering as OnCharacterReceived), never to
-        // the sleeping placeholder child through SurfaceText.
+        // the sleeping placeholder child behind it.
         if (_isPreviewSurface)
         {
             if (PreviewInputSink is { } sink)
@@ -4027,10 +4040,28 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             return;
         }
 
+        // A character typed on the layout itself (the non-ASCII arm of
+        // HandleCharacterReceived): its KeyDown press is still pending in
+        // libghostty, and ghostty_surface_text is the call that attaches
+        // this text to that press. The key press below would instead flush
+        // the pending press textless -- under the kitty protocol that is a
+        // CSI u for a key the user never saw arrive, ahead of the text.
+        if (_imeTextIsCharactersKey)
+        {
+            var chars = Encoding.UTF8.GetBytes(text);
+            unsafe
+            {
+                fixed (byte* p = chars)
+                    NativeMethods.SurfaceText(_surface, (IntPtr)p, (UIntPtr)chars.Length);
+            }
+            return;
+        }
+
         // Committed text is typed text, so it goes out as a key press that
         // carries it, the way GTK's im-commit does. ghostty_surface_text is
-        // the paste path when no key is pending, and none is for a commit:
-        // under bracketed paste (mode 2004) every syllable then left as a
+        // the paste path when no key is pending, and no key is pending for
+        // a composition commit: the keys that composed it went to the IME.
+        // Under bracketed paste (mode 2004) every syllable then left as a
         // paste of its own, ESC[200~ 가 ESC[201~, where every other terminal
         // sends the character. A program that handles pastes off its key
         // path loses the syllable to the Space typed right behind it.

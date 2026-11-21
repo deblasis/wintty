@@ -98,7 +98,9 @@ public class ImeCompositionWiringTests
     {
         // ghostty_surface_text is the paste path when no key is pending, so
         // under bracketed paste every committed syllable left as a paste of
-        // its own. The commit has to be a key press that carries the text.
+        // its own. A composition commit has no pending key -- its keys went
+        // to the IME -- so it has to leave as a key press that carries the
+        // text.
         var code = ReadEmbedded("TerminalControl.xaml.cs");
         var start = code.IndexOf("private void ForwardImeText(string text)", StringComparison.Ordinal);
         var end = code.IndexOf("private void UpdateSurfacePreedit", StringComparison.Ordinal);
@@ -107,7 +109,21 @@ public class ImeCompositionWiringTests
         Assert.Contains("NativeMethods.SurfaceKey(_surface, key)", body);
         Assert.Contains("Action = GhosttyInputAction.Press", body);
         Assert.Contains("Composing = 0", body);
-        Assert.DoesNotContain("NativeMethods.SurfaceText(", body);
+
+        // The two text exits ahead of it, in order: an insertion outside a
+        // composition takes the paste policy, and a character typed on a
+        // layout attaches to its own still-pending key press (a keyless
+        // press would flush that key textless and emit a phantom CSI u
+        // under the kitty protocol before the character).
+        var pasteGate = body.IndexOf("if (_imeTextIsPaste)", StringComparison.Ordinal);
+        var charsGate = body.IndexOf("if (_imeTextIsCharactersKey)", StringComparison.Ordinal);
+        var keyExit = body.IndexOf("NativeMethods.SurfaceKey(_surface, key)", StringComparison.Ordinal);
+        Assert.True(pasteGate >= 0 && charsGate > pasteGate && keyExit > charsGate);
+        Assert.Contains("NativeMethods.SurfaceText(_surface, (IntPtr)p, (UIntPtr)chars.Length)", body);
+
+        // The character exit is armed only around the character event's
+        // own commit.
+        Assert.Equal(1, Count(code, "_imeTextIsCharactersKey = true;"));
     }
 
     private static int Count(string haystack, string needle)
