@@ -28,6 +28,10 @@ Makefile text eol=lf
 # Text data files - always LF (embedded in Zig, parsed with \n split)
 *.txt text eol=lf
 
+# Vendored theme files have no extension and are read as text; keep them
+# byte for byte as upstream ships them.
+vendor/iterm2-color-schemes/ghostty/** text eol=lf
+
 # Windows resource files - preserve as-is (native Windows tooling)
 *.rc -text
 *.manifest -text
