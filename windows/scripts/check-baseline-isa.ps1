@@ -1,6 +1,11 @@
-# Fails when the release DLL carries EVEX/AVX-512 in code that is not a
-# runtime-dispatched MSVC CRT string routine. Those routines (memcpy/memset/
-# memmove) select AVX-512 at runtime and are safe on an AVX2-only CPU.
+# Fails when the release DLL carries EVEX/AVX-512 in code that is not
+# runtime-dispatched. Allowlisted families, all of which pick AVX-512 per
+# machine at run time and are safe on an AVX2-only CPU:
+#   - MSVC CRT string routines (memcpy/memset/memmove)
+#   - simdutf's icelake kernels (get_active_implementation; re-enabled
+#     354d59dcd, ~4k sites in a baseline ReleaseFast DLL)
+#   - MSVC STL vector_algorithms.cpp (CPUID-dispatched __std_* entry
+#     points and their _Minmax_traits_8_avx/_sse helpers)
 param(
     [string]$Dll = 'zig-out/lib/ghostty.dll',
     [string]$Pdb = 'zig-out/lib/ghostty.pdb'
@@ -44,22 +49,33 @@ try {
     }
 
     $bad = @()
-    foreach ($hit in $hits) {
-        if ($hit.Line -match '^\s*([0-9a-fA-F]+):') {
-            $addr = '0x' + $Matches[1]
-            $symbol = (& $symbolizer.Source --obj=$Dll --functions=short $addr 2>$null | Select-Object -First 1)
-            if (-not $symbol -or $symbol -notmatch '^(memcpy|memset|memmove)_avx512') {
-                $bad += "$addr $symbol"
+    $addrs = foreach ($hit in $hits) {
+        if ($hit.Line -match '^\s*([0-9a-fA-F]+):') { '0x' + $Matches[1] }
+        else { $bad += $hit.Line }
+    }
+    if ($addrs) {
+        # One symbolizer process for every site (a spawn per site was the
+        # old minutes-long runtime). Each address yields a record of
+        # inline frames, one "name" and one "file:line" per frame,
+        # terminated by a blank line. A site is allowlisted when ANY frame
+        # matches: an inlined simdutf icelake kernel can report an outer
+        # plain-c name, and the STL minmax dispatch table mixes its
+        # AVX512 body into the shared _sse helper.
+        $out = $addrs | & $symbolizer.Source --obj=$Dll --functions=short 2>$null
+        $records = (@($out) -join "`n") -split "`n`n"
+        for ($i = 0; $i -lt $addrs.Count; $i++) {
+            $names = @($records[$i] -split "`n" | Where-Object { $_ })
+            if (-not $names -or -not ($names | Where-Object { $_ -match
+                    '^(memcpy|memset|memmove)_avx512|^simdutf::icelake::|__std_|_Minmax_traits_8_(avx|sse)::' })) {
+                $bad += "$($addrs[$i]) $($names[0])"
             }
-        } else {
-            $bad += $hit.Line
         }
     }
 
     if ($bad.Count -gt 0) {
-        throw ("EVEX/AVX-512 outside runtime-dispatched CRT routines:`n  " + ($bad -join "`n  "))
+        throw ("EVEX/AVX-512 outside runtime-dispatched routines:`n  " + ($bad -join "`n  "))
     }
-    Write-Host "baseline ISA check: $($hits.Count) EVEX site(s), all runtime-dispatched MSVC CRT"
+    Write-Host "baseline ISA check: $($hits.Count) EVEX site(s), all runtime-dispatched (CRT, simdutf icelake, STL vector_algorithms)"
 }
 finally {
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
