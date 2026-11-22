@@ -3930,9 +3930,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     /// <summary>
     /// Commits text the sink admitted outside a composition through the
-    /// product's paste path. Composition text must use SurfaceText so it pairs
-    /// with its key; this text has no key, and the paste policy is what
-    /// decides whether it is safe to deliver.
+    /// product's paste path. Composition text leaves as a key press
+    /// carrying the text (see ForwardImeText); this text has no key, and
+    /// the paste policy is what decides whether it is safe to deliver.
     /// </summary>
     private void CommitImeTextAsPaste()
     {

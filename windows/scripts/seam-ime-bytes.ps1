@@ -262,11 +262,14 @@ $ef = [string][char]0x0444        # ef
 
 # --- expectations -------------------------------------------------------
 # Korean/Japanese: the plain UTF-8 of each character, never a paste frame
-# and never dropped. U+20000 (f0 a0 80 80) is pinned as a single
-# supplementary-plane character: no surrogate splitting into the stream.
-# Layout: the character alone -- no phantom CSI u ahead of it. The ASCII
-# control uses the press+release pair with the character attached, the
-# legacy behavior of the plain WM_CHAR path.
+# and never dropped.
+# Layout: the character alone -- no phantom CSI u ahead of it.
+#
+# A supplementary-plane commit (U+20000) is deliberately NOT pinned here:
+# the pane child's console input conversion mangles it to two U+FFFD on
+# both the fixed and the unfixed tree, so this harness cannot observe it.
+# What it can observe is pinned; plane-2 bytes are the contributor's to
+# verify with a live IME.
 
 $ko2004 = @('ec b3 87', 'ec 97 90 20', 'e6 97 a5 e6 9c ac e8 aa 9e', 'ea b0 80 eb 82 98')
 $koLegacy = @('ec b3 87', 'ec 97 90 20', 'e6 97 a5 e6 9c ac e8 aa 9e', 'ea b0 80 eb 82 98')
