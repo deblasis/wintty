@@ -12767,6 +12767,99 @@ test "parse hook: invalid command" {
     try testing.expect(cfg.command == null);
 }
 
+test "config command keeps a quoted argument after the program" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // deblasis/wintty#1255: the value's first and last bytes are quotes
+    // belonging to two different tokens. The line iterator keeps both,
+    // so the argv the pane spawns holds the program path and the script
+    // path each as one argument.
+    const data = "command = \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" " ++
+        "-NoProfile -File \"C:\\path\\script.ps1\"\n";
+    var reader: std.Io.Reader = .fixed(data);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadReader(
+        alloc,
+        &reader,
+        "/home/ghostty/.config/ghostty/config.ghostty",
+    );
+    try testing.expect(cfg._diagnostics.empty());
+
+    const command = cfg.command.?;
+    var it = try command.argIterator(alloc);
+    defer it.deinit();
+    try testing.expectEqualStrings("C:\\Program Files\\PowerShell\\7\\pwsh.exe", it.next().?);
+    try testing.expectEqualStrings("-NoProfile", it.next().?);
+    try testing.expectEqualStrings("-File", it.next().?);
+    try testing.expectEqualStrings("C:\\path\\script.ps1", it.next().?);
+    try testing.expect(it.next() == null);
+
+    // An unquoted command is stored verbatim as a shell string.
+    var reader2: std.Io.Reader = .fixed(
+        "command = pwsh.exe -NoProfile -File C:\\path\\script.ps1\n",
+    );
+    var cfg2 = try Config.default(alloc);
+    defer cfg2.deinit();
+    try cfg2.loadReader(
+        alloc,
+        &reader2,
+        "/home/ghostty/.config/ghostty/config.ghostty",
+    );
+    try testing.expect(cfg2._diagnostics.empty());
+    try testing.expect(cfg2.command.? == .shell);
+    try testing.expectEqualStrings(
+        "pwsh.exe -NoProfile -File C:\\path\\script.ps1",
+        cfg2.command.?.shell,
+    );
+}
+
+test "config selection-word-chars documented example loses its outer quotes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var reader: std.Io.Reader = .fixed(
+        "selection-word-chars = \"\\t '\\\"│`|:,()[]{}<>$\"\n",
+    );
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadReader(
+        alloc,
+        &reader,
+        "/home/ghostty/.config/ghostty/config.ghostty",
+    );
+    try testing.expect(cfg._diagnostics.empty());
+
+    // One `"` from the decoded `\"` and none from the wrapping pair.
+    const expected = [_]u21{
+        0,
+        '\t',
+        ' ',
+        '\'',
+        '"',
+        '│',
+        '`',
+        '|',
+        ':',
+        ',',
+        '(',
+        ')',
+        '[',
+        ']',
+        '{',
+        '}',
+        '<',
+        '>',
+        '$',
+    };
+    try testing.expectEqualSlices(
+        u21,
+        &expected,
+        cfg.@"selection-word-chars".codepoints,
+    );
+}
+
 test "parse e: command only" {
     const testing = std.testing;
     var cfg = try Config.default(testing.allocator);
