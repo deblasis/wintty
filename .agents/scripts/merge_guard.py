@@ -189,7 +189,26 @@ def load_pr(number, gh):
     """The PR as the guard sees it: identity, mergeability, the target
     branch, the head sha the record must be keyed to, and (for an already
     merged PR) the squash sha the recovery modes file against."""
-    return gh_json(["pr", "view", str(number), "--repo", REPO, "--json", PR_FIELDS], gh)
+    pr = gh_json(["pr", "view", str(number), "--repo", REPO, "--json", PR_FIELDS], gh)
+
+    # `gh pr view --json files` returns only the first 100 files, so a
+    # large PR's list arrives truncated and the signoff-stale scope check
+    # compares the record's full paths against a cut-off set (#1466: 885
+    # files, 100 reported, a matching record refused). Fetch every page of
+    # the files endpoint and replace the truncated list, so both sides of
+    # the comparison hold the same set whatever the PR's size.
+    files = []
+    page = 1
+    while True:
+        batch = gh_json([
+            "api", f"repos/{REPO}/pulls/{number}/files?per_page=100&page={page}",
+        ], gh)
+        files.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    pr["files"] = [{"path": f["filename"]} for f in files]
+    return pr
 
 
 def load_record(common, head):
@@ -874,6 +893,11 @@ class FakeGh:
             return Out(0, json.dumps({"mergeCommit": {"oid": self.squash}}))
         if j.startswith("pr view"):
             return Out(0, json.dumps(self.pr))
+        # The paginated files fetch load_pr makes. One page: the self-test
+        # PRs are small, and load_pr's loop stops on the short page.
+        if j.startswith("api") and "/pulls/" in j and "/files" in j:
+            return Out(0, json.dumps(
+                [{"filename": f["path"]} for f in self.pr.get("files", [])]))
         if j.startswith("pr merge"):
             return Out(0, "squashed\n") if self.merge_rc == 0 \
                 else Out(1, "", "merge refused by gh\n")
