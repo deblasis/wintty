@@ -233,6 +233,27 @@ pub fn windowsKeyOwnText(keycode: u32, text: []const u8) bool {
     return text[0] == '[' and keycode == 0x1A;
 }
 
+/// Returns `consumed` plus the mods the KeyDown carried to produce a
+/// printable character. Windows reports no consumed-modifier set, so the
+/// apprt derives one when text arrives. Without shift in it the kitty
+/// encoder sends CSI u for unambiguous text, which applications decode as
+/// the unshifted key (#1253).
+///
+/// Ctrl and alt are consumed as a pair when both are held: on Windows that
+/// chord is the AltGr translation (synthesized as LCtrl+RAlt), so a
+/// character it produced proves both were used (#1256). Report-all
+/// encodings still see the pair because they report all_mods, not
+/// effectiveMods. Super never translates text and is never added.
+pub fn windowsConsumedModsForText(mods: key.Mods, consumed: key.Mods) key.Mods {
+    var out = consumed;
+    if (mods.shift) out.shift = true;
+    if (mods.ctrl and mods.alt) {
+        out.ctrl = true;
+        out.alt = true;
+    }
+    return out;
+}
+
 /// Windows delivers the C0 byte itself as WM_CHAR text for plain
 /// Ctrl+letter (0x04 for the key that types "d"), unlike GTK/macOS which
 /// deliver the printable letter. Recover the letter so encoding follows
@@ -1888,6 +1909,101 @@ test "kitty: consumed shift sends the text without report-all" {
         },
     });
     try testing.expectEqualStrings("\x1b[59:58;2u", writer2.buffered());
+}
+
+test "kitty: AltGr ctrl+alt text key sends the text without report-all" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    // German layout: AltGr+q types '@'. Windows reports the physical
+    // AltGr as left ctrl plus right alt, and delivers the character as
+    // the key's text. The text is the layout's translation, so the
+    // ctrl+alt pair was consumed producing it, exactly like the shift
+    // derivation above: under flags carrying everything but report-all
+    // the text is unambiguous and must go out as text. A CSI u carrying
+    // the unshifted base 'q' is decoded back as Ctrl+Alt+q by
+    // applications that ignore the alternate fields (#1256).
+    // The apprt supplies that consumed set through
+    // windowsConsumedModsForText, which has its own test.
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try kitty(&writer, .{
+        .key = .key_q,
+        .mods = .{
+            .ctrl = true,
+            .alt = true,
+            .sides = .{ .ctrl = .left, .alt = .right },
+        },
+        .consumed_mods = .{ .ctrl = true, .alt = true },
+        .utf8 = "@",
+        .unshifted_codepoint = 'q',
+    }, .{
+        .kitty_flags = .{
+            .disambiguate = true,
+            .report_events = true,
+            .report_alternates = true,
+        },
+    });
+    try testing.expectEqualStrings("@", writer.buffered());
+
+    // Without the consumption report the same event stays an encoding:
+    // the encoder consumes exactly what the caller reports, never more.
+    var buf1b: [128]u8 = undefined;
+    var writer1b: std.Io.Writer = .fixed(&buf1b);
+    try kitty(&writer1b, .{
+        .key = .key_q,
+        .mods = .{
+            .ctrl = true,
+            .alt = true,
+            .sides = .{ .ctrl = .left, .alt = .right },
+        },
+        .utf8 = "@",
+        .unshifted_codepoint = 'q',
+    }, .{
+        .kitty_flags = .{
+            .disambiguate = true,
+            .report_events = true,
+            .report_alternates = true,
+        },
+    });
+    try testing.expectEqualStrings("\x1b[113;7u", writer1b.buffered());
+
+    // The same key under report-all stays an encoding, by request:
+    // reported mods come from all_mods, so AltGr's ctrl+alt half stays
+    // visible in encodings that ask for it.
+    var buf2: [128]u8 = undefined;
+    var writer2: std.Io.Writer = .fixed(&buf2);
+    try kitty(&writer2, .{
+        .key = .key_q,
+        .mods = .{ .ctrl = true, .alt = true },
+        .utf8 = "@",
+        .unshifted_codepoint = 'q',
+    }, .{
+        .kitty_flags = .{
+            .disambiguate = true,
+            .report_events = true,
+            .report_alternates = true,
+            .report_all = true,
+        },
+    });
+    try testing.expectEqualStrings("\x1b[113;7u", writer2.buffered());
+
+    // Ctrl+alt with no text has no translation to send and no proof any
+    // modifier was consumed, so the CSI u encoding stays.
+    var buf3: [128]u8 = undefined;
+    var writer3: std.Io.Writer = .fixed(&buf3);
+    try kitty(&writer3, .{
+        .key = .key_q,
+        .mods = .{ .ctrl = true, .alt = true },
+        .utf8 = "",
+        .unshifted_codepoint = 'q',
+    }, .{
+        .kitty_flags = .{
+            .disambiguate = true,
+            .report_events = true,
+            .report_alternates = true,
+        },
+    });
+    try testing.expectEqualStrings("\x1b[113;7u", writer3.buffered());
 }
 
 test "kitty: report alternates with ru layout" {
@@ -3904,4 +4020,29 @@ test "windows: a dispatched key drops only its own character" {
     try testing.expect(!windowsKeyOwnText(0x1A, "[]"));
     try testing.expect(!windowsKeyOwnText(0x27, "["));
     try testing.expect(!windowsKeyOwnText(0x01, "["));
+}
+
+test "windows: text consumes shift, and ctrl with alt only as a pair" {
+    const none: key.Mods = .{};
+    try testing.expectEqual(
+        key.Mods{ .shift = true },
+        windowsConsumedModsForText(.{ .shift = true }, none),
+    );
+    try testing.expectEqual(
+        key.Mods{ .ctrl = true, .alt = true },
+        windowsConsumedModsForText(.{ .ctrl = true, .alt = true }, none),
+    );
+    try testing.expectEqual(
+        key.Mods{ .ctrl = true, .alt = true, .shift = true },
+        windowsConsumedModsForText(.{ .ctrl = true, .alt = true, .shift = true }, none),
+    );
+    try testing.expectEqual(none, windowsConsumedModsForText(.{ .ctrl = true }, none));
+    try testing.expectEqual(none, windowsConsumedModsForText(.{ .alt = true }, none));
+    try testing.expectEqual(
+        key.Mods{ .ctrl = true, .alt = true },
+        windowsConsumedModsForText(.{ .ctrl = true, .alt = true, .super = true }, none),
+    );
+
+    const incoming = windowsConsumedModsForText(.{}, .{ .caps_lock = true });
+    try testing.expect(incoming.caps_lock);
 }
