@@ -164,6 +164,9 @@ public static class Program
             {
                 FileName = selfPath,
                 UseShellExecute = false,
+                // CREATE_NO_WINDOW: without it a console-less parent gives
+                // the self-respawn a fresh visible console.
+                CreateNoWindow = true,
                 RedirectStandardError = true,
             };
             psi.ArgumentList.Add(probe);

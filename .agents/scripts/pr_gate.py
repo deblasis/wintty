@@ -298,7 +298,7 @@ def git_common_dir(cwd):
         out = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
             cwd=cwd or None, capture_output=True, text=True, timeout=15,
-        )
+            creationflags=0x08000000 if sys.platform == "win32" else 0,        )
         if out.returncode == 0:
             path = out.stdout.strip()
             if not os.path.isabs(path):
@@ -341,7 +341,7 @@ def fetch_pr(number, repo, cwd=None):
         ["gh", "pr", "view", str(number), "--repo", repo, "--json",
          "number,title,body,additions,deletions,files,headRefOid"],
         cwd=cwd or None, capture_output=True, text=True, timeout=60,
-    )
+        creationflags=0x08000000 if sys.platform == "win32" else 0,    )
     if out.returncode != 0:
         raise RuntimeError(f"gh pr view failed: {out.stderr.strip()}")
     return json.loads(out.stdout)
@@ -357,7 +357,7 @@ def git_run(args, cwd=None):
     the way doctor.py injects resolvers. Takes git's own argument list (no
     leading "git"), the same shape merge_guard's runner and fakes speak."""
     return subprocess.run(["git"] + args, cwd=cwd or None, capture_output=True,
-                          text=True, timeout=15)
+    creationflags=0x08000000 if sys.platform == "win32" else 0,                          text=True, timeout=15)
 
 
 def windows_head(cwd, run=None):
@@ -521,7 +521,7 @@ def hook_main():
             out = subprocess.run(
                 ["gh", "pr", "view", "--json", "number", "-q", ".number"],
                 cwd=cwd, capture_output=True, text=True, timeout=60,
-            )
+                creationflags=0x08000000 if sys.platform == "win32" else 0,            )
             number = int(out.stdout.strip())
         except Exception:
             deny("pr-gate: could not resolve which PR this merge targets; pass the PR number explicitly.")

@@ -4,23 +4,27 @@ A file for [guiding coding agents](https://agents.md/).
 
 ## Commands
 
-- **Build:** `zig build`
+The build and test recipes take the heavy-job lane themselves on Windows
+(AGENTS.md, "Heavy job lanes"): call them BARE. A raw `zig build`/`dotnet
+build` is never the way here.
+
+- **Build:** `just build-dll` (`just build-win` for the app shell)
   - If you're on macOS and don't need to build the macOS app, use
     `-Demit-macos-app=false` to skip building the app bundle and speed up
     compilation.
-- **Test (Zig):** `zig build test`
+- **Test (Zig):** `just test`
   - Prefer to run targeted tests with `-Dtest-filter` because the full
-    test suite is slow to run.
-- **Test filter (Zig)**: `zig build test -Dtest-filter=<test name>`
+    test suite is slow to run: `just test-full -Dtest-filter=<test name>`
+- **Test filter (Zig)**: `just test-full -Dtest-filter=<test name>`
 - **Formatting (Zig)**: `zig fmt .`
 - **Formatting (Swift)**: `swiftlint lint --strict --fix`
 - **Formatting (other)**: `prettier -w .`
 
 ## libghostty-vt
 
-- Build: `zig build -Demit-lib-vt`
-- Build WASM: `zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall`
-- Test: `zig build test-lib-vt -Dtest-filter=<filter>`
+- Build: `just build-dll` (the lane recipe)
+- Build WASM: `incoda run --queue wintty-build --reason "libghostty-vt wasm" -- zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall`
+- Test: `just test-lib-vt` (`-Dtest-filter=<filter>` goes through the recipe's ARGS)
   - Prefer this when the change is in a libghostty-vt file
 - Test on FreeBSD (in a QEMU VM): see `.github/scripts/freebsd-vm/vm.sh help`
 - All C enums in `include/ghostty/vt/` must have a `_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE`
@@ -114,13 +118,15 @@ incoda watch                        # live overview; enter opens a lane, k kills
 
 Who takes which lane:
 
-- You wrap the single-class recipes yourself: `incoda run --queue
-  wintty-build --reason "..." -- just test`, and the same for every
-  `test-*` recipe, `test-win`, `build-dll`, `build-dll-release`,
-  `signoff`, `signoff-full` and `signoff-fresh`. They stay lane-free
-  inside because they are cross-platform, and the same recipe has to run
-  unwrapped on a Linux or macOS host. `just signoff` itself always goes in
-  the lane, whatever the plan says.
+- The heavy recipes take the lane THEMSELVES on Windows: `just test`, every
+  `test-*` recipe, `test-win`, `build-dll`, `build-dll-release`, `build-win`,
+  `build-win-release`, `test-examples`, `release-gate-check`, `signoff` and
+  `default` queue on `wintty-build` through the justfile's `_lane` wrapper
+  and refuse to run without incoda. Call them BARE. An outer
+  `incoda run --queue wintty-build -- just test` still works: the nested
+  wrapper passes through on the held key. The `[unix]` bodies are unchanged,
+  so a Linux or macOS host runs the plain recipes. `just signoff` itself
+  always goes in the lane, whatever the plan says.
 - `just signoff-docs` runs bare. It is for a change whose scope selects no
   leg (`just signoff-plan` says "(none needed)"), such as a README or docs
   edit: it records the same green `signoff` would, and when the plan
@@ -189,3 +195,36 @@ The rules that matter:
   checkout: it is machine-level, and setting it in one place splits every
   lane in two while both halves look healthy.
 
+## No stray windows
+
+A terminal window that pops up, steals focus and disappears is a defect:
+its output reaches nobody (the session that caused it cannot read it, and
+the errors land on the user's desktop instead). Every spawn that can reach
+the desktop must suppress its console window AND keep its output.
+
+- Heavy work goes through its recipe (the section above). The recipe takes
+  the lane, the lane gives the job an invisible pseudo-console, and the
+  output lands in the session's pipe plus incoda's job capture
+  (`incoda watch`/`attach` stream it).
+- Every other spawn site carries a window-suppression flag AND captured
+  output: `Start-Process -WindowStyle Hidden` plus redirects,
+  `ProcessStartInfo` with `UseShellExecute=$false` and
+  `CreateNoWindow=$true`, python `creationflags=CREATE_NO_WINDOW`. Redirects
+  alone do NOT prevent the window; the flag alone loses the output.
+- `.agents/scripts/no_stray_windows.py` enforces this in `gates-selftest`:
+  it scans the agent-reachable scripts and fails naming each site and the
+  exact fix. The allowlist (`windows/scripts/spawn-allowlist.txt`) exempts
+  one intentional mechanism per exact site (app-under-test launches,
+  run-win's user window) and entries expire.
+- If a job reports itself blocked, answer it through the lane:
+  `incoda answer --queue K --pid N --text ...`. Watch it with
+  `incoda watch` or `incoda attach`. Do not rerun it bare to "get it
+  interactive".
+- Setting `INCODA_HELD` by hand is bypassing the lane: the run gets no lane
+  diagnostics, its capture is not attributed, and its result is not
+  evidence. The lane guard in the justfile is a guardrail, not a boundary.
+- Job captures persist (16 MiB x 10 per lane). Never print secrets in test
+  output.
+- Raw commands typed outside any recipe (`zig build`, `dotnet build`) have
+  no in-repo guard: the recipe IS the way. If a popup still traces to one,
+  say so rather than normalizing it.

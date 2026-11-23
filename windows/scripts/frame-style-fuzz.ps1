@@ -909,6 +909,7 @@ palette = 15=#f2f4fa
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError = $true
             $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
             $p = [System.Diagnostics.Process]::Start($psi)
             $out = $p.StandardOutput.ReadToEnd()
             [void]$p.StandardError.ReadToEnd()
@@ -1080,6 +1081,8 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
         # quoting of paths with spaces is the .NET side's to do: Start-Process
         # joins the list with spaces and passes them through unquoted.
         $psi = [System.Diagnostics.ProcessStartInfo]::new($Exe)
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
         $psi.ArgumentList.Add("--config-file=$configPath")
         $psi.WorkingDirectory = Split-Path $Exe
         $proc = [System.Diagnostics.Process]::Start($psi)

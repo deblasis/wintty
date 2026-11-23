@@ -64,6 +64,10 @@ function Start-WindowCapture {
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $exe
+    # The capture helper is console-subsystem: without CreateNoWindow a
+    # console-less parent gives it a fresh visible console.
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
     foreach ($a in @('--hwnd', $Hwnd, '--ms', $DurationMs, '--max-frames', $MaxFrames, '--tag', $Tag)) {
         $psi.ArgumentList.Add([string]$a)
     }

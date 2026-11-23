@@ -13,7 +13,16 @@
 # recipes still need git-bash on Windows; the build/run path does not.
 set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
 
-# Default: run tests and build the DLL
+# Default: run tests and build the DLL. On Windows both phases share one
+# lane ticket (the legs nest); the recipe stays first so a bare `just`
+# keeps meaning the same thing.
+[windows]
+default: (_lane "default" "_default-in-lane" "117m")
+
+[private]
+_default-in-lane: (_require-lane "default") _test-in-lane _build-dll-in-lane
+
+[unix]
 default: test build-dll
 
 # === Testing ===
@@ -37,7 +46,17 @@ TEST_VERSION := "0.0.0-test"
 # run step's cache manifest, so a test run is not carried from an earlier
 # invocation; the test binary itself is still cached.
 
-# Run all Zig tests
+# Run all Zig tests. On Windows the recipe takes the build lane itself and
+# its legs nest inside one ticket; on Unix it is the plain ladder.
+[windows]
+test: (_lane "test" "_test-in-lane" "117m")
+
+# The ladder inside one ticket: each leg recipe nests (its own wrapper
+# passes through on the held key).
+[private]
+_test-in-lane: (_require-lane "test") test-configure test-lib-vt test-full test-pkg test-reachability
+
+[unix]
 test: test-configure test-lib-vt test-full test-pkg test-reachability
 
 # With every test step on the fixed version, nothing in the ladder runs
@@ -49,7 +68,15 @@ test: test-configure test-lib-vt test-full test-pkg test-reachability
 # cheapest thing that forces build() to run to completion.
 #
 # Prove build.zig configures with git version detection.
+[windows]
+test-configure: (_lane "test-configure" "_test-configure-in-lane" "39m")
+
+[unix]
 test-configure:
+    zig build --list-steps -Dapp-runtime=none
+
+[private]
+_test-configure-in-lane: (_require-lane "test-configure")
     zig build --list-steps -Dapp-runtime=none
 
 # The quotes around the version argument are load-bearing on Windows:
@@ -61,11 +88,27 @@ test-configure:
 # quotes are still there.
 #
 # Test libghostty-vt (fastest feedback loop)
+[windows]
+test-lib-vt: (_lane "test-lib-vt" "_test-lib-vt-in-lane" "39m")
+
+[unix]
 test-lib-vt:
     zig build test-lib-vt "-Dversion-string={{TEST_VERSION}}" --summary all
 
+[private]
+_test-lib-vt-in-lane: (_require-lane "test-lib-vt")
+    zig build test-lib-vt "-Dversion-string={{TEST_VERSION}}" --summary all
+
 # Full Zig test suite
+[windows]
+test-full: (_lane "test-full" "_test-full-in-lane" "39m")
+
+[unix]
 test-full:
+    zig build test -Dapp-runtime=none "-Dversion-string={{TEST_VERSION}}" --summary all
+
+[private]
+_test-full-in-lane: (_require-lane "test-full")
     zig build test -Dapp-runtime=none "-Dversion-string={{TEST_VERSION}}" --summary all
 
 # Tests that live in the vendored packages rather than in src/.
@@ -79,7 +122,15 @@ test-full:
 # The list mirrors that job's matrix, which is only wuffs. Eight other packages
 # under pkg/ carry test blocks; why CI covers just this one is that job's
 # business, and duplicating a different list here would leave two to maintain.
+[windows]
+test-pkg: (_lane "test-pkg" "_test-pkg-in-lane" "39m")
+
+[unix]
 test-pkg:
+    cd pkg/wuffs && zig build test --summary all
+
+[private]
+_test-pkg-in-lane: (_require-lane "test-pkg")
     cd pkg/wuffs && zig build test --summary all
 
 # Zig collects `test` blocks from the files a test binary's own test and
@@ -100,8 +151,17 @@ test-pkg:
 # without a build is wired into `gates-selftest`.
 #
 # Prove that no file's test blocks are dead.
+[windows]
+test-reachability: (_lane "test-reachability" "_test-reachability-in-lane" "39m")
+
+[unix]
 test-reachability:
     python .agents/scripts/test_reachability.py --version-string {{TEST_VERSION}}
+
+[private]
+_test-reachability-in-lane: (_require-lane "test-reachability")
+    python .agents/scripts/test_reachability.py --version-string {{TEST_VERSION}}
+
 
 # Cross-platform sanity check (on demand)
 # Uses the cross-platform-test Claude Code skill for native SSH-based testing.
@@ -109,14 +169,28 @@ test-cross:
     @echo "Use the cross-platform-test Claude Code skill for native multi-platform testing."
     @echo "It runs zig build test natively on Windows, Linux, and Mac via SSH."
 
-# Build and test all examples (mirrors CI: clean zig-out, build zig + cmake examples)
+# Build and test all examples (mirrors CI: clean zig-out, build zig + cmake
+# examples). Heavy: on Windows it takes the build lane itself; the bash
+# bodies run unchanged inside it.
+[windows]
+test-examples: (_lane "test-examples" "_test-examples-in-lane" "39m")
+
+[unix]
 test-examples: _test-examples-zig _test-examples-cmake
+    @echo "All examples done."
+
+[private]
+_test-examples-in-lane: (_require-lane "test-examples") _test-examples-zig _test-examples-cmake
     @echo "All examples done."
 
 # Zig examples (zig build in each example dir)
 _test-examples-zig:
     #!/usr/bin/env bash
     set -e
+    if [ -z "${INCODA_HELD:-}" ] && [ -z "${WINTTY_CI_NO_LANES:-}" ]; then
+        echo "this runs under the heavy job lane: just test-examples" >&2
+        exit 1
+    fi
     rm -rf zig-out .zig-cache
     failed=""
     for dir in example/*/; do
@@ -134,6 +208,10 @@ _test-examples-zig:
 _test-examples-cmake:
     #!/usr/bin/env bash
     set -e
+    if [ -z "${INCODA_HELD:-}" ] && [ -z "${WINTTY_CI_NO_LANES:-}" ]; then
+        echo "this runs under the heavy job lane: just test-examples" >&2
+        exit 1
+    fi
     failed=""
     # Convert MSYS /c/... paths to C:\... for PowerShell/CMake
     if [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || -n "$WINDIR" ]]; then
@@ -166,7 +244,15 @@ _test-examples-cmake:
 # === Building ===
 
 # Build libghostty DLL
+[windows]
+build-dll: (_lane "build-dll" "_build-dll-in-lane" "39m")
+
+[unix]
 build-dll:
+    zig build -Dapp-runtime=none
+
+[private]
+_build-dll-in-lane: (_require-lane "build-dll")
     zig build -Dapp-runtime=none
 
 # Build libghostty DLL optimized. Much slower to compile; the only build
@@ -174,7 +260,15 @@ build-dll:
 # slower at runtime. -Dcpu=baseline is also the Windows default
 # (src/build/Config.zig); spelled out because distributed DLLs must not
 # inherit the build host CPU (for example AVX-512).
+[windows]
+build-dll-release: (_lane "build-dll-release" "_build-dll-release-in-lane" "39m")
+
+[unix]
 build-dll-release:
+    zig build -Dapp-runtime=none -Doptimize=ReleaseFast -Dcpu=baseline
+
+[private]
+_build-dll-release-in-lane: (_require-lane "build-dll-release")
     zig build -Dapp-runtime=none -Doptimize=ReleaseFast -Dcpu=baseline
 
 # === WinUI 3 app shell ===
@@ -186,7 +280,10 @@ build-dll-release:
 # cannot move under a fresh restore. A PackageReference edit is refused
 # until `dotnet restore` regenerates the lock and it is committed.
 [windows]
-build-win:
+build-win: (_lane "build-win" "_build-win-in-lane" "39m")
+
+[private]
+_build-win-in-lane: (_require-lane "build-win")
     dotnet build windows/Ghostty.sln /p:Platform=x64 /p:RestoreLockedMode=true
 
 # Recipe body has no shebang so it runs under the platform shell selected by
@@ -194,10 +291,16 @@ build-win:
 # bash shebang to `exec` the .exe, which forced git-bash on Windows for no
 # reason - launching a Windows .exe works fine from pwsh.
 
-# Build the WinUI 3 app shell in Release. Locked restore, as build-win.
+# Build the WinUI 3 app shell in Release. Locked restore, as build-win. The
+# DLL dep runs inside the same ticket on Windows (one lane hold per
+# invocation, not two).
 [windows]
-build-win-release: build-dll-release
+build-win-release: (_lane "build-win-release" "_build-win-release-in-lane" "39m")
+
+[private]
+_build-win-release-in-lane: (_require-lane "build-win-release") _build-dll-release-in-lane
     dotnet build windows/Ghostty.sln /p:Platform=x64 /p:Configuration=Release /p:RestoreLockedMode=true
+
 
 # Prove the release DLL only carries runtime-dispatched MSVC CRT AVX-512,
 # never a ghostty-owned unconditional path. Requires LLVM tools.
@@ -252,7 +355,10 @@ run-win-release: (_build-in-lane "run-win-release" "build-dll-release" "build-wi
 # rather than the one project, so a new project cannot join the tree and be
 # missed the same way.
 [windows]
-test-win:
+test-win: (_lane "test-win" "_test-win-in-lane" "117m")
+
+[private]
+_test-win-in-lane: (_require-lane "test-win")
     # Lock drift gate (#1085), and it comes first so the leg never reports
     # green off a graph the committed locks do not describe. An UNLOCKED
     # restore is exactly the operation that floated the transitive Windows
@@ -349,6 +455,47 @@ lanes:
 _build-in-lane reason +recipes:
     $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; & $inc run --queue wintty-build --reason "{{reason}}: build" -- just {{recipes}}; exit ($LASTEXITCODE ?? 1)
 
+
+# The self-laning plumbing every heavy recipe above uses (AGENTS.md, "Heavy
+# job lanes" and "No stray windows"). REASON is a fixed recipe name, PRIVATE
+# is the recipe that holds the real body, BUDGET is incoda's queue wait.
+#
+# ONE line: just runs each body line in a separate pwsh, so a variable
+# assigned on one line is empty on the next. The trailing exit keeps
+# incoda's exit band intact (121 queue timeout, 124 killed through the
+# lane) instead of collapsing them to 1.
+#
+# Nested runs pass through natively: inside an incoda that already holds
+# wintty-build the run joins the parent's hold instead of queueing, which
+# is what makes the umbrella recipes one ticket rather than five.
+[unix]
+_lane reason private budget *args:
+    @echo "the heavy job lanes are Windows-only here: run this on Windows (just {{private}})"; exit 1
+
+[windows]
+_lane reason private budget *args:
+    $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; & $inc run --queue wintty-build --reason "{{reason}}" --wait {{budget}} -- just {{private}} {{args}}; exit ($LASTEXITCODE ?? 1)
+
+# The lane guard: the FIRST dependency of every _<name>-in-lane body, so it
+# runs before any real work (just runs dependencies before body lines, and a
+# failing dependency stops the rest). Strict mode counts only KEY=TICKET
+# entries: a bare key proves nothing live. This is a guardrail against
+# accidental unlaned runs, not a boundary - a process can forge the variable
+# (AGENTS.md, "No stray windows").
+# On unix the guard names the public recipe the same way, so a caller of
+# a windows private from a linux host fails with a message, not a parse
+# error over a platform-gated recipe.
+[unix]
+_require-lane name key="wintty-build":
+    @echo "this runs under the heavy job lane (Windows): just {{name}}"; exit 1
+
+[windows]
+_require-lane name key="wintty-build": _require-incoda
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-held.ps1"); $held = @(Get-IncodaHeldKeys -Strict); if ($held -cnotcontains '{{key}}') { Write-Host "this runs under the heavy job lane. Run: just {{name}}" -ForegroundColor Red; exit 1 }; exit 0
+
+[windows]
+_require-incoda:
+    $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; exit 0
 # Launch two instances a few hundred ms apart and watch for a launch splash
 # owned by the one that should be forwarding itself to the other. Opens real
 # windows, so it needs an interactive desktop and no Wintty already running
@@ -360,7 +507,7 @@ splash-race args="": _no-wintty-from (_build-in-lane "splash-race" "build-win")
 
 # The desktop phase of `just splash-race`, inside the lane it took.
 [windows]
-_splash-race-in-lane args="":
+_splash-race-in-lane args="": (_require-lane "splash-race" "wintty-desktop")
     pwsh -NoProfile -File windows/scripts/splash-single-instance-race.ps1 {{args}}; exit ($LASTEXITCODE ?? 1)
 
 # Checked before the builds, not after: dotnet build cannot overwrite a
@@ -400,7 +547,7 @@ search-fuzz args="": _no-wintty-from (_build-in-lane "search-fuzz" "build-dll" "
 
 # The desktop phase of `just search-fuzz`, inside the lane it took.
 [windows]
-_search-fuzz-in-lane args="":
+_search-fuzz-in-lane args="": (_require-lane "search-fuzz" "wintty-desktop")
     pwsh -NoProfile -File windows/scripts/search-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/search-fuzz {{args}}; exit ($LASTEXITCODE ?? 1)
@@ -424,7 +571,7 @@ shader-notice-fuzz args="": _no-wintty-from (_build-in-lane "shader-notice-fuzz"
 
 # The desktop phase of `just shader-notice-fuzz`, inside the lane it took.
 [windows]
-_shader-notice-fuzz-in-lane args="":
+_shader-notice-fuzz-in-lane args="": (_require-lane "shader-notice-fuzz" "wintty-desktop")
     pwsh -NoProfile -File windows/scripts/shader-notice-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/shader-notice-fuzz {{args}}; exit ($LASTEXITCODE ?? 1)
@@ -470,7 +617,7 @@ _seam-theme-resolution-in-lane args="":
 
 # The desktop phase of `just frame-style-fuzz`, inside the lane it took.
 [windows]
-_frame-style-fuzz-in-lane args="":
+_frame-style-fuzz-in-lane args="": (_require-lane "frame-style-fuzz" "wintty-desktop")
     pwsh -NoProfile -File windows/scripts/frame-style-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/frame-style-fuzz {{args}}; exit ($LASTEXITCODE ?? 1)
@@ -512,7 +659,7 @@ theme-matrix args="": _no-wintty-from (_build-in-lane "theme matrix (#937)" "bui
 
 # The desktop phase of `just theme-matrix`, inside the lane it took.
 [windows]
-_theme-matrix-in-lane args="":
+_theme-matrix-in-lane args="": (_require-lane "theme-matrix" "wintty-desktop")
     pwsh -NoProfile -File windows/scripts/theme-matrix.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/theme-matrix {{args}}; exit ($LASTEXITCODE ?? 1)
@@ -559,7 +706,7 @@ fuzz args="": _no-wintty-from (_build-in-lane "fuzz" "build-dll" "build-win")
 
 # The desktop phase of `just fuzz`, inside the lane it took.
 [windows]
-_fuzz-in-lane args="":
+_fuzz-in-lane args="": (_require-lane "fuzz" "wintty-desktop")
     pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe {{args}}; exit ($LASTEXITCODE ?? 1)
 
@@ -741,8 +888,17 @@ gallery-lint:
 # have a green, observed by an earlier run in any worktree of this repo, is
 # carried into the record instead of run; the line says which commit that
 # green was observed at. `just leg-cache plan` shows the digests.
+[windows]
+signoff: (_lane "signoff" "_signoff-in-lane" "117m")
+
+[unix]
 signoff:
     python .agents/scripts/signoff.py
+
+# The real ladder, inside the one ticket the wrapper took.
+[private]
+_signoff-in-lane *args: (_require-lane "signoff")
+    python .agents/scripts/signoff.py {{args}}
 
 # Show which legs a signoff would run for the current branch, and why,
 # and which of them would be carried from an earlier green.
@@ -770,6 +926,13 @@ signoff-docs:
 # origin/windows (where the deferred merges live) and no carried green
 # was asserted rather than observed. For a full ladder that must execute
 # everything, see signoff-fresh.
+#
+# On Windows the ladder takes the build lane as ONE ticket (its legs nest
+# inside it), through the same guard every heavy recipe uses.
+[windows]
+signoff-full: (_lane "signoff-full" "_signoff-in-lane" "117m" "--full")
+
+[unix]
 signoff-full:
     python .agents/scripts/signoff.py --full
 
@@ -778,6 +941,10 @@ signoff-full:
 # a leg you suspect is flaky, or a green you no longer believe. Add
 # --full through the script for the fresh full ladder:
 #   python .agents/scripts/signoff.py --full --no-cache
+[windows]
+signoff-fresh: (_lane "signoff-fresh" "_signoff-in-lane" "117m" "--no-cache")
+
+[unix]
 signoff-fresh:
     python .agents/scripts/signoff.py --no-cache
 
@@ -794,7 +961,7 @@ leg-cache *args:
 # PRs behind one later ladder: the motivation is stored, the debt is capped,
 # and only a green signoff-full clears it.
 signoff-defer reason:
-    python .agents/scripts/signoff.py --defer {{quote(reason)}}
+    python .agents/scripts/signoff.py --defer '{{replace(reason, "'", "''")}}'
 
 # What is currently merged on credit.
 signoff-debt:
@@ -886,9 +1053,15 @@ gates-selftest: gitversion-selftest
     python .agents/scripts/leg_cache.py --self-test
     pwsh -NoProfile -File .agents/scripts/nightly_fuzz.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/nightly_control.ps1 -SelfTest
+    pwsh -NoProfile -File .agents/scripts/incoda-held.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/lanes.ps1 -SelfTest
+    python .agents/scripts/no_stray_windows.py --self-test
+    python .agents/scripts/no_stray_windows.py
 
 # Prove the shipping-build gate refuses a leak in a real Release evaluation (#929)
 [windows]
-release-gate-check:
+release-gate-check: (_lane "release-gate-check" "_release-gate-check-in-lane" "117m")
+
+[private]
+_release-gate-check-in-lane: (_require-lane "release-gate-check")
     pwsh -NoProfile -File .agents/scripts/release_gate_check.ps1

@@ -82,7 +82,8 @@ def _just_blob(rev):
     differently from a newline."""
     try:
         p = subprocess.run(["git", "-C", REPO_ROOT, "show", f"{rev}:justfile"],
-                           capture_output=True, timeout=leg_cache.GIT_TIMEOUT)
+                           capture_output=True, timeout=leg_cache.GIT_TIMEOUT,
+                           creationflags=0x08000000 if sys.platform == "win32" else 0)
     except (subprocess.TimeoutExpired, OSError):
         return None
     return p.stdout if p.returncode == 0 else None
@@ -357,6 +358,9 @@ def justfile_legs(base):
         new_recipes = new_sem.get("recipes") or {}
         for name in set(old_recipes) | set(new_recipes):
             if old_recipes.get(name) != new_recipes.get(name):
+                # Unknown or unlisted recipes fail closed: they can reach any
+                # leg (the lane plumbing especially), and an empty set here
+                # once let a justfile-only edit carry a stale green.
                 legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
     old_regions, old_suspicious = _variant_regions(old_blob.decode("utf-8", "surrogateescape"))
     new_regions, new_suspicious = _variant_regions(new_blob.decode("utf-8", "surrogateescape"))
@@ -513,7 +517,7 @@ def post_github_status(record):
     try:
         remote = subprocess.run(["git", "remote", "get-url", "origin"],
                                 cwd=REPO_ROOT, text=True,
-                                capture_output=True, timeout=10).stdout
+                                creationflags=0x08000000 if sys.platform == "win32" else 0,                                capture_output=True, timeout=10).stdout
         if "deblasis/wintty" not in remote:
             return False
         legs = sorted(record["steps"])
@@ -534,7 +538,7 @@ def post_github_status(record):
              "-f", f"state={state}",
              "-f", "context=signoff/ladder",
              "-f", f"description={desc[:140]}"],
-            cwd=REPO_ROOT, text=True, capture_output=True, timeout=20)
+             creationflags=0x08000000 if sys.platform == "win32" else 0,            cwd=REPO_ROOT, text=True, capture_output=True, timeout=20)
         if p.returncode != 0:
             print(f"signoff: GitHub status not posted (signoff unaffected): "
                   f"{p.stderr.strip()[:160]}")
@@ -681,7 +685,7 @@ def run_legs(legs, plans, ctx, runner):
 
 def _run_command(cmd):
     try:
-        return subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt")).returncode
+        return subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt"), creationflags=0x08000000 if sys.platform == "win32" else 0).returncode
     except FileNotFoundError as e:
         print(f"signoff: could not run {' '.join(cmd)}: {e}")
         return 127
