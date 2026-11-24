@@ -1632,10 +1632,17 @@ pub const LineIterator = struct {
             const value = value: {
                 var value = std.mem.trim(u8, entry[idx + 1 ..], whitespace);
 
-                // Detect a quoted string.
+                // Strip only a value that is one quoted token. Quotes do
+                // not nest, so an unescaped interior quote ends the token
+                // opened at value[0]. When the first and last quotes
+                // belong to different tokens, stripping them as one pair
+                // removes the opening quote of one token and the closing
+                // quote of another, and every later tokenizer splits both
+                // at their spaces. An escaped `\"` does not end a token.
                 if (value.len >= 2 and
                     value[0] == '"' and
-                    value[value.len - 1] == '"')
+                    value[value.len - 1] == '"' and
+                    !hasUnescapedQuote(value[1 .. value.len - 1]))
                 {
                     // Trim quotes since our CLI args processor expects
                     // quotes to already be gone.
@@ -1658,6 +1665,25 @@ pub const LineIterator = struct {
         // of our buffer so that we can trick the CLI parser to treat it
         // as CLI args.
         return self.entry[0 .. entry.len + 2];
+    }
+
+    /// Reports whether `interior` holds a `"` not preceded by an escaping
+    /// backslash. Keys such as `input` and `selection-word-chars` decode
+    /// Zig escapes from the stripped value, so `\"` is part of the token.
+    /// A backslash escapes the byte after it, so `\\"` ends the token.
+    /// A lone backslash at the end of `interior` escapes nothing, because
+    /// the closing quote of the value still closes the token, so a quoted
+    /// directory such as `"C:\dir\"` is stripped.
+    fn hasUnescapedQuote(interior: []const u8) bool {
+        var i: usize = 0;
+        while (i < interior.len) : (i += 1) {
+            switch (interior[i]) {
+                '\\' => i += 1,
+                '"' => return true,
+                else => {},
+            }
+        }
+        return false;
     }
 
     /// Returns a location for a diagnostic message.
@@ -1739,6 +1765,109 @@ test "LineIterator" {
     try testing.expectEqualStrings("--F=value ", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "LineIterator quote strip keeps interior quoted tokens" {
+    const testing = std.testing;
+
+    // A command whose program and last argument are each quoted, as in
+    // deblasis/wintty#1255. The first and last bytes are quotes from
+    // different tokens; stripping them as if they were one pair
+    // corrupts both tokens, and every downstream tokenizer then splits
+    // them at their spaces.
+    const data = "command = \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" " ++
+        "-NoProfile -File \"C:\\path\\script.ps1\"\n";
+    var reader: std.Io.Reader = .fixed(data);
+    var iter: LineIterator = .init(&reader);
+    try testing.expectEqualStrings(
+        "--command=\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" " ++
+            "-NoProfile -File \"C:\\path\\script.ps1\"",
+        iter.next().?,
+    );
+    try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "LineIterator strips one pair wrapping the whole value" {
+    const testing = std.testing;
+
+    // A value that is one quoted token loses its outer quotes.
+    var reader: std.Io.Reader = .fixed(
+        "command = \"C:\\Program Files\\pwsh.exe\"\n",
+    );
+    var iter: LineIterator = .init(&reader);
+    try testing.expectEqualStrings(
+        "--command=C:\\Program Files\\pwsh.exe",
+        iter.next().?,
+    );
+    try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "LineIterator strips the pair around an escaped interior quote" {
+    const testing = std.testing;
+
+    // selection-word-chars decodes Zig escapes from the value. An
+    // escaped `\"` stays inside the one quoted token, so the outer pair
+    // is stripped.
+    var reader: std.Io.Reader = .fixed(
+        "selection-word-chars = \"\\t '\\\"│`|:,()[]{}<>$\"\n",
+    );
+    var iter: LineIterator = .init(&reader);
+    try testing.expectEqualStrings(
+        "--selection-word-chars=\\t '\\\"│`|:,()[]{}<>$",
+        iter.next().?,
+    );
+    try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "LineIterator strips the pair around input with escaped quotes" {
+    const testing = std.testing;
+    var reader: std.Io.Reader = .fixed("input = \"say \\\"hi\\\"\"\n");
+    var iter: LineIterator = .init(&reader);
+    try testing.expectEqualStrings("--input=say \\\"hi\\\"", iter.next().?);
+    try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "LineIterator quote strip table" {
+    const testing = std.testing;
+
+    // Rows without an unescaped interior quote match upstream's strip.
+    const cases = [_]struct { line: []const u8, want: []const u8 }{
+        .{ .line = "x = \"\"", .want = "--x=" },
+        .{ .line = "x = \"", .want = "--x=\"" },
+        .{ .line = "x = \"\"\"", .want = "--x=\"\"\"" },
+        .{ .line = "title = a \"b\" c", .want = "--title=a \"b\" c" },
+        .{
+            .line = "command = \"C:\\Program Files\\x.exe\" -a",
+            .want = "--command=\"C:\\Program Files\\x.exe\" -a",
+        },
+        .{
+            .line = "command = \"pwsh -Command \\\"echo hi\\\"\"",
+            .want = "--command=pwsh -Command \\\"echo hi\\\"",
+        },
+        .{
+            .line = "keybind = \"ctrl+a=text:\\\"hi\\\"\"",
+            .want = "--keybind=ctrl+a=text:\\\"hi\\\"",
+        },
+        // The backslash before this quote is itself escaped, so the
+        // quote ends the first token: the outer pair must survive.
+        .{ .line = "x = \"a\\\\\" b\"", .want = "--x=\"a\\\\\" b\"" },
+        // A trailing backslash escapes nothing, so this closing quote
+        // still closes the token and the pair is stripped.
+        .{ .line = "x = \"C:\\dir\\\"", .want = "--x=C:\\dir\\" },
+        .{
+            .line = "command = \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" " ++
+                "-NoProfile -File \"C:\\path\\script.ps1\"",
+            .want = "--command=\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" " ++
+                "-NoProfile -File \"C:\\path\\script.ps1\"",
+        },
+    };
+
+    for (cases) |c| {
+        var reader: std.Io.Reader = .fixed(c.line);
+        var iter: LineIterator = .init(&reader);
+        try testing.expectEqualStrings(c.want, iter.next().?);
+        try testing.expectEqual(@as(?[]const u8, null), iter.next());
+    }
 }
 
 test "LineIterator comment run larger than reader buffer" {
