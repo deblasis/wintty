@@ -1782,8 +1782,21 @@ test "deinit refusal fires in a real run" {
 
     const exe = try std.process.executablePathAlloc(io, alloc);
     defer alloc.free(exe);
+    // The Nix dev shell starts test binaries through the dynamic linker
+    // (Config.addLoaderArgs), so on Linux "this executable" can be the
+    // linker, and re-running it with a shard flag cannot start the test
+    // binary. Re-running it as the loader would also need the loader's
+    // own arguments; there is nothing to observe without them.
+    if (comptime builtin.os.tag == .linux) {
+        if (std.mem.indexOf(u8, std.fs.path.basename(exe), ".so") != null) return error.SkipZigTest;
+    }
     const shard = try alloc.print("--shard={d}/{d}", .{ self_index, builtin.test_functions.len });
     defer alloc.free(shard);
+    // The runner prints "<i>/<n> <name>..." before it runs a test when
+    // stderr is not a terminal, and the child's is a pipe. Seeing this
+    // line means the child reached the probe body.
+    const header = try alloc.print("1/1 {s}...", .{builtin.test_functions[self_index].name});
+    defer alloc.free(header);
 
     var env = try global.environMap();
     defer env.deinit();
@@ -1856,29 +1869,44 @@ test "deinit refusal fires in a real run" {
     else
         try child.wait(io);
 
-    // The refusal text and a nonzero exit are both required, and a miss
-    // on either goes through the same report. A child whose gate stopped
-    // firing runs the probe to its end and exits 0 with nothing on
-    // stderr; that has to say so too.
+    const reached = std.mem.indexOf(u8, stderr_data.items, header) != null;
     const refused = std.mem.indexOf(u8, stderr_data.items, "Thread.deinit while the thread is running") != null;
     const exited_zero = switch (term) {
         .exited => |code| code == 0,
         else => false,
     };
-    if (!killed and refused and !exited_zero) return;
+    const tail_max = 8 * 1024;
+    const tail = stderr_data.items[stderr_data.items.len -| tail_max..];
 
-    // Say which way it went, and show what the child wrote: a watchdog
-    // kill is the machine running out of time and says nothing about
-    // Thread.deinit, while a child that ended without the refusal means
-    // the gate did not fire.
-    const why = if (killed)
+    // The refusal is the observation this test exists to make, so it is
+    // checked before anything about how the child ended. The panic prints
+    // it first and then loads debug info for a trace, which can be slow
+    // on a loaded machine; a kill during the trace does not undo it.
+    // That path never sees the exit code, so the nonzero-exit assertion
+    // is not made there.
+    if (refused and killed) {
+        std.log.warn(
+            "probe child: refusal seen; child exceeded the {d} s budget while printing its trace, so its exit code was not observed",
+            .{probe_deadline_s},
+        );
+        return;
+    }
+    if (refused and !exited_zero) return;
+
+    // Say which way it went, and show what the child wrote. A kill or a
+    // child that never reached the probe says nothing about
+    // Thread.deinit; only a child that ran the probe and did not refuse
+    // means the gate did not fire.
+    const why = if (killed and !reached)
+        std.fmt.comptimePrint("killed by the {d} s watchdog before it started the probe (a startup hang, not evidence about Thread.deinit)", .{probe_deadline_s})
+    else if (killed)
         std.fmt.comptimePrint("killed by the {d} s watchdog before it reached a verdict (a timeout, not evidence about Thread.deinit)", .{probe_deadline_s})
+    else if (!reached)
+        "did not reach the probe (startup failure, not evidence about Thread.deinit)"
     else if (!refused)
         "exited without the refusal (the gate did not fire)"
     else
-        "printed the refusal but exited 0";
-    const tail_max = 8 * 1024;
-    const tail = stderr_data.items[stderr_data.items.len -| tail_max..];
+        "printed the refusal but exited 0 (the gate did not fire)";
     std.log.err(
         "probe child {s}: term={any}; child stderr is {d} bytes, tail:\n{s}",
         .{ why, term, stderr_data.items.len, tail },
