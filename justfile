@@ -474,7 +474,7 @@ _lane reason private budget *args:
 
 [windows]
 _lane reason private budget *args:
-    $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; & $inc run --queue wintty-build --reason "{{reason}}" --wait {{budget}} -- just {{private}} {{args}}; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-held.ps1"); $held = @(Get-IncodaHeldKeys -Strict); if ($held -ccontains 'wintty-build') { & just {{private}} {{args}}; exit ($LASTEXITCODE ?? 1) }; $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; & $inc run --pty=false --queue wintty-build --reason "{{reason}}" --wait {{budget}} -- just {{private}} {{args}}; exit ($LASTEXITCODE ?? 1)
 
 # The lane guard: the FIRST dependency of every _<name>-in-lane body, so it
 # runs before any real work (just runs dependencies before body lines, and a

@@ -203,9 +203,12 @@ the errors land on the user's desktop instead). Every spawn that can reach
 the desktop must suppress its console window AND keep its output.
 
 - Heavy work goes through its recipe (the section above). The recipe takes
-  the lane, the lane gives the job an invisible pseudo-console, and the
-  output lands in the session's pipe plus incoda's job capture
-  (`incoda watch`/`attach` stream it).
+  the lane, and the nested `incoda run` in `_lane` passes `--pty=false`, so
+  the job writes to the console it was given: a terminal, or the lane's own
+  capture when the parent already holds one. A second pseudo-console at that
+  depth swallows the job's screen instead: a signoff run that way kept its
+  leg verdicts and lost every leg's output (11.7 MB of log against 7.2 KB),
+  which is a red leg nobody can read.
 - Every other spawn site carries a window-suppression flag AND captured
   output: `Start-Process -WindowStyle Hidden` plus redirects,
   `ProcessStartInfo` with `UseShellExecute=$false` and
