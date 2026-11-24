@@ -1796,10 +1796,12 @@ test "deinit refusal fires in a real run" {
     const prefix = try alloc.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
     defer alloc.free(prefix);
 
-    // The child run can cost a minute on a cold cache (it builds this
-    // suite with a filter that selects only the probe test above); the
-    // panic itself is the expected outcome, so failure looks like a
-    // clean nonzero exit carrying the refusal message.
+    // The child run costs 1 to 3 minutes on a quiet machine (measured:
+    // about 70 s warm, 120 s with a cold local cache, 190 s with every
+    // cache cold); it builds this suite with a filter that selects only
+    // the probe test above. The panic itself is the expected outcome, so
+    // failure looks like a clean nonzero exit carrying the refusal
+    // message, or a watchdog kill that carries no verdict at all.
     var child = try std.process.spawn(io, .{
         .argv = &.{
             "zig",                                "build",
@@ -1824,6 +1826,7 @@ test "deinit refusal fires in a real run" {
     // tells this frame to skip `wait` (kill's cleanup reaps the child;
     // waiting again would trip Child.wait's live-id assert), while the
     // kill's pipe cleanup is what releases the reader above.
+    const probe_deadline_s = 600;
     var child_done = std.atomic.Value(bool).init(false);
     var child_killed = std.atomic.Value(bool).init(false);
     const Watchdog = struct {
@@ -1834,7 +1837,7 @@ test "deinit refusal fires in a real run" {
 
         fn run(self: *@This()) void {
             var waited_ms: u64 = 0;
-            while (waited_ms < 600 * std.time.ms_per_s) {
+            while (waited_ms < probe_deadline_s * std.time.ms_per_s) {
                 if (self.done.load(.acquire)) return;
                 std.Io.sleep(self.io, .fromMilliseconds(250), .awake) catch {};
                 waited_ms += 250;
@@ -1861,7 +1864,8 @@ test "deinit refusal fires in a real run" {
     var stderr_data: std.ArrayList(u8) = .empty;
     defer stderr_data.deinit(alloc);
     try rd.interface.appendRemaining(alloc, &stderr_data, .unlimited);
-    const term: std.process.Child.Term = if (child_killed.load(.acquire))
+    const killed = child_killed.load(.acquire);
+    const term: std.process.Child.Term = if (killed)
         .{ .unknown = 0 }
     else
         try child.wait(io);
@@ -1870,10 +1874,26 @@ test "deinit refusal fires in a real run" {
         .exited => |code| try testing.expect(code != 0),
         else => {},
     }
-    if (std.mem.indexOf(u8, stderr_data.items, "Thread.deinit while the thread is running") == null) {
-        std.log.err("probe child never refused: term={any} cmd='zig build test -Dtest-filter=deinit refusal probe'", .{term});
-        return error.TestUnexpectedResult;
+    if (std.mem.indexOf(u8, stderr_data.items, "Thread.deinit while the thread is running") != null) return;
+
+    // No refusal. Say which of the two ways that happened, and show what
+    // the child wrote: a watchdog kill is the machine running out of time
+    // and says nothing about Thread.deinit, while a child that exited
+    // without the refusal means the gate did not fire.
+    const tail_max = 8 * 1024;
+    const tail = stderr_data.items[stderr_data.items.len -| tail_max..];
+    if (killed) {
+        std.log.err(
+            "probe child killed by the {d} s watchdog before it reached a verdict (a timeout, not evidence about Thread.deinit); child stderr is {d} bytes, tail:\n{s}",
+            .{ probe_deadline_s, stderr_data.items.len, tail },
+        );
+    } else {
+        std.log.err(
+            "probe child exited without the refusal (the gate did not fire): term={any}; child stderr is {d} bytes, tail:\n{s}",
+            .{ term, stderr_data.items.len, tail },
+        );
     }
+    return error.TestUnexpectedResult;
 }
 
 // The safety net exists to bound a lost wakeup notify (#1036), and its
