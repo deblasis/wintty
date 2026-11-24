@@ -41,6 +41,28 @@ public class ProfileRegistryTests
             $"the registry never reached version {version} (stuck at {registry.Version})");
     }
 
+    /// <summary>
+    /// Wait until <paramref name="count"/> items have been collected.
+    /// </summary>
+    /// <remarks>
+    /// The same reasoning as <see cref="WaitForVersion"/>, one step further on.
+    /// The registry bumps its version and THEN dispatches ProfilesChanged, so
+    /// a test that waits for the version and then asserts on the collected
+    /// events reads the space between those two statements: they are adjacent
+    /// but preemptible, and under a loaded pool the assert lands in that space.
+    /// That is how the second-event test below failed in full-suite runs and
+    /// passed in isolation. Wait for the event being asserted on.
+    /// </remarks>
+    private static async Task WaitForCount<T>(List<T> items, int count)
+    {
+        var deadline = Environment.TickCount64 + 60_000;
+        while (items.Count < count && Environment.TickCount64 < deadline)
+            await Task.Delay(5);
+        Assert.True(
+            items.Count >= count,
+            $"expected at least {count} item(s), saw {items.Count}");
+    }
+
     // Discovery delegate returning an empty list synchronously. Later
     // tests use a TaskCompletionSource to control completion timing.
     private static Func<bool, CancellationToken, Task<IReadOnlyList<DiscoveredProfile>>> EmptyDiscovery()
@@ -122,6 +144,7 @@ public class ProfileRegistryTests
         // Give the continuation a chance to run.
         await Task.Yield();
         await WaitForVersion(registry, 2);
+        await WaitForCount(events, 1);
 
         Assert.Equal(2L, registry.Version);
         Assert.Equal(2, registry.Profiles.Count);
