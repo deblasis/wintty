@@ -684,8 +684,14 @@ def run_legs(legs, plans, ctx, runner):
 
 
 def _run_command(cmd):
+    # No CREATE_NO_WINDOW here, unlike the capturing calls: this one streams to
+    # the console it was given, and the flag discards an inherited stdout when
+    # the parent's is a pipe (measured: shell=True with 0x08000000 printed
+    # nothing, the same call without it printed). The lane gives the job its
+    # console; a second, windowless one at this depth is where a red leg's
+    # output went. The allowlist records this site as streams-to-parent.
     try:
-        return subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt"), creationflags=0x08000000 if sys.platform == "win32" else 0).returncode
+        return subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt")).returncode
     except FileNotFoundError as e:
         print(f"signoff: could not run {' '.join(cmd)}: {e}")
         return 127

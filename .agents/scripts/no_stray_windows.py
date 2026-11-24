@@ -337,8 +337,17 @@ def scan_py(rel: str, text: str):
         name = _call_name(node)
         target = name.split(".")[-1]
         if name.startswith("subprocess.") and target in {"run", "Popen", "call", "check_output", "check_call"}:
+            seg = ast.get_source_segment(text, node) or ""
+            # A call that streams to the console it was given has no window of
+            # its own, so CREATE_NO_WINDOW is not what keeps it quiet: measured
+            # on Windows, shell=True with 0x08000000 discarded the child's
+            # inherited stdout when the parent's was a pipe, and the same call
+            # without it printed. The allowlist has to name such a site
+            # streams-to-parent, so this stays fail-closed.
+            streaming = target != "check_output" and not _captures_output(node, text)
             if not any(k.arg == "creationflags" for k in node.keywords):
-                findings.append(Finding(rel, node.lineno, f"{name} without creationflags", "pass creationflags=CREATE_NO_WINDOW on Windows"))
+                if not (streaming and _exempt(rel, seg, ("streams-to-parent",))):
+                    findings.append(Finding(rel, node.lineno, f"{name} without creationflags", "pass creationflags=CREATE_NO_WINDOW on Windows"))
             else:
                 src = ""
                 for k in node.keywords:

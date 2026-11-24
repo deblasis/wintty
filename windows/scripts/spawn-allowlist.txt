@@ -39,6 +39,9 @@ windows/scripts/clipboard-fuzz.ps1 | & dotnet test $project | lane-exempt | wt-f
 
 # streams-to-parent: the child writes to the lane's inherited console on
 # purpose (signoff progress, build logs); incoda's ConPTY captures it, and
-# off-lane runs are exactly what the lane gate refuses
-.agents/scripts/signoff.py | subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt"), creationflags=0x08000000 if sys.platform == "win32" else 0) | streams-to-parent | wt-focus | 2027-06-30
-.agents/scripts/test_reachability.py | subprocess.run(cmd, cwd=repo, creationflags=0x08000000 if sys.platform == "win32" else 0) | streams-to-parent | wt-focus | 2027-06-30
+# off-lane runs are exactly what the lane gate refuses. These sites carry no
+# creationflags: on Windows, CREATE_NO_WINDOW discards an inherited stdout
+# when the parent's is a pipe (measured), so the flag is what made a red
+# signoff leg print nothing at all.
+.agents/scripts/signoff.py | subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt")) | streams-to-parent | wt-focus | 2027-06-30
+.agents/scripts/test_reachability.py | subprocess.run(cmd, cwd=repo) | streams-to-parent | wt-focus | 2027-06-30

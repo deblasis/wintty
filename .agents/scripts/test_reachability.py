@@ -352,7 +352,9 @@ def build_test_binaries(repo, prefix, version=TEST_VERSION):
     cmd = ["zig", "build"] + BUILD_ARGS + [f"-Dversion-string={version}",
                                           "-p", prefix.replace("\\", "/")]
     print("building: " + " ".join(cmd), flush=True)
-    proc = subprocess.run(cmd, cwd=repo, creationflags=0x08000000 if sys.platform == "win32" else 0)
+    # Streams to the console it was given (see signoff.py's _run_command):
+    # CREATE_NO_WINDOW discards an inherited stdout when the parent's is a pipe.
+    proc = subprocess.run(cmd, cwd=repo)
     if proc.returncode != 0:
         raise HarnessError("`zig build test-binaries` failed; nothing to measure")
 
