@@ -1747,97 +1747,68 @@ test "deinit refuses to run while the thread is running" {
 
 // The census above pins the refusal's text; this observes it firing. A
 // panic cannot be caught in-process, so the observation runs out of
-// process: the test below builds this suite with a filter that runs
-// only this probe and checks the process dies with the refusal message.
-test "deinit refusal probe" {
-    if (!probeEnvSet()) return error.SkipZigTest;
-
-    var t: Thread = undefined;
-    t.lifecycle = .init(.running);
-    t.deinit();
-}
-
-fn probeEnvSet() bool {
-    var probe_env = global.environMap() catch return false;
-    defer probe_env.deinit();
-    return probe_env.get("WINTTY_TRIPWIRE_PROBE") != null;
-}
-
+// process: the test re-runs its own binary on only itself and checks the
+// process dies with the refusal message. The runner's `--shard=I/N` with
+// N the number of tests selects test I and nothing else. The child is
+// marked by WINTTY_TRIPWIRE_PROBE and takes the probe branch below.
+//
+// Re-running the binary costs milliseconds where a nested `zig build`
+// cost minutes, shares no compiler cache with the build that runs this
+// test, and still works under `-Dtest-filter`, where a separate probe
+// test would not be in the binary at all. The suite binary is pinned to
+// Debug in build.zig, so the gate is armed here as in any build.
+//
+// Unset the variable after any manual probe use; a leaked copy turns
+// every later suite run red at this test.
 test "deinit refusal fires in a real run" {
     const testing = std.testing;
     const alloc = testing.allocator;
     const io = global.io();
 
-    // This test spawns the probe build; the probe env is the child's
-    // marker. If it is set here, this IS the child (or a manual probe
-    // run): skip, so a future test whose name contains the child's
-    // filter cannot recurse into another nested build. Unset the
-    // variable after any manual probe use; a leaked copy turns every
-    // later suite run red at the probe.
-    if (probeEnvSet()) return error.SkipZigTest;
-
-    // The probe build needs a repo tree: build.zig must sit in the
-    // test's cwd, which `zig build test` guarantees. From any other
-    // launch context skip: there is nothing to build.
-    {
-        var probe = std.Io.Dir.cwd().openFile(io, "build.zig", .{}) catch
-            return error.SkipZigTest;
-        probe.close(io);
+    if (probeEnvSet()) {
+        // This IS the child. A Thread that claims to be running must
+        // refuse to deinit; if it does not, this returns and the child
+        // exits 0 with nothing on stderr.
+        var t: Thread = undefined;
+        t.lifecycle = .init(.running);
+        t.deinit();
+        return;
     }
+
+    const self_name = "deinit refusal fires in a real run";
+    const self_index = for (builtin.test_functions, 0..) |tf, i| {
+        if (std.mem.endsWith(u8, tf.name, self_name)) break i;
+    } else return error.TestUnexpectedResult;
+
+    const exe = try std.process.executablePathAlloc(io, alloc);
+    defer alloc.free(exe);
+    const shard = try alloc.print("--shard={d}/{d}", .{ self_index, builtin.test_functions.len });
+    defer alloc.free(shard);
 
     var env = try global.environMap();
     defer env.deinit();
     try env.put("WINTTY_TRIPWIRE_PROBE", "1");
 
-    // A private prefix keeps the child's install from touching this
-    // binary's own zig-out while it is running. The child also gets a
-    // private local cache inside it. By default it shares the local
-    // cache with the build running this test, and both rebuild the same
-    // framegen entry ("artifact ... is missing; recomputing"). When the
-    // child's rename into that entry loses, its compiler dies with
-    // "failed to rename compilation results ... AccessDenied" before it
-    // reaches the probe (3 of 8 runs on a quiet machine). A fresh cache
-    // has no entry to collide on and goes away with the prefix. The
-    // global cache (fetched packages) stays shared.
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const prefix = try alloc.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
-    defer alloc.free(prefix);
-    const cache_dir = try alloc.print("{s}/cache", .{prefix});
-    defer alloc.free(cache_dir);
-
-    // The child run costs 1 to 2 minutes on a quiet machine with its
-    // private cache (measured: 95, 117 and 95 s); it builds this suite
-    // with a filter that selects only the probe test above. The panic
-    // itself is the expected outcome, so failure looks like a clean
-    // nonzero exit carrying the refusal message, or a watchdog kill that
-    // carries no verdict at all.
     var child = try std.process.spawn(io, .{
-        .argv = &.{
-            "zig",                                "build",
-            "test",                               "-Dapp-runtime=none",
-            "-Dtest-filter=deinit refusal probe", "--prefix",
-            prefix,                               "--cache-dir",
-            cache_dir,                            "--summary",
-            "none",
-        },
+        .argv = &.{ exe, shard },
         .environ_map = &env,
         .stderr = .pipe,
         .stdout = .ignore,
     });
     const stderr_file = child.stderr orelse return error.SkipZigTest;
 
-    // Bound the whole observation. A wedged child (a compiler hang) must
-    // fail this test with the command in the verdict, not hang the
-    // suite: the same rule the park-wait guards in this suite hold. The
-    // deadline is sized for a cold-cache nested build; a healthy run
-    // never approaches it. The watchdog polls a done flag instead of
-    // sleeping blind, so joining it below is prompt and it never
-    // outlives this frame; and when it does kill, the `killed` flag
-    // tells this frame to skip `wait` (kill's cleanup reaps the child;
-    // waiting again would trip Child.wait's live-id assert), while the
-    // kill's pipe cleanup is what releases the reader above.
-    const probe_deadline_s = 600;
+    // Bound the whole observation. A wedged child must fail this test
+    // with a verdict, not hang the suite: the same rule the park-wait
+    // guards in this suite hold. A healthy child finishes in well under
+    // a second, so this is a hang guard, not a build budget. The
+    // watchdog polls a done flag instead of sleeping blind, so joining
+    // it below is prompt and it never outlives this frame; and when it
+    // does kill, the `killed` flag tells this frame to skip `wait`
+    // (kill's cleanup reaps the child; waiting again would trip
+    // Child.wait's live-id assert), while the kill's pipe cleanup is
+    // what releases the reader below. The child is this binary, not a
+    // launcher, so killing it leaves no descendants behind.
+    const probe_deadline_s = 60;
     var child_done = std.atomic.Value(bool).init(false);
     var child_killed = std.atomic.Value(bool).init(false);
     const Watchdog = struct {
@@ -1874,37 +1845,51 @@ test "deinit refusal fires in a real run" {
     var rd = stderr_file.reader(io, &read_buf);
     var stderr_data: std.ArrayList(u8) = .empty;
     defer stderr_data.deinit(alloc);
-    try rd.interface.appendRemaining(alloc, &stderr_data, .unlimited);
+    // A kill closes the pipe under this read; that is end of data, not
+    // a failure of its own.
+    rd.interface.appendRemaining(alloc, &stderr_data, .unlimited) catch |err| {
+        if (err != error.ReadFailed or !child_killed.load(.acquire)) return err;
+    };
     const killed = child_killed.load(.acquire);
     const term: std.process.Child.Term = if (killed)
         .{ .unknown = 0 }
     else
         try child.wait(io);
 
-    switch (term) {
-        .exited => |code| try testing.expect(code != 0),
-        else => {},
-    }
-    if (std.mem.indexOf(u8, stderr_data.items, "Thread.deinit while the thread is running") != null) return;
+    // The refusal text and a nonzero exit are both required, and a miss
+    // on either goes through the same report. A child whose gate stopped
+    // firing runs the probe to its end and exits 0 with nothing on
+    // stderr; that has to say so too.
+    const refused = std.mem.indexOf(u8, stderr_data.items, "Thread.deinit while the thread is running") != null;
+    const exited_zero = switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!killed and refused and !exited_zero) return;
 
-    // No refusal. Say which of the two ways that happened, and show what
-    // the child wrote: a watchdog kill is the machine running out of time
-    // and says nothing about Thread.deinit, while a child that exited
-    // without the refusal means the gate did not fire.
+    // Say which way it went, and show what the child wrote: a watchdog
+    // kill is the machine running out of time and says nothing about
+    // Thread.deinit, while a child that ended without the refusal means
+    // the gate did not fire.
+    const why = if (killed)
+        std.fmt.comptimePrint("killed by the {d} s watchdog before it reached a verdict (a timeout, not evidence about Thread.deinit)", .{probe_deadline_s})
+    else if (!refused)
+        "exited without the refusal (the gate did not fire)"
+    else
+        "printed the refusal but exited 0";
     const tail_max = 8 * 1024;
     const tail = stderr_data.items[stderr_data.items.len -| tail_max..];
-    if (killed) {
-        std.log.err(
-            "probe child killed by the {d} s watchdog before it reached a verdict (a timeout, not evidence about Thread.deinit); child stderr is {d} bytes, tail:\n{s}",
-            .{ probe_deadline_s, stderr_data.items.len, tail },
-        );
-    } else {
-        std.log.err(
-            "probe child exited without the refusal (the gate did not fire): term={any}; child stderr is {d} bytes, tail:\n{s}",
-            .{ term, stderr_data.items.len, tail },
-        );
-    }
+    std.log.err(
+        "probe child {s}: term={any}; child stderr is {d} bytes, tail:\n{s}",
+        .{ why, term, stderr_data.items.len, tail },
+    );
     return error.TestUnexpectedResult;
+}
+
+fn probeEnvSet() bool {
+    var probe_env = global.environMap() catch return false;
+    defer probe_env.deinit();
+    return probe_env.get("WINTTY_TRIPWIRE_PROBE") != null;
 }
 
 // The safety net exists to bound a lost wakeup notify (#1036), and its
