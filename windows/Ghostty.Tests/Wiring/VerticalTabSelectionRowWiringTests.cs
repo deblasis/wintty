@@ -202,4 +202,109 @@ public class VerticalTabSelectionRowWiringTests
 
         Assert.Single(strip.Method("SyncSelectionFromManager").Calls("ScheduleSelectionLayoutPass"));
     }
+
+    /// <summary>
+    /// The seam-cover handler reads <c>ActiveRowMeetsThePane</c> on every
+    /// <c>SelectionRowChanged</c>, and <c>UpdateSelectionRow</c> raises that
+    /// event from its no-active-tab branch too (#1458). So the property is
+    /// reached with <c>_manager.ActiveTab == null</c>: a tab-less launch (a
+    /// first run, a wiped config) with vertical tabs on, before the first
+    /// tab exists. It used to hand that null straight to
+    /// <c>RowElementOf</c>, whose <c>Dictionary.TryGetValue</c> throws
+    /// ArgumentNullException -- inside the MainWindow constructor, which
+    /// took the whole launch down before a window was ever shown.
+    ///
+    /// A strip cannot be built in this test host, so what is pinned is the
+    /// operation, not the spelling: the null test on the active tab must
+    /// dominate the <c>RowElementOf</c> call -- a short-circuit operator, a
+    /// conditional, or a declaration pattern that binds the tab -- so the
+    /// call can only evaluate against a tab that exists.
+    /// </summary>
+    [Fact]
+    public void ActiveRowMeetsThePane_GuardsTheActiveTabBeforeIndexingWithIt()
+    {
+        var property = Assert.Single(
+            Strip().Root.DescendantNodes().OfType<PropertyDeclarationSyntax>(),
+            p => p.Identifier.ValueText == "ActiveRowMeetsThePane");
+
+        Assert.NotNull(property.ExpressionBody);
+        var expression = property.ExpressionBody.Expression;
+
+        // The plain overload on purpose: a second string argument is bound
+        // as a predicate, and a one-element list then "contains no match".
+        Assert.Single(expression.Calls("RowElementOf"));
+
+        // Walk out from the RowElementOf call. The first short-circuit
+        // operator or conditional that encloses it is what decides whether
+        // the call runs, so it is the one whose guard operand is read; an
+        // operator further out only decides whether that one runs.
+        var call = expression.Call("RowElementOf");
+        ExpressionSyntax? guard = null;
+        for (SyntaxNode? node = call; node is not null && node != expression; node = node.Parent)
+        {
+            if (node.Parent is BinaryExpressionSyntax chain
+                && chain.RawKind is (int)SyntaxKind.LogicalOrExpression
+                    or (int)SyntaxKind.LogicalAndExpression)
+            {
+                // `tab is null || RowElementOf(tab)…` and `tab is not null && …`:
+                // the call is the right operand, the test the left.
+                if (chain.Right == node) guard = chain.Left;
+                break;
+            }
+
+            if (node.Parent is ConditionalExpressionSyntax conditional)
+            {
+                if (conditional.Condition != node) guard = conditional.Condition;
+                break;
+            }
+        }
+
+        Assert.True(
+            guard is not null && TestsActiveTabForNull(guard),
+            "ActiveRowMeetsThePane must test _manager.ActiveTab for null before RowElementOf "
+            + "runs: a tab-less launch with vertical tabs on raises SelectionRowChanged with "
+            + "no active tab, and RowElementOf(null) throws ArgumentNullException (#1458)");
+    }
+
+    /// <summary>
+    /// Whether <paramref name="node"/> decides anything about the active
+    /// tab being null: an `is null` / `is not null` test, or a declaration
+    /// pattern (`is { } tab`, `is not { } tab`) that only matches a tab that
+    /// exists.
+    /// </summary>
+    private static bool TestsActiveTabForNull(ExpressionSyntax node) =>
+        // AndSelf: the guard operand is usually the is-pattern itself
+        // (`_manager.ActiveTab is { } tab && …`), which DescendantNodes skips.
+        node.DescendantNodesAndSelf().OfType<IsPatternExpressionSyntax>().Any(p =>
+            p.Expression.ToString().EndsWith("ActiveTab", StringComparison.Ordinal)
+            && (p.Pattern is ConstantPatternSyntax
+                {
+                    Expression: LiteralExpressionSyntax
+                    {
+                        RawKind: (int)SyntaxKind.NullLiteralExpression,
+                    },
+                }
+                || p.Pattern is UnaryPatternSyntax
+                {
+                    OperatorToken.RawKind: (int)SyntaxKind.NotKeyword,
+                    Pattern: ConstantPatternSyntax
+                    {
+                        Expression: LiteralExpressionSyntax
+                        {
+                            RawKind: (int)SyntaxKind.NullLiteralExpression,
+                        },
+                    },
+                }
+                || p.Pattern is UnaryPatternSyntax
+                {
+                    OperatorToken.RawKind: (int)SyntaxKind.NotKeyword,
+                    Pattern: RecursivePatternSyntax
+                    {
+                        Designation: SingleVariableDesignationSyntax,
+                    },
+                }
+                || p.Pattern is RecursivePatternSyntax
+                {
+                    Designation: SingleVariableDesignationSyntax,
+                }));
 }

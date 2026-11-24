@@ -1314,9 +1314,17 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// This is the same fact <c>UpdateSelectionRow</c> already spends on the
     /// selection fill's fourth stroke ("a square meets nothing"), asked
     /// where the cover can hear it.
+    ///
+    /// False when there is no active tab. <c>UpdateSelectionRow</c> raises
+    /// <see cref="SelectionRowChanged"/> from its no-tab branch as well, so a
+    /// tab-less window (a launch that restored nothing) reaches this with
+    /// <c>ActiveTab == null</c>; no row is selected, so nothing meets the
+    /// pane. Resolving the row of a null tab threw
+    /// <c>ArgumentNullException</c>, from inside the MainWindow constructor
+    /// (#1458).
     /// </summary>
     internal bool ActiveRowMeetsThePane
-        => RowElementOf(_manager.ActiveTab) is not VerticalTabPinnedRow;
+        => _manager.ActiveTab is { } tab && RowElementOf(tab) is not VerticalTabPinnedRow;
 
     /// <summary>Raised whenever the selection row moves, resizes, or hides.</summary>
     internal event Action? SelectionRowChanged;
