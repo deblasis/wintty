@@ -1790,24 +1790,35 @@ test "deinit refusal fires in a real run" {
     try env.put("WINTTY_TRIPWIRE_PROBE", "1");
 
     // A private prefix keeps the child's install from touching this
-    // binary's own zig-out while it is running.
+    // binary's own zig-out while it is running. The child also gets a
+    // private local cache inside it. By default it shares the local
+    // cache with the build running this test, and both rebuild the same
+    // framegen entry ("artifact ... is missing; recomputing"). When the
+    // child's rename into that entry loses, its compiler dies with
+    // "failed to rename compilation results ... AccessDenied" before it
+    // reaches the probe (3 of 8 runs on a quiet machine). A fresh cache
+    // has no entry to collide on and goes away with the prefix. The
+    // global cache (fetched packages) stays shared.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const prefix = try alloc.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
     defer alloc.free(prefix);
+    const cache_dir = try alloc.print("{s}/cache", .{prefix});
+    defer alloc.free(cache_dir);
 
-    // The child run costs 1 to 3 minutes on a quiet machine (measured:
-    // about 70 s warm, 120 s with a cold local cache, 190 s with every
-    // cache cold); it builds this suite with a filter that selects only
-    // the probe test above. The panic itself is the expected outcome, so
-    // failure looks like a clean nonzero exit carrying the refusal
-    // message, or a watchdog kill that carries no verdict at all.
+    // The child run costs 1 to 2 minutes on a quiet machine with its
+    // private cache (measured: 95, 117 and 95 s); it builds this suite
+    // with a filter that selects only the probe test above. The panic
+    // itself is the expected outcome, so failure looks like a clean
+    // nonzero exit carrying the refusal message, or a watchdog kill that
+    // carries no verdict at all.
     var child = try std.process.spawn(io, .{
         .argv = &.{
             "zig",                                "build",
             "test",                               "-Dapp-runtime=none",
             "-Dtest-filter=deinit refusal probe", "--prefix",
-            prefix,                               "--summary",
+            prefix,                               "--cache-dir",
+            cache_dir,                            "--summary",
             "none",
         },
         .environ_map = &env,
