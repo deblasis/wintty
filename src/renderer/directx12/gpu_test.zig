@@ -4020,17 +4020,81 @@ test "DirectX12: prepareFrame bounds an unreachable data fence" {
     defer api.deinit();
 
     // No submission can ever reach this value. The wait must fail closed
-    // instead of parking the render thread forever.
+    // instead of parking the render thread forever. How long failing closed
+    // takes is deliberately not measured here: the wait is a count of short
+    // slices, so its wall time is that count times the scheduler's latency
+    // for each wake, and a loaded host stretches that without the wait
+    // being wrong. The budget itself is pinned on the source, in the test
+    // below.
     api.data_fence_values[0] = api.dev.?.fence_value.load(.acquire) + 1000;
-    const started: std.Io.Timestamp = .now(global.io(), .awake);
     try std.testing.expectError(error.FrameSyncFailed, api.prepareFrame(0));
     try std.testing.expect(!api.deviceLost());
-    const elapsed_ms = started.untilNow(global.io(), .awake).toMilliseconds();
-    try std.testing.expect(elapsed_ms < 5000);
     try std.testing.expectError(
         error.InvalidBackBufferIndex,
         api.prepareFrame(api.data_fence_values.len),
     );
+}
+
+test "DirectX12: prepareFrame's data-fence wait spends a bounded budget" {
+    // The wait in prepareFrame is a loop of short event waits that spends a
+    // millisecond budget one slice at a time, so the declared budget is the
+    // bound and a clock is the wrong instrument for it: the loop's wall
+    // time is its slice count times however long the scheduler takes to
+    // return each wait, and a loaded host stretches that without the loop
+    // being wrong. The unreachable-fence test above proves the wait fails
+    // closed; this pins what it may cost.
+    //
+    // The budget is read from the source, so no device is needed and the
+    // check runs on hosts where that test skips. A restructured wait fails
+    // here with the missing shape named, and the literals below are what to
+    // update.
+    const src = @embedFile("../DirectX12.zig");
+    const start = std.mem.indexOf(u8, src, "pub fn prepareFrame(") orelse
+        return error.PrepareFrameMissing;
+    const body = src[start .. start + (std.mem.indexOf(u8, src[start..], "\n}\n") orelse
+        return error.PrepareFrameNotClosed)];
+
+    const floor_ms = try literalAfter(body, "while (remaining_ms > ", ')');
+    const budget_ms = try literalAfter(body, "var remaining_ms: u32 = ", ';');
+    const slice_ms = try literalAfter(body, "WaitForSingleObject(dev.data_fence_event, ", ')');
+    const spent_ms = try literalAfter(body, "remaining_ms -= ", ';');
+
+    // The loop must be driven by the budget, wait on every pass, and spend
+    // exactly what it waited: a loop not tied to the budget has no bound, and
+    // a pass that spends less than it waits outlasts the budget it declares.
+    try std.testing.expectEqual(@as(u32, 0), floor_ms);
+    try std.testing.expect(slice_ms > 0);
+    try std.testing.expectEqual(slice_ms, spent_ms);
+    // Nothing else in the function may wait: a second wait, on any event,
+    // adds to the time the budget is meant to cap.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "WaitForSingleObject("));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, body, "waitFenceValue("));
+    // The ceiling the wall-clock check used to enforce.
+    try std.testing.expect(budget_ms <= 5000);
+}
+
+/// The unsigned decimal literal between `prefix` and `terminator` in `body`.
+/// `prefix` must occur exactly once, so a second copy of the shape, or a
+/// comment quoting it, fails here instead of being read in place of the
+/// code.
+fn literalAfter(body: []const u8, prefix: []const u8, terminator: u8) !u32 {
+    if (std.mem.count(u8, body, prefix) != 1) {
+        std.debug.print(
+            "prepareFrame's wait budget: expected exactly one `{s}`\n",
+            .{prefix},
+        );
+        return error.WaitBudgetShapeChanged;
+    }
+    const from = std.mem.indexOf(u8, body, prefix).? + prefix.len;
+    const len = std.mem.indexOfScalar(u8, body[from..], terminator) orelse
+        return error.WaitBudgetShapeChanged;
+    return std.fmt.parseUnsigned(u32, body[from..][0..len], 10) catch {
+        std.debug.print(
+            "prepareFrame's wait budget: `{s}` is not followed by a decimal literal\n",
+            .{prefix},
+        );
+        return error.WaitBudgetShapeChanged;
+    };
 }
 
 /// A forwarding stand-in for the fence a wait runs against. The wait
