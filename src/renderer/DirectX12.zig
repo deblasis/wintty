@@ -1416,23 +1416,7 @@ pub fn prepareFrame(self: *DirectX12, data_index: usize) !void {
         // the check above and the wait. Bound this wait and re-check the
         // device. Teardown and frame paging have their own waits; this one
         // must not add another unbounded stall to the hidden-surface poll.
-        var remaining_ms: u32 = 2000;
-        while (remaining_ms > 0) {
-            if (d3d12.WaitForSingleObject(dev.data_fence_event, 100) == 0) break;
-            if (dev.removed()) {
-                self.markDeviceLost(.wait);
-                return error.DeviceLost;
-            }
-            remaining_ms -= 100;
-        }
-        if (remaining_ms == 0) {
-            if (dev.removed()) {
-                self.markDeviceLost(.wait);
-                return error.DeviceLost;
-            }
-            log.warn("frame data fence {d} did not complete within 2000 ms on a live device; dropping the frame", .{value});
-            return error.FrameSyncFailed;
-        }
+        try waitDataFence(dev.data_fence_event, value, DataFenceHooks{ .api = self, .dev = dev });
 
         // A timed-out SetEventOnCompletion can leave the auto-reset event
         // signaled. The event is not proof by itself; the fence value is.
@@ -1448,6 +1432,62 @@ pub fn prepareFrame(self: *DirectX12, data_index: usize) !void {
     }
 
     self.pending_data_index = data_index;
+}
+
+/// The data-fence wait spends this many milliseconds, in slices of
+/// `data_fence_slice_ms`, before it gives up on a fence value no
+/// submission can reach.
+pub const data_fence_budget_ms: u32 = 2000;
+pub const data_fence_slice_ms: u32 = 100;
+
+/// What the data-fence wait does to the world, behind one name so the wait
+/// below can be run against a stand-in. `wait` is the one real wait.
+const DataFenceHooks = struct {
+    api: *DirectX12,
+    dev: *const device.Device,
+
+    pub fn wait(_: DataFenceHooks, event: std.os.windows.HANDLE, ms: u32) u32 {
+        return d3d12.WaitForSingleObject(event, ms);
+    }
+
+    pub fn removed(h: DataFenceHooks) bool {
+        return h.dev.removed();
+    }
+
+    pub fn markLost(h: DataFenceHooks) void {
+        h.api.markDeviceLost(.wait);
+    }
+};
+
+/// Waits for `event`, which the caller has registered on the fence for
+/// `value`, in slices of `data_fence_slice_ms` until the budget is spent.
+/// Returns when the event is signalled, `error.DeviceLost` when the device
+/// is found removed (after marking it lost), and `error.FrameSyncFailed`
+/// when the budget runs out on a live device.
+///
+/// Everything it touches comes in through `event` and `hooks`; it reaches
+/// nothing through the renderer, so a test that passes a stand-in sees
+/// every wait it can make.
+pub fn waitDataFence(
+    event: std.os.windows.HANDLE,
+    value: u64,
+    hooks: anytype,
+) error{ DeviceLost, FrameSyncFailed }!void {
+    var remaining_ms: u32 = data_fence_budget_ms;
+    while (remaining_ms > 0) {
+        if (hooks.wait(event, data_fence_slice_ms) == 0) return;
+        if (hooks.removed()) {
+            hooks.markLost();
+            return error.DeviceLost;
+        }
+        remaining_ms -= data_fence_slice_ms;
+    }
+    if (hooks.removed()) {
+        hooks.markLost();
+        return error.DeviceLost;
+    }
+    log.warn("frame data fence {d} did not complete within {d} ms on a live device; dropping the frame", .{ value, data_fence_budget_ms });
+    return error.FrameSyncFailed;
 }
 
 pub inline fn beginFrame(
