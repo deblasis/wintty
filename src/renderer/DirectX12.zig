@@ -1442,7 +1442,7 @@ pub const data_fence_slice_ms: u32 = 100;
 
 /// What the data-fence wait does to the world, behind one name so the wait
 /// below can be run against a stand-in. `wait` is the one real wait.
-const DataFenceHooks = struct {
+pub const DataFenceHooks = struct {
     api: *DirectX12,
     dev: *const device.Device,
 

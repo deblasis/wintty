@@ -4016,6 +4016,8 @@ test "DirectX12: prepareFrame bounds an unreachable data fence" {
     // wait that asks for the wrong thing fails here in microseconds, not
     // after the real wait below has run.
     try checkDataFenceWait();
+    try checkHooksShape();
+    try checkRealDataFenceHooks();
     try pinPrepareFrameDelegates();
     const DirectX12 = @import("../DirectX12.zig");
 
@@ -4043,6 +4045,12 @@ test "DirectX12: prepareFrame bounds an unreachable data fence" {
 test "DirectX12: the data-fence wait asks for bounded slices and fails closed" {
     if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
     try checkDataFenceWait();
+}
+
+test "DirectX12: the real data-fence hooks are three forwards, and forward" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try checkHooksShape();
+    try checkRealDataFenceHooks();
 }
 
 test "DirectX12: prepareFrame waits only through the data-fence helper" {
@@ -4212,8 +4220,21 @@ fn pinPrepareFrameDelegates() !void {
     const without_call = try std.mem.concat(alloc, u8, &.{ frame[0..at], frame[at + call.len ..] });
     defer alloc.free(without_call);
     // `.wait` is the name of the device-lost origin, not a wait.
-    const rest = try std.mem.replaceOwned(u8, alloc, without_call, "markDeviceLost(.wait)", "markDeviceLost()");
+    const without_origin = try std.mem.replaceOwned(u8, alloc, without_call, "markDeviceLost(.wait)", "markDeviceLost()");
+    defer alloc.free(without_origin);
+
+    // The event the wait runs on is the one the fence was told to signal,
+    // and nothing else in prepareFrame names it or builds a second hooks
+    // value: an assignment to `dev.data_fence_event` (the shared event
+    // swapped in) or a spare `DataFenceHooks{...}` has nowhere to stand.
+    const register = "dev.fence.SetEventOnCompletion(value, dev.data_fence_event)";
+    try pinned(std.mem.count(u8, without_origin, register) == 1, "prepareFrame does not register exactly one `{s}`", .{register});
+    const rest = try std.mem.replaceOwned(u8, alloc, without_origin, register, "dev.fence.SetEventOnCompletion()");
     defer alloc.free(rest);
+    inline for (.{ "data_fence_event", "DataFenceHooks" }) |needle| {
+        const hit = std.mem.indexOf(u8, rest, needle);
+        try pinned(hit == null, "prepareFrame names `" ++ needle ++ "` outside the helper call and the one registration: `{s}`", .{around(rest, hit orelse 0)});
+    }
     inline for (.{ "wait", "sleep" }) |needle| {
         const hit = indexOfCaseless(rest, needle);
         try pinned(hit == null, "prepareFrame holds `" ++ needle ++ "` outside the helper call: `{s}`", .{around(rest, hit orelse 0)});
@@ -4271,17 +4292,89 @@ fn pinPrepareFrameDelegates() !void {
         try pinned(ok, "the helper calls `{s}`, which is not one of its hooks or log.warn", .{callee});
     }
 
-    // The real hooks forward unchanged.
-    const hooks = try sliceOf(file, "const DataFenceHooks = struct {", " pub fn waitDataFence(");
-    const forwards = [_][]const u8{
-        "pub fn wait(_: DataFenceHooks, event: std.os.windows.HANDLE, ms: u32) u32 { return d3d12.WaitForSingleObject(event, ms); }",
-        "pub fn removed(h: DataFenceHooks) bool { return h.dev.removed(); }",
-        "pub fn markLost(h: DataFenceHooks) void { h.api.markDeviceLost(.wait); }",
-    };
-    for (forwards) |fwd| {
-        try pinned(std.mem.count(u8, hooks, fwd) == 1, "the real hooks no longer hold exactly one `{s}`", .{fwd});
+    // The real hooks are held as one whole body, not as a set of needles:
+    // a nested struct, an extra declaration or an alias of a function
+    // declared elsewhere all change the text, and a needle count would
+    // still find the three forwards inside them.
+    const hooks = try sliceOf(file, "pub const DataFenceHooks = struct {", " pub fn waitDataFence(");
+    const expected_hooks = "pub const DataFenceHooks = struct { api: *DirectX12, dev: *const device.Device," ++
+        " pub fn wait(_: DataFenceHooks, event: std.os.windows.HANDLE, ms: u32) u32 { return d3d12.WaitForSingleObject(event, ms); }" ++
+        " pub fn removed(h: DataFenceHooks) bool { return h.dev.removed(); }" ++
+        " pub fn markLost(h: DataFenceHooks) void { h.api.markDeviceLost(.wait); } };";
+    try pinned(std.mem.eql(u8, hooks, expected_hooks), "the real hooks are not exactly the three forwards:\n  found:    {s}\n  expected: {s}", .{ hooks, expected_hooks });
+}
+
+/// What the type system can say about the real hooks: three public
+/// functions and two fields, by name. It cannot say they forward. A private
+/// nested struct is not listed at all, and a public constant that aliases a
+/// function declared elsewhere has the same type as a function written in
+/// place, so a decoy and the real struct print the same list. The whole-body
+/// text check and the run-time check below carry that.
+fn checkHooksShape() !void {
+    const Hooks = @import("../DirectX12.zig").DataFenceHooks;
+    const info = @typeInfo(Hooks).@"struct";
+    const want_decls = [_][]const u8{ "wait", "removed", "markLost" };
+    const want_fields = [_][]const u8{ "api", "dev" };
+    try pinned(info.decl_names.len == want_decls.len, "the real hooks list {d} public declarations, expected {d}", .{ info.decl_names.len, want_decls.len });
+    try pinned(info.field_names.len == want_fields.len, "the real hooks have {d} fields, expected {d}", .{ info.field_names.len, want_fields.len });
+    inline for (want_decls) |name| {
+        try pinned(@hasDecl(Hooks, name), "the real hooks lack `{s}`", .{name});
+        try pinned(@typeInfo(@TypeOf(@field(Hooks, name))) == .@"fn", "the real hooks' `{s}` is not a function", .{name});
     }
-    try pinned(std.mem.count(u8, hooks, "fn ") == forwards.len, "the real hooks hold {d} functions, expected {d}", .{ std.mem.count(u8, hooks, "fn "), forwards.len });
+    inline for (want_fields) |name| try pinned(@hasField(Hooks, name), "the real hooks lack the field `{s}`", .{name});
+}
+
+/// The real hooks, run: no GPU, no renderer, only a fake device whose
+/// removed-reason the test sets. A decoy that aliases the three names to
+/// other functions (a wait that ignores its timeout, a `removed` that is
+/// always false, a `markLost` that marks nothing) fails here whatever its
+/// text says. The one clock reading is a lower bound: a wait of 100 ms
+/// cannot return before about 100 ms, so a loaded host only lengthens it
+/// and the bound cannot flake.
+fn checkRealDataFenceHooks() !void {
+    const DirectX12 = @import("../DirectX12.zig");
+    const Hooks = DirectX12.DataFenceHooks;
+
+    const Fake = struct {
+        var reason: com.HRESULT = com.S_OK;
+        fn removedReason(_: *d3d12.ID3D12Device) callconv(.winapi) com.HRESULT {
+            return reason;
+        }
+    };
+    // A device whose only live method is GetDeviceRemovedReason: a table of
+    // pointers laid out like the real vtable, with that one slot filled.
+    var table: [128]?*const anyopaque = @splat(null);
+    const slot = @offsetOf(d3d12.ID3D12Device.VTable, "GetDeviceRemovedReason") / @sizeOf(*const anyopaque);
+    table[slot] = @ptrCast(&Fake.removedReason);
+    var fake_device: d3d12.ID3D12Device = .{ .vtable = @ptrCast(&table) };
+    var dev: Device = undefined;
+    dev.device = &fake_device;
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    const hooks: Hooks = .{ .api = &api, .dev = &dev };
+
+    Fake.reason = com.S_OK;
+    try pinned(!hooks.removed(), "the real removed() reports a healthy device as removed", .{});
+    Fake.reason = com.DXGI_ERROR_DEVICE_REMOVED;
+    try pinned(hooks.removed(), "the real removed() does not report a removed device", .{});
+    Fake.reason = com.S_OK;
+
+    try pinned(!api.deviceLost(), "a fresh renderer starts out lost", .{});
+    hooks.markLost();
+    try pinned(api.deviceLost(), "the real markLost() does not mark the device lost", .{});
+
+    const signalled = d3d12.CreateEventW(null, .TRUE, .FALSE, null) orelse return error.EventCreationFailed;
+    defer _ = d3d12.CloseHandle(signalled);
+    _ = ProbeFence.kernel32.SetEvent(signalled);
+    const got = hooks.wait(signalled, 100);
+    try pinned(got == 0, "the real wait() on a signalled event returned {d}, not 0", .{got});
+
+    const quiet = d3d12.CreateEventW(null, .TRUE, .FALSE, null) orelse return error.EventCreationFailed;
+    defer _ = d3d12.CloseHandle(quiet);
+    const started: std.Io.Timestamp = .now(global.io(), .awake);
+    const timed_out = hooks.wait(quiet, 100);
+    const waited_ms = started.untilNow(global.io(), .awake).toMilliseconds();
+    try pinned(timed_out == WaitStub.wait_timeout, "the real wait() on a silent event returned {d}, not the timeout", .{timed_out});
+    try pinned(waited_ms >= 50, "the real wait() asked to wait 100 ms and came back after {d} ms: it ignores its timeout", .{waited_ms});
 }
 
 /// The index of the first occurrence of `needle` in `hay`, ignoring ASCII
