@@ -91,7 +91,7 @@ def nightly_task_registered():
             ["pwsh", "-NoProfile", "-Command",
              "[bool](Get-ScheduledTask -TaskName wintty-nightly-quality -ErrorAction SilentlyContinue)"],
             capture_output=True, text=True, timeout=15,
-        )
+            creationflags=0x08000000 if sys.platform == "win32" else 0,        )
         return out.stdout.strip() == "True"
     except Exception:
         return None
@@ -172,7 +172,7 @@ def deferred_debt():
     except ImportError:
         return []
     out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
-                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=15)
+    creationflags=0x08000000 if sys.platform == "win32" else 0,                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=15)
     common = out.stdout.strip()
     if out.returncode != 0 or not common:
         return []

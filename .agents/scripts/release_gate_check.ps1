@@ -55,6 +55,16 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# This builds Release and runs its tests: it refuses a bare run and names the
+# recipe that takes the lane (AGENTS.md, "Heavy job lanes" / "No stray
+# windows").
+. (Join-Path $PSScriptRoot 'incoda-held.ps1')
+$held = @(Get-IncodaHeldKeys -Strict)
+if ($held -cnotcontains 'wintty-build') {
+    Write-Host 'release_gate_check.ps1: run it through its recipe: just release-gate-check' -ForegroundColor Red
+    exit 1
+}
+
 # VSTest and the SDK localise their output, and this parses it. Pin English so
 # a non-English host fails on the gate rather than on the language.
 $env:DOTNET_CLI_UI_LANGUAGE = 'en'

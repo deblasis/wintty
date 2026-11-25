@@ -71,13 +71,55 @@ RECIPE_LEGS = {
     "test-pkg": (LEG_ZIG,),
     "test-reachability": (LEG_ZIG,),
     "test-configure": (LEG_ZIG,),
+    "test-examples": (LEG_ZIG,),
     "build-dll": (LEG_ZIG, LEG_WIN),
+    "build-dll-release": (LEG_ZIG, LEG_WIN),
     "test-win": (LEG_WIN,),
     "build-win": (LEG_WIN,),
+    "build-win-release": (LEG_WIN,),
+    "seam-theme-resolution": (LEG_ZIG, LEG_WIN),
     "gates-selftest": (LEG_GATES,),
     "gitversion-selftest": (LEG_GATES,),
     "release-gate-check": (LEG_RELEASE_GATE,),
 }
+
+# The heavy recipes' real bodies live in _<name>-in-lane privates (they run
+# inside the lane wrapper), so a changed line there must invalidate the same
+# legs as its public recipe, and the umbrella recipes that drive whole
+# ladders invalidate everything: their bodies orchestrate every leg. An
+# unknown recipe or a preamble line already fails closed through the
+# ALL_LEGS default in required-legs lookup below.
+RECIPE_LEGS.update({
+    "_test-in-lane": RECIPE_LEGS["test"],
+    "_test-configure-in-lane": RECIPE_LEGS["test-configure"],
+    "_test-lib-vt-in-lane": RECIPE_LEGS["test-lib-vt"],
+    "_test-full-in-lane": RECIPE_LEGS["test-full"],
+    "_test-pkg-in-lane": RECIPE_LEGS["test-pkg"],
+    "_test-reachability-in-lane": RECIPE_LEGS["test-reachability"],
+    "_test-examples-in-lane": RECIPE_LEGS["test-examples"],
+    "_build-dll-in-lane": RECIPE_LEGS["build-dll"],
+    "_build-dll-release-in-lane": RECIPE_LEGS["build-dll-release"],
+    "_build-win-in-lane": RECIPE_LEGS["build-win"],
+    "_build-win-release-in-lane": RECIPE_LEGS["build-win-release"],
+    "_test-win-in-lane": RECIPE_LEGS["test-win"],
+    "_release-gate-check-in-lane": RECIPE_LEGS["release-gate-check"],
+    "_seam-theme-resolution-in-lane": RECIPE_LEGS["seam-theme-resolution"],
+    "signoff-docs": (),  # records only; exits 3 if the plan selects any leg
+    "_default-in-lane": ALL_LEGS,
+    # The lane plumbing itself: an edit here changes which recipe runs where
+    # for every laned recipe, so it invalidates everything.
+    "_lane": ALL_LEGS,
+    "_build-in-lane": ALL_LEGS,
+    "_require-lane": ALL_LEGS,
+    "_require-incoda": ALL_LEGS,
+    "_signoff-in-lane": ALL_LEGS,
+    "lanes": ALL_LEGS,
+    "default": ALL_LEGS,
+    "signoff": ALL_LEGS,
+    "signoff-full": ALL_LEGS,
+    "signoff-fresh": ALL_LEGS,
+    "signoff-plan": ALL_LEGS,
+})
 
 # Checked BEFORE the prefix rules, because these need both ends of the path.
 # A bare ".csproj" suffix rule would never fire for anything under windows/:

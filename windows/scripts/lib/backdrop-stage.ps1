@@ -120,6 +120,8 @@ function Start-BackdropStage {
     # hand it to every process launched afterwards, the app under test
     # included.
     $psi.Environment['WINTTY_BACKDROP_STAGE'] = $token
+    # The stage helper is console-subsystem: no window, whatever the parent.
+    $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false

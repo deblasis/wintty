@@ -128,12 +128,12 @@ class Out:
 
 def git_run(args, cwd=None):
     return subprocess.run(["git"] + args, cwd=cwd or REPO_ROOT,
-                          capture_output=True, text=True, timeout=60)
+    creationflags=0x08000000 if sys.platform == "win32" else 0,                          capture_output=True, text=True, timeout=60)
 
 
 def gh_run(args, cwd=None):
     return subprocess.run(["gh"] + args, cwd=cwd or REPO_ROOT,
-                          capture_output=True, text=True, timeout=120)
+    creationflags=0x08000000 if sys.platform == "win32" else 0,                          capture_output=True, text=True, timeout=120)
 
 
 def resolve_common_dir(git):

@@ -55,7 +55,7 @@ g
 
 Remove-Item $log, $DumpPath -ErrorAction SilentlyContinue
 $argLine = '-logo "' + $log + '" -c "$<' + $cmds + '" "' + $exe + '"'
-$debugger = Start-Process -FilePath $cdb -ArgumentList $argLine -PassThru
+$debugger = Start-Process -FilePath $cdb -ArgumentList $argLine -PassThru -WindowStyle Hidden
 [void](Wait-SeamPipe -Token $token -Proc $debugger -TimeoutSeconds 90)
 $pipe = Connect-SeamPipe -Token $token -TimeoutMs 10000
 $reader = [System.IO.StreamReader]::new($pipe)

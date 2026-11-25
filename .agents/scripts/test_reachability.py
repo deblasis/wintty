@@ -211,7 +211,7 @@ def git_zig_files(repo):
         cwd=repo,
         capture_output=True,
         text=True,
-    )
+        creationflags=0x08000000 if sys.platform == "win32" else 0,    )
     if proc.returncode != 0:
         raise HarnessError(f"git ls-files failed: {proc.stderr.strip()}")
     return sorted(p.replace("\\", "/") for p in proc.stdout.split("\0") if p)
@@ -284,7 +284,7 @@ def query_test_names(exe):
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-        )
+            creationflags=0x08000000 if sys.platform == "win32" else 0,        )
     except OSError as e:
         raise HarnessError(f"could not start {exe}: {e}")
     # A binary that answers nothing would leave the read blocked forever, and
@@ -352,6 +352,8 @@ def build_test_binaries(repo, prefix, version=TEST_VERSION):
     cmd = ["zig", "build"] + BUILD_ARGS + [f"-Dversion-string={version}",
                                           "-p", prefix.replace("\\", "/")]
     print("building: " + " ".join(cmd), flush=True)
+    # Streams to the console it was given (see signoff.py's _run_command):
+    # CREATE_NO_WINDOW discards an inherited stdout when the parent's is a pipe.
     proc = subprocess.run(cmd, cwd=repo)
     if proc.returncode != 0:
         raise HarnessError("`zig build test-binaries` failed; nothing to measure")

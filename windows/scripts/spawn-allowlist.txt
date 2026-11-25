@@ -1,0 +1,47 @@
+# Spawn-site allowlist: path | anchor (statement text) | mechanism | owner | expiry
+# One MECHANISM at one exact statement; never a file or a glob. The anchor
+# must appear in exactly one logical statement of its file (validated at
+# load). Mechanisms: app-under-test (GUI window is the product),
+# user-launcher (a human asked for the window: run-win), intentional-gui,
+# daemon-self-logs (writes its own log), one-shot-no-output (a wait-for
+# tool whose stdout carries nothing after the fact).
+windows/scripts/run-win-launch.ps1 | Start-Process -FilePath $exe -PassThru | user-launcher | wt-focus | 2027-06-30
+# app-under-test: these launch the Wintty exe (a GUI window is the product)
+windows/scripts/config-save-race.ps1 | Start-Process $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/crash-canary.ps1 | Start-Process -FilePath $ExePath -ArgumentList '+crash', 'handled-storm' | app-under-test | wt-focus | 2027-06-30
+windows/scripts/crash-canary.ps1 | Start-Process -FilePath $ExePath -ArgumentList '+crash', 'native-seh' | app-under-test | wt-focus | 2027-06-30
+windows/scripts/crash-matrix.ps1 | Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/esctest/run-esctest.ps1 | Start-Process -FilePath $WinttyExe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/esctest/run-latency-probe.ps1 | Start-Process -FilePath $WinttyExe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/mouse-fuzz-jumplist.ps1 | Start-Process -FilePath $session.ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/mouse-smoke-run.ps1 | Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/release-smoke.ps1 | Start-Process -FilePath $Exe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/seam-bisect.ps1 | Start-Process -FilePath $exe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/seam-crash-dump.ps1 | Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/seam-probe.ps1 | Start-Process -FilePath $exe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/shader-notice-fuzz.ps1 | Start-Process -FilePath $Exe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/splash-single-instance-race.ps1 | $primary = Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/splash-single-instance-race.ps1 | $secondary = Start-Process -FilePath $ExePath | app-under-test | wt-focus | 2027-06-30
+windows/scripts/vttest/run-vttest-section.ps1 | Start-Process -FilePath $WinttyExe | app-under-test | wt-focus | 2027-06-30
+windows/scripts/vttest/run-vttest.ps1 | Start-Process -FilePath $WinttyExe | app-under-test | wt-focus | 2027-06-30
+# a human clicks this button in the nightly control dialog; the pwsh window is the point
+.agents/scripts/nightly_control.ps1 | Start-Process pwsh | intentional-gui | wt-focus | 2027-06-30
+# cdb writes its own log (-logo); a redirect would add nothing
+windows/scripts/seam-cdb.ps1 | Start-Process -FilePath $cdb | daemon-self-logs | wt-focus | 2027-06-30
+# a one-shot minidump helper: -Wait, and nothing useful on stdout afterwards
+windows/scripts/close-freeze-probe.ps1 | Start-Process -FilePath rundll32.exe | one-shot-no-output | wt-focus | 2027-06-30
+# small helper projects built on first use inside the desktop-lane harnesses;
+# a single project build is the documented no-lane class
+windows/scripts/lib/backdrop-stage.ps1 | & dotnet build | lane-exempt | wt-focus | 2027-06-30
+windows/scripts/lib/window-capture.ps1 | & dotnet build | lane-exempt | wt-focus | 2027-06-30
+# filtered fuzz test, no app build and no desktop: safe with Wintty open
+windows/scripts/clipboard-fuzz.ps1 | & dotnet test $project | lane-exempt | wt-focus | 2027-06-30
+
+# streams-to-parent: the child writes to the lane's inherited console on
+# purpose (signoff progress, build logs); incoda's ConPTY captures it, and
+# off-lane runs are exactly what the lane gate refuses. These sites carry no
+# creationflags: on Windows, CREATE_NO_WINDOW discards an inherited stdout
+# when the parent's is a pipe (measured), so the flag is what made a red
+# signoff leg print nothing at all.
+.agents/scripts/signoff.py | subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt")) | streams-to-parent | wt-focus | 2027-06-30
+.agents/scripts/test_reachability.py | subprocess.run(cmd, cwd=repo) | streams-to-parent | wt-focus | 2027-06-30
