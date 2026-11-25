@@ -149,6 +149,12 @@ blending: configpkg.Config.AlphaBlending = .native,
 /// thing that clears it.
 device_lost: bool = false,
 
+/// Why the device was lost, as the driver reported it when
+/// `markDeviceLost` latched. Null when no device was there to ask, and
+/// cleared with `device_lost` by a successful `recoverDevice`. Kept so a
+/// crash report can say why without asking a dead device a second time.
+device_lost_reason: ?u32 = null,
+
 /// What `init` built the device for, kept so `recoverDevice` can build
 /// the same thing again after a TDR or a driver upgrade takes it away.
 surface: ?Surface = null,
@@ -846,6 +852,7 @@ pub fn recoverDevice(self: *DirectX12) !void {
 
     try self.initGpu(surface, width, height);
     self.device_lost = false;
+    self.device_lost_reason = null;
     log.info("DX12 device recreated after loss ({}x{})", .{ width, height });
 }
 
@@ -1687,6 +1694,7 @@ fn markDeviceLost(self: *DirectX12, origin: DeviceLostOrigin) void {
         @bitCast(dev_ptr.device.GetDeviceRemovedReason())
     else
         null;
+    self.device_lost_reason = reason;
 
     if (origin == .draw) {
         if (reason) |value|

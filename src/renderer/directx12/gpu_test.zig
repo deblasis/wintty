@@ -4356,11 +4356,27 @@ fn checkRealDataFenceHooks() !void {
     try pinned(!hooks.removed(), "the real removed() reports a healthy device as removed", .{});
     Fake.reason = com.DXGI_ERROR_DEVICE_REMOVED;
     try pinned(hooks.removed(), "the real removed() does not report a removed device", .{});
+    // The other two codes FAILED() covers. A removed() that compares
+    // against DXGI_ERROR_DEVICE_REMOVED alone passes the two cases above
+    // and then treats a hung or reset device as healthy.
+    Fake.reason = com.DXGI_ERROR_DEVICE_HUNG;
+    try pinned(hooks.removed(), "the real removed() treats a hung device as healthy", .{});
+    Fake.reason = com.DXGI_ERROR_DEVICE_RESET;
+    try pinned(hooks.removed(), "the real removed() treats a reset device as healthy", .{});
     Fake.reason = com.S_OK;
 
     try pinned(!api.deviceLost(), "a fresh renderer starts out lost", .{});
+    // The renderer has to be able to reach the device that markLost()
+    // asks why; without it the reason is skipped, not recorded.
+    api.dev = dev;
+    Fake.reason = com.DXGI_ERROR_DEVICE_HUNG;
     hooks.markLost();
     try pinned(api.deviceLost(), "the real markLost() does not mark the device lost", .{});
+    try pinned(
+        api.device_lost_reason == @as(u32, @bitCast(com.DXGI_ERROR_DEVICE_HUNG)),
+        "the real markLost() recorded reason {?}, not the driver's own 0x{x}",
+        .{ api.device_lost_reason, @as(u32, @bitCast(com.DXGI_ERROR_DEVICE_HUNG)) },
+    );
 
     const signalled = d3d12.CreateEventW(null, .TRUE, .FALSE, null) orelse return error.EventCreationFailed;
     defer _ = d3d12.CloseHandle(signalled);
