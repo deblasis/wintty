@@ -4012,6 +4012,13 @@ test "DirectX12: only prepareFrame selects the frame-data slot" {
 
 test "DirectX12: prepareFrame bounds an unreachable data fence" {
     if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    // Both checks need no device and run first: a regressed budget or a
+    // wait that asks for the wrong thing fails here in microseconds, not
+    // after the real wait below has run.
+    try checkDataFenceWait();
+    try checkHooksShape();
+    try checkRealDataFenceHooks();
+    try pinPrepareFrameDelegates();
     const DirectX12 = @import("../DirectX12.zig");
 
     var api: DirectX12 = .{ .allocator = std.testing.allocator };
@@ -4020,17 +4027,447 @@ test "DirectX12: prepareFrame bounds an unreachable data fence" {
     defer api.deinit();
 
     // No submission can ever reach this value. The wait must fail closed
-    // instead of parking the render thread forever.
+    // instead of parking the render thread forever. How long failing closed
+    // takes is deliberately not measured here: the wait is a count of short
+    // slices, so its wall time is that count times the scheduler's latency
+    // for each wake, and a loaded host stretches that without the wait
+    // being wrong. What the wait asks for is checked in
+    // checkDataFenceWait, against a stand-in that returns at once.
     api.data_fence_values[0] = api.dev.?.fence_value.load(.acquire) + 1000;
-    const started: std.Io.Timestamp = .now(global.io(), .awake);
     try std.testing.expectError(error.FrameSyncFailed, api.prepareFrame(0));
     try std.testing.expect(!api.deviceLost());
-    const elapsed_ms = started.untilNow(global.io(), .awake).toMilliseconds();
-    try std.testing.expect(elapsed_ms < 5000);
     try std.testing.expectError(
         error.InvalidBackBufferIndex,
         api.prepareFrame(api.data_fence_values.len),
     );
+}
+
+test "DirectX12: the data-fence wait asks for bounded slices and fails closed" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try checkDataFenceWait();
+}
+
+test "DirectX12: the real data-fence hooks are three forwards, and forward" {
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try checkHooksShape();
+    try checkRealDataFenceHooks();
+}
+
+test "DirectX12: prepareFrame waits only through the data-fence helper" {
+    try pinPrepareFrameDelegates();
+}
+
+/// What a run of the wait asked of its hooks. The wait reaches the world
+/// only through the hooks it is given, so this sees every wait it makes.
+///
+/// The stand-in never blocks, and past `asked.len` waits it reports the
+/// event signalled and sets `capped`: a loop that does not spend its budget
+/// then ends in a named failure instead of asking forever.
+const WaitStub = struct {
+    asked: [256]u32 = undefined,
+    waits: usize = 0,
+    capped: bool = false,
+    removed_calls: usize = 0,
+    lost: usize = 0,
+    /// The wait call (counting from 1) that finds the event signalled, or
+    /// 0 for never.
+    signal_on_wait: usize = 0,
+    /// The removed() call (counting from 1) from which the device reads as
+    /// removed, or 0 for never.
+    removed_from_call: usize = 0,
+
+    const wait_timeout: u32 = 0x00000102;
+
+    pub fn wait(self: *WaitStub, _: std.os.windows.HANDLE, ms: u32) u32 {
+        if (self.waits >= self.asked.len) {
+            self.capped = true;
+            return 0;
+        }
+        self.asked[self.waits] = ms;
+        self.waits += 1;
+        return if (self.signal_on_wait != 0 and self.waits == self.signal_on_wait) 0 else wait_timeout;
+    }
+
+    pub fn removed(self: *WaitStub) bool {
+        self.removed_calls += 1;
+        return self.removed_from_call != 0 and self.removed_calls >= self.removed_from_call;
+    }
+
+    pub fn markLost(self: *WaitStub) void {
+        self.lost += 1;
+    }
+
+    fn recorded(self: *const WaitStub) []const u32 {
+        return self.asked[0..self.waits];
+    }
+};
+
+/// Whether `result` is the error `e`, and not success or another error.
+fn failedWith(result: anytype, comptime e: anyerror) bool {
+    if (result) |_| return false else |err| return err == e;
+}
+
+/// Runs the data-fence wait against stand-ins and checks what it asked for.
+/// The wait returns the moment a stand-in says so, so a budget of any size
+/// costs microseconds here and a wait that asks to park shows up as the
+/// request it made, not as a hang.
+fn checkDataFenceWait() !void {
+    const DirectX12 = @import("../DirectX12.zig");
+    const budget_ms = DirectX12.data_fence_budget_ms;
+    const slice_ms = DirectX12.data_fence_slice_ms;
+    const event: std.os.windows.HANDLE = @ptrFromInt(0x10);
+
+    // A zero budget deletes the wait, a zero slice divides by zero, and a
+    // budget that is not a whole number of slices steps the u32 counter
+    // past zero (a panic in safe builds, about 4.29e9 ms of passes in
+    // ReleaseFast). Checked before anything is divided or run.
+    try pinned(budget_ms > 0, "the budget is {d} ms; a zero budget deletes the wait", .{budget_ms});
+    try pinned(slice_ms > 0, "the slice is {d} ms; it must wait", .{slice_ms});
+    try pinned(budget_ms % slice_ms == 0, "the budget {d} ms is not a whole number of {d} ms slices; the u32 counter would step past zero", .{ budget_ms, slice_ms });
+    // The ceiling carried over from the old 5000 ms clock bound. It is not
+    // derived from anything: a retune up to it passes without comment.
+    try pinned(budget_ms <= 5000, "the budget is {d} ms, over the 5000 ms ceiling", .{budget_ms});
+    const passes = budget_ms / slice_ms;
+
+    // Nothing ever signals the event and the device stays up: the wait must
+    // ask for the slice, the same number of times, until the budget is
+    // spent, and then fail closed without marking the device lost.
+    {
+        var stub: WaitStub = .{};
+        const result = DirectX12.waitDataFence(event, 7, &stub);
+        try pinned(!stub.capped, "the wait kept asking past {d} waits: it does not spend its budget", .{stub.asked.len});
+        try pinned(failedWith(result, error.FrameSyncFailed), "an unreachable fence ended in {any}, not FrameSyncFailed", .{result});
+        try pinned(stub.waits == passes, "the wait asked {d} times, expected {d} ({d} ms in {d} ms slices)", .{ stub.waits, passes, budget_ms, slice_ms });
+        var asked_ms: u64 = 0;
+        for (stub.recorded(), 0..) |ms, i| {
+            try pinned(ms != d3d12.INFINITE, "wait {d} asked for INFINITE", .{i});
+            try pinned(ms != 0, "wait {d} asked for 0 ms, which polls instead of waiting", .{i});
+            try pinned(ms == slice_ms, "wait {d} asked for {d} ms, expected the {d} ms slice", .{ i, ms, slice_ms });
+            asked_ms += ms;
+        }
+        try pinned(asked_ms == budget_ms, "the waits add up to {d} ms, expected the {d} ms budget", .{ asked_ms, budget_ms });
+        try pinned(stub.lost == 0, "a live device was marked lost {d} time(s)", .{stub.lost});
+    }
+
+    // The event is signalled on the third wait: the wait returns then, and
+    // asks for nothing further.
+    {
+        var stub: WaitStub = .{ .signal_on_wait = 3 };
+        const result = DirectX12.waitDataFence(event, 7, &stub);
+        try pinned(if (result) |_| true else |_| false, "a signalled event ended in {any}, not success", .{result});
+        try pinned(stub.waits == 3, "a signalled event ended the wait after {d} waits, expected 3", .{stub.waits});
+        try pinned(stub.lost == 0, "a signalled event marked the device lost", .{});
+    }
+
+    // The device is removed from the start: the first wait that times out
+    // finds it, marks it lost once, and reports DeviceLost.
+    {
+        var stub: WaitStub = .{ .removed_from_call = 1 };
+        const result = DirectX12.waitDataFence(event, 7, &stub);
+        try pinned(failedWith(result, error.DeviceLost), "a removed device ended in {any}, not DeviceLost", .{result});
+        try pinned(stub.waits == 1, "a removed device was waited on {d} times, expected 1", .{stub.waits});
+        try pinned(stub.lost == 1, "a removed device was marked lost {d} times, expected 1", .{stub.lost});
+    }
+
+    // The device is removed only after the last pass: every check inside
+    // the loop saw it up, so only the check at expiry can find it. That
+    // arm must report DeviceLost, not succeed and not FrameSyncFailed.
+    {
+        var stub: WaitStub = .{ .removed_from_call = passes + 1 };
+        const result = DirectX12.waitDataFence(event, 7, &stub);
+        try pinned(failedWith(result, error.DeviceLost), "a device removed at expiry ended in {any}, not DeviceLost", .{result});
+        try pinned(stub.waits == passes, "the wait asked {d} times before expiry, expected {d}", .{ stub.waits, passes });
+        try pinned(stub.lost == 1, "a device removed at expiry was marked lost {d} times, expected 1", .{stub.lost});
+    }
+}
+
+/// Checks the text of prepareFrame, the helper and its real hooks. This is
+/// the part a stand-in cannot reach: that prepareFrame hands the helper the
+/// real wait, and that neither of them waits some other way.
+///
+/// What it reads, after comments are removed, strings and character
+/// literals blanked and whitespace folded: prepareFrame makes the one call
+/// `waitDataFence(dev.data_fence_event, value, DataFenceHooks{ .api = self, .dev = dev })`;
+/// outside that call it holds no loop, no `wait` or `sleep` in any case,
+/// and no call but `self.handleDeviceRemoved`, `dev.removed`,
+/// `dev.fence.GetCompletedValue`, `dev.fence.SetEventOnCompletion`,
+/// `com.FAILED`, `log.warn` and `self.markDeviceLost`. The helper has no
+/// `self`, no `d3d12`, no `wait` or `sleep` besides its one `hooks.wait(`,
+/// and no call but `hooks.wait`, `hooks.removed`, `hooks.markLost` and
+/// `log.warn`. The real hooks are three functions that forward to
+/// `d3d12.WaitForSingleObject`, `device.removed` and `markDeviceLost`
+/// unchanged.
+///
+/// Out of reach: what the allowed callees do inside (`removed`,
+/// `markDeviceLost`, `GetCompletedValue`, `SetEventOnCompletion`,
+/// `handleDeviceRemoved`, `log.warn`) and what the real forwards reach; a
+/// file-level alias, a declaration that shadows one of these names, or a
+/// comptime trick that changes what a name means. Nothing times the wait:
+/// what it costs is the slice count times the real wait, and the real wait
+/// is a plain forward.
+fn pinPrepareFrameDelegates() !void {
+    const alloc = std.testing.allocator;
+    const src = @embedFile("../DirectX12.zig");
+
+    const file = try foldedCode(alloc, src);
+    defer alloc.free(file);
+
+    // prepareFrame: one call into the helper, and nothing else that waits.
+    const frame = try sliceOf(file, "pub fn prepareFrame(", " pub const data_fence_budget_ms");
+    const call = "try waitDataFence(dev.data_fence_event, value, DataFenceHooks{ .api = self, .dev = dev });";
+    try pinned(std.mem.count(u8, frame, call) == 1, "prepareFrame does not make exactly one `{s}`", .{call});
+    const at = std.mem.indexOf(u8, frame, call).?;
+    const without_call = try std.mem.concat(alloc, u8, &.{ frame[0..at], frame[at + call.len ..] });
+    defer alloc.free(without_call);
+    // `.wait` is the name of the device-lost origin, not a wait.
+    const without_origin = try std.mem.replaceOwned(u8, alloc, without_call, "markDeviceLost(.wait)", "markDeviceLost()");
+    defer alloc.free(without_origin);
+
+    // The event the wait runs on is the one the fence was told to signal,
+    // and nothing else in prepareFrame names it or builds a second hooks
+    // value: an assignment to `dev.data_fence_event` (the shared event
+    // swapped in) or a spare `DataFenceHooks{...}` has nowhere to stand.
+    const register = "dev.fence.SetEventOnCompletion(value, dev.data_fence_event)";
+    try pinned(std.mem.count(u8, without_origin, register) == 1, "prepareFrame does not register exactly one `{s}`", .{register});
+    const rest = try std.mem.replaceOwned(u8, alloc, without_origin, register, "dev.fence.SetEventOnCompletion()");
+    defer alloc.free(rest);
+    inline for (.{ "data_fence_event", "DataFenceHooks" }) |needle| {
+        const hit = std.mem.indexOf(u8, rest, needle);
+        try pinned(hit == null, "prepareFrame names `" ++ needle ++ "` outside the helper call and the one registration: `{s}`", .{around(rest, hit orelse 0)});
+    }
+    inline for (.{ "wait", "sleep" }) |needle| {
+        const hit = indexOfCaseless(rest, needle);
+        try pinned(hit == null, "prepareFrame holds `" ++ needle ++ "` outside the helper call: `{s}`", .{around(rest, hit orelse 0)});
+    }
+    inline for (.{ "while (", "for (", "while(", "for(" }) |needle| {
+        const hit = std.mem.indexOf(u8, rest, needle);
+        try pinned(hit == null, "prepareFrame holds a loop: `{s}`", .{around(rest, hit orelse 0)});
+    }
+
+    // Every call in prepareFrame is one of a fixed list, so a wait hidden
+    // behind a name with no `wait` in it (`self.syncUp()`) has nowhere to
+    // stand. The helper call is already removed from `rest`. A call is a
+    // `(` that follows a name or a dot; `if (` has a space and is not one.
+    const frame_calls = [_][]const u8{
+        "prepareFrame", // its own signature
+        "self.handleDeviceRemoved",
+        "dev.removed",
+        "dev.fence.GetCompletedValue",
+        "dev.fence.SetEventOnCompletion",
+        "com.FAILED",
+        "log.warn",
+        "self.markDeviceLost",
+    };
+    for (rest, 0..) |c, i| {
+        if (c != '(' or i == 0 or !isCalleeByte(rest[i - 1])) continue;
+        var from = i;
+        while (from > 0 and isCalleeByte(rest[from - 1])) from -= 1;
+        const callee = rest[from..i];
+        var ok = false;
+        for (frame_calls) |name| ok = ok or std.mem.eql(u8, callee, name);
+        try pinned(ok, "prepareFrame calls `{s}`, which is not on the list of calls it may make", .{callee});
+    }
+
+    // The helper, past its signature: only its hooks.
+    const helper = try sliceOf(file, "var remaining_ms: u32 = data_fence_budget_ms;", " pub inline fn beginFrame(");
+    try pinned(std.mem.count(u8, helper, "hooks.wait(") == 1, "the helper does not make exactly one `hooks.wait(`", .{});
+    try pinned(std.mem.indexOf(u8, helper, "d3d12") == null, "the helper names d3d12: `{s}`", .{around(helper, std.mem.indexOf(u8, helper, "d3d12") orelse 0)});
+    try pinned(std.mem.indexOf(u8, helper, "self") == null, "the helper names self: `{s}`", .{around(helper, std.mem.indexOf(u8, helper, "self") orelse 0)});
+    const scrubbed = try std.mem.replaceOwned(u8, alloc, helper, "hooks.wait(", "(");
+    defer alloc.free(scrubbed);
+    inline for (.{ "wait", "sleep" }) |needle| {
+        const hit = indexOfCaseless(scrubbed, needle);
+        try pinned(hit == null, "the helper holds `" ++ needle ++ "` besides its hooks: `{s}`", .{around(scrubbed, hit orelse 0)});
+    }
+    // Every call in the helper is one of four. A call is a `(` that follows
+    // a name or a dot; `while (` and `if (` have a space and are not calls.
+    const allowed = [_][]const u8{ "hooks.wait", "hooks.removed", "hooks.markLost", "log.warn" };
+    for (helper, 0..) |c, i| {
+        if (c != '(' or i == 0 or !(isCalleeByte(helper[i - 1]))) continue;
+        var from = i;
+        while (from > 0 and isCalleeByte(helper[from - 1])) from -= 1;
+        const callee = helper[from..i];
+        var ok = false;
+        for (allowed) |name| ok = ok or std.mem.eql(u8, callee, name);
+        try pinned(ok, "the helper calls `{s}`, which is not one of its hooks or log.warn", .{callee});
+    }
+
+    // The real hooks are held as one whole body, not as a set of needles:
+    // a nested struct, an extra declaration or an alias of a function
+    // declared elsewhere all change the text, and a needle count would
+    // still find the three forwards inside them.
+    const hooks = try sliceOf(file, "pub const DataFenceHooks = struct {", " pub fn waitDataFence(");
+    const expected_hooks = "pub const DataFenceHooks = struct { api: *DirectX12, dev: *const device.Device," ++
+        " pub fn wait(_: DataFenceHooks, event: std.os.windows.HANDLE, ms: u32) u32 { return d3d12.WaitForSingleObject(event, ms); }" ++
+        " pub fn removed(h: DataFenceHooks) bool { return h.dev.removed(); }" ++
+        " pub fn markLost(h: DataFenceHooks) void { h.api.markDeviceLost(.wait); } };";
+    try pinned(std.mem.eql(u8, hooks, expected_hooks), "the real hooks are not exactly the three forwards:\n  found:    {s}\n  expected: {s}", .{ hooks, expected_hooks });
+}
+
+/// What the type system can say about the real hooks: three public
+/// functions and two fields, by name. It cannot say they forward. A private
+/// nested struct is not listed at all, and a public constant that aliases a
+/// function declared elsewhere has the same type as a function written in
+/// place, so a decoy and the real struct print the same list. The whole-body
+/// text check and the run-time check below carry that.
+fn checkHooksShape() !void {
+    const Hooks = @import("../DirectX12.zig").DataFenceHooks;
+    const info = @typeInfo(Hooks).@"struct";
+    const want_decls = [_][]const u8{ "wait", "removed", "markLost" };
+    const want_fields = [_][]const u8{ "api", "dev" };
+    try pinned(info.decl_names.len == want_decls.len, "the real hooks list {d} public declarations, expected {d}", .{ info.decl_names.len, want_decls.len });
+    try pinned(info.field_names.len == want_fields.len, "the real hooks have {d} fields, expected {d}", .{ info.field_names.len, want_fields.len });
+    inline for (want_decls) |name| {
+        try pinned(@hasDecl(Hooks, name), "the real hooks lack `{s}`", .{name});
+        try pinned(@typeInfo(@TypeOf(@field(Hooks, name))) == .@"fn", "the real hooks' `{s}` is not a function", .{name});
+    }
+    inline for (want_fields) |name| try pinned(@hasField(Hooks, name), "the real hooks lack the field `{s}`", .{name});
+}
+
+/// The real hooks, run: no GPU, no renderer, only a fake device whose
+/// removed-reason the test sets. A decoy that aliases the three names to
+/// other functions (a wait that ignores its timeout, a `removed` that is
+/// always false, a `markLost` that marks nothing) fails here whatever its
+/// text says. The one clock reading is a lower bound: a wait of 100 ms
+/// cannot return before about 100 ms, so a loaded host only lengthens it
+/// and the bound cannot flake.
+fn checkRealDataFenceHooks() !void {
+    const DirectX12 = @import("../DirectX12.zig");
+    const Hooks = DirectX12.DataFenceHooks;
+
+    const Fake = struct {
+        var reason: com.HRESULT = com.S_OK;
+        fn removedReason(_: *d3d12.ID3D12Device) callconv(.winapi) com.HRESULT {
+            return reason;
+        }
+    };
+    // A device whose only live method is GetDeviceRemovedReason: a table of
+    // pointers laid out like the real vtable, with that one slot filled.
+    var table: [128]?*const anyopaque = @splat(null);
+    const slot = @offsetOf(d3d12.ID3D12Device.VTable, "GetDeviceRemovedReason") / @sizeOf(*const anyopaque);
+    table[slot] = @ptrCast(&Fake.removedReason);
+    var fake_device: d3d12.ID3D12Device = .{ .vtable = @ptrCast(&table) };
+    var dev: Device = undefined;
+    dev.device = &fake_device;
+    var api: DirectX12 = .{ .allocator = std.testing.allocator };
+    const hooks: Hooks = .{ .api = &api, .dev = &dev };
+
+    Fake.reason = com.S_OK;
+    try pinned(!hooks.removed(), "the real removed() reports a healthy device as removed", .{});
+    Fake.reason = com.DXGI_ERROR_DEVICE_REMOVED;
+    try pinned(hooks.removed(), "the real removed() does not report a removed device", .{});
+    Fake.reason = com.S_OK;
+
+    try pinned(!api.deviceLost(), "a fresh renderer starts out lost", .{});
+    hooks.markLost();
+    try pinned(api.deviceLost(), "the real markLost() does not mark the device lost", .{});
+
+    const signalled = d3d12.CreateEventW(null, .TRUE, .FALSE, null) orelse return error.EventCreationFailed;
+    defer _ = d3d12.CloseHandle(signalled);
+    _ = ProbeFence.kernel32.SetEvent(signalled);
+    const got = hooks.wait(signalled, 100);
+    try pinned(got == 0, "the real wait() on a signalled event returned {d}, not 0", .{got});
+
+    const quiet = d3d12.CreateEventW(null, .TRUE, .FALSE, null) orelse return error.EventCreationFailed;
+    defer _ = d3d12.CloseHandle(quiet);
+    const started: std.Io.Timestamp = .now(global.io(), .awake);
+    const timed_out = hooks.wait(quiet, 100);
+    const waited_ms = started.untilNow(global.io(), .awake).toMilliseconds();
+    try pinned(timed_out == WaitStub.wait_timeout, "the real wait() on a silent event returned {d}, not the timeout", .{timed_out});
+    try pinned(waited_ms >= 50, "the real wait() asked to wait 100 ms and came back after {d} ms: it ignores its timeout", .{waited_ms});
+}
+
+/// The index of the first occurrence of `needle` in `hay`, ignoring ASCII
+/// case, or null. `needle` is lower case.
+fn indexOfCaseless(hay: []const u8, needle: []const u8) ?usize {
+    if (needle.len > hay.len) return null;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        for (needle, 0..) |n, k| {
+            if (std.ascii.toLower(hay[i + k]) != n) break;
+        } else return i;
+    }
+    return null;
+}
+
+fn isCalleeByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '.' or c == '@';
+}
+
+/// `src` with line comments and multiline-string lines removed, string and
+/// character literals blanked, and every run of whitespace folded to one
+/// space. Caller frees.
+fn foldedCode(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    const code = try codeOnly(allocator, src, false);
+    defer allocator.free(code);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var prev_space = true;
+    for (code) |c| {
+        const space = std.mem.indexOfScalar(u8, " \t\r\n", c) != null;
+        if (space and prev_space) continue;
+        try out.append(allocator, if (space) ' ' else c);
+        prev_space = space;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// The text from `open` up to, not including, the first `close` after it.
+fn sliceOf(folded: []const u8, open: []const u8, close: []const u8) ![]const u8 {
+    try pinned(std.mem.count(u8, folded, open) == 1, "expected exactly one `{s}` in DirectX12.zig", .{open});
+    const from = std.mem.indexOf(u8, folded, open).?;
+    const to = std.mem.indexOfPos(u8, folded, from, close) orelse {
+        try pinned(false, "`{s}` is never closed by `{s}`", .{ open, close });
+        unreachable;
+    };
+    return folded[from..to];
+}
+
+/// Up to 60 bytes of `s` around `idx`, to name the offending code.
+fn around(s: []const u8, idx: usize) []const u8 {
+    const from = idx -| 30;
+    return s[from..@min(s.len, idx + 30)];
+}
+
+/// Prints `fmt` under the check's prefix and fails when `ok` is false, so a
+/// failed check names the number or the shape it found.
+fn pinned(ok: bool, comptime fmt: []const u8, args: anytype) !void {
+    if (ok) return;
+    std.debug.print("data-fence wait: " ++ fmt ++ "\n", args);
+    return error.DataFenceWaitCheckFailed;
+}
+
+/// A copy of `src` read the way `codeTextContains` reads it: line comments
+/// and multiline string literal lines are dropped, escapes are honoured
+/// inside string and character literals, string literals are blanked to
+/// `""` unless `keep_strings`, and character literals to `''`. Caller
+/// frees.
+fn codeOnly(allocator: std.mem.Allocator, src: []const u8, keep_strings: bool) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < src.len) {
+        const c = src[i];
+        if (c == '"' or c == '\'') {
+            var j = i + 1;
+            while (j < src.len and src[j] != c) j += if (src[j] == '\\') 2 else 1;
+            const end = @min(j + 1, src.len);
+            if (c == '"' and !keep_strings) {
+                try out.appendSlice(allocator, "\"\"");
+            } else if (c == '\'') {
+                try out.appendSlice(allocator, "''");
+            } else {
+                try out.appendSlice(allocator, src[i..end]);
+            }
+            i = end;
+        } else if ((c == '\\' or c == '/') and i + 1 < src.len and src[i + 1] == c) {
+            while (i < src.len and src[i] != '\n') i += 1;
+        } else {
+            try out.append(allocator, c);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 /// A forwarding stand-in for the fence a wait runs against. The wait
