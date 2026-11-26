@@ -156,6 +156,10 @@ fn tryPathImpl(
         // The entry names a network location that cannot be reached. It holds
         // nothing this walk can read: a miss, and the walk goes on.
         error.NetworkNotFound => return null,
+        // The OS refuses the name for its length before it looks for anything
+        // behind it, so nothing there can be read: a miss, and the walk goes
+        // on.
+        error.NameTooLong => return null,
         else => return err,
     };
     defer f.close(io);
@@ -328,7 +332,7 @@ const Fixture = struct {
     }
 };
 
-// Two entries the OS refuses to open, each with a different error from
+// Entries the OS refuses to open, each with a different error from
 // `openFile`. Each shape below runs once per entry as its own test, so that
 // one entry failing cannot hide what the other did.
 
@@ -337,6 +341,24 @@ const bad_name_entry = "\x01\x02";
 
 /// A share on a host that does not exist.
 const offline_share_entry = "\\\\host-does-not-exist-1477\\share";
+
+/// `C:\` padded with `a` to `len` bytes: an entry whose name is refused for
+/// its length.
+///
+/// The OS only reports `NameTooLong` once `<entry>\<name>` is 32763 to 32767
+/// bytes. Shorter joined text reaches the kernel and comes back as
+/// `Unexpected`, and 32768 or more panics inside std's UTF-16 conversion, so
+/// each test sizes the entry for the longest name it opens behind it.
+fn longEntry(comptime len: usize) [len]u8 {
+    @setEvalBranchQuota(4 * len);
+    var entry: [len]u8 = undefined;
+    @memcpy(entry[0.."C:\\".len], "C:\\");
+    @memset(entry["C:\\".len..], 'a');
+    return entry;
+}
+
+/// Sized for the 12-byte command name the walk-continues tests open.
+const long_name_entry: []const u8 = &longEntry(32753);
 
 /// `<entry>;<dir>`: the refused entry first, a real directory after it.
 fn pathAfter(entry: []const u8, dir: []const u8) ![]u8 {
@@ -395,6 +417,17 @@ test "expandPath: the walk continues past a NetworkNotFound entry" {
 test "expandPath: a NetworkNotFound entry does not turn a miss into an error" {
     try expectCleanMissAfter(offline_share_entry);
     try expectCleanMissOnly(offline_share_entry);
+}
+
+test "expandPath: the walk continues past a NameTooLong entry" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try expectWalkContinues(long_name_entry);
+}
+
+test "expandPath: a NameTooLong entry does not turn a miss into an error" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try expectCleanMissAfter(long_name_entry);
+    try expectCleanMissOnly(long_name_entry);
 }
 
 /// A directory holding a file that exists and that the process may not open,
