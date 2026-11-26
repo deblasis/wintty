@@ -10,10 +10,34 @@ const testing = std.testing;
 /// On Windows, honors PATHEXT when searching for bare command names.
 /// If cmd is already a path or has an extension, tries it literally first
 /// before attempting PATHEXT extensions.
+///
+/// Reads PATH and PATHEXT from `environ_map` and hands them to `expandPath`,
+/// which owns the walk and all of its parsing.
 pub fn expand(
     io: std.Io,
     alloc: Allocator,
     environ_map: *const std.process.Environ.Map,
+    cmd: []const u8,
+) !?[]u8 {
+    // An unset PATH reaches the walk as an empty one, so that an
+    // already-a-path command is still returned first.
+    return expandPath(
+        io,
+        alloc,
+        environ_map.get("PATH") orelse "",
+        environ_map.get("PATHEXT"),
+        cmd,
+    );
+}
+
+/// Same contract as `expand`, but walks the PATH text it is given.
+/// `path` is the value of PATH and `pathext` the value of PATHEXT, or null
+/// when PATHEXT is unset (Windows then uses the documented default set).
+pub fn expandPath(
+    io: std.Io,
+    alloc: Allocator,
+    path: []const u8,
+    pathext: ?[]const u8,
     cmd: []const u8,
 ) !?[]u8 {
     // If the command already contains a path separator, return as-is.
@@ -29,8 +53,6 @@ pub fn expand(
         return try alloc.dupe(u8, cmd);
     }
 
-    const PATH = environ_map.get("PATH") orelse return null;
-
     // Parse PATHEXT on Windows. Only bare names (no extension) need it;
     // anything already carrying an extension is tried literally.
     var pathext_list: ?[][]const u8 = null;
@@ -39,7 +61,7 @@ pub fn expand(
 
     if (builtin.target.os.tag == .windows and !has_extension) {
         // Fall back to the documented default set when PATHEXT is unset.
-        const pathext_str = environ_map.get("PATHEXT") orelse ".COM;.EXE;.BAT;.CMD";
+        const pathext_str = pathext orelse ".COM;.EXE;.BAT;.CMD";
 
         var ext_count: usize = 0;
         var count_it = std.mem.tokenizeScalar(u8, pathext_str, ';');
@@ -55,7 +77,7 @@ pub fn expand(
     }
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var it = std.mem.tokenizeScalar(u8, PATH, std.fs.path.delimiter);
+    var it = std.mem.tokenizeScalar(u8, path, std.fs.path.delimiter);
     var seen_eacces = false;
     while (it.next()) |search_path| {
         // We need enough space in our path buffer to store this
