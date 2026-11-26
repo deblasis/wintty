@@ -150,6 +150,12 @@ fn tryPathImpl(
             seen_eacces.* = true;
             return null;
         },
+        // The entry is text the OS will not turn into a name, so nothing can
+        // sit behind it: a miss, and the walk goes on.
+        error.BadPathName => return null,
+        // The entry names a network location that cannot be reached. It holds
+        // nothing this walk can read: a miss, and the walk goes on.
+        error.NetworkNotFound => return null,
         else => return err,
     };
     defer f.close(io);
@@ -299,5 +305,151 @@ test "tryPathImpl: a full path leaves no room for the NUL" {
     try testing.expectError(
         error.PathTooLong,
         tryPathImpl(testing.io, testing.allocator, &search_path, "x", &path_buf, &seen_eacces),
+    );
+}
+
+/// A real directory holding a file named `name`, with the absolute path of
+/// that directory, for tests that walk a PATH entry by entry.
+const Fixture = struct {
+    tmp: testing.TmpDir,
+    dir_path: [:0]u8,
+
+    fn init(name: []const u8) !Fixture {
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = name, .data = "" });
+        const dir_path = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+        return .{ .tmp = tmp, .dir_path = dir_path };
+    }
+
+    fn deinit(self: *Fixture) void {
+        testing.allocator.free(self.dir_path);
+        self.tmp.cleanup();
+    }
+};
+
+// Two entries the OS refuses to open, each with a different error from
+// `openFile`. Each shape below runs once per entry as its own test, so that
+// one entry failing cannot hide what the other did.
+
+/// Control characters make the OS reject the name as text.
+const bad_name_entry = "\x01\x02";
+
+/// A share on a host that does not exist.
+const offline_share_entry = "\\\\host-does-not-exist-1477\\share";
+
+/// `<entry>;<dir>`: the refused entry first, a real directory after it.
+fn pathAfter(entry: []const u8, dir: []const u8) ![]u8 {
+    return std.fmt.allocPrint(testing.allocator, "{s};{s}", .{ entry, dir });
+}
+
+/// The walk passes over `entry` and finds the command in the next entry.
+fn expectWalkContinues(entry: []const u8) !void {
+    var fx = try Fixture.init("cmd-1477.exe");
+    defer fx.deinit();
+    const path_value = try pathAfter(entry, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    const found = (try expandPath(testing.io, testing.allocator, path_value, null, "cmd-1477.exe")).?;
+    defer testing.allocator.free(found);
+
+    try testing.expect(std.mem.startsWith(u8, found, fx.dir_path));
+    try testing.expect(std.mem.endsWith(u8, found, "cmd-1477.exe"));
+}
+
+/// The walk passes over `entry`, finds nothing in the next entry, and ends
+/// in a clean miss rather than the entry's error.
+fn expectCleanMissAfter(entry: []const u8) !void {
+    var fx = try Fixture.init("other-1477.exe");
+    defer fx.deinit();
+    const path_value = try pathAfter(entry, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try expandPath(testing.io, testing.allocator, path_value, null, "cmd-1477.exe"),
+    );
+}
+
+/// A PATH that holds only `entry` ends in a clean miss.
+fn expectCleanMissOnly(entry: []const u8) !void {
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try expandPath(testing.io, testing.allocator, entry, null, "cmd-1477.exe"),
+    );
+}
+
+test "expandPath: the walk continues past a BadPathName entry" {
+    try expectWalkContinues(bad_name_entry);
+}
+
+test "expandPath: a BadPathName entry does not turn a miss into an error" {
+    try expectCleanMissAfter(bad_name_entry);
+    try expectCleanMissOnly(bad_name_entry);
+}
+
+test "expandPath: the walk continues past a NetworkNotFound entry" {
+    try expectWalkContinues(offline_share_entry);
+}
+
+test "expandPath: a NetworkNotFound entry does not turn a miss into an error" {
+    try expectCleanMissAfter(offline_share_entry);
+    try expectCleanMissOnly(offline_share_entry);
+}
+
+/// A directory holding a file that exists and that the process may not open,
+/// with no ACL of the test's own to change or restore: the registry hive is
+/// readable only with privileges a test run does not have.
+const denied_dir = "C:\\Windows\\System32\\config";
+const denied_name = "SAM";
+
+/// Skips unless `denied_dir` really denies this process, so the tests below
+/// pin the denial memory only where there is a denial to remember.
+fn requireDeniedFile() !void {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    const probe = std.fmt.allocPrint(testing.allocator, "{s}\\{s}", .{ denied_dir, denied_name }) catch return error.SkipZigTest;
+    defer testing.allocator.free(probe);
+    if (std.Io.Dir.cwd().openFile(testing.io, probe, .{})) |f| {
+        f.close(testing.io);
+        return error.SkipZigTest;
+    } else |err| {
+        if (err != error.AccessDenied) return error.SkipZigTest;
+    }
+}
+
+test "expandPath: a command found behind a denied entry is still returned" {
+    try requireDeniedFile();
+    var fx = try Fixture.init(denied_name);
+    defer fx.deinit();
+    const path_value = try pathAfter(denied_dir, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    const found = (try expandPath(testing.io, testing.allocator, path_value, null, denied_name)).?;
+    defer testing.allocator.free(found);
+
+    try testing.expect(std.mem.startsWith(u8, found, fx.dir_path));
+    try testing.expect(std.mem.endsWith(u8, found, denied_name));
+}
+
+test "expandPath: denied everywhere ends in AccessDenied" {
+    try requireDeniedFile();
+    try testing.expectError(
+        error.AccessDenied,
+        expandPath(testing.io, testing.allocator, denied_dir, null, denied_name),
+    );
+}
+
+test "expandPath: a PATH too long to join is still a hard failure" {
+    // The literal candidate is refused by the walk's own pre-check, before
+    // any entry is opened, so this pins that the pre-check still returns the
+    // error instead of becoming a miss.
+    var long_entry: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    @memset(&long_entry, 'a');
+    const path_value = try std.fmt.allocPrint(testing.allocator, "{s};.", .{&long_entry});
+    defer testing.allocator.free(path_value);
+
+    try testing.expectError(
+        error.PathTooLong,
+        expandPath(testing.io, testing.allocator, path_value, null, "x"),
     );
 }
