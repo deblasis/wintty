@@ -150,16 +150,27 @@ fn tryPathImpl(
             seen_eacces.* = true;
             return null;
         },
-        // The entry is text the OS will not turn into a name, so nothing can
-        // sit behind it: a miss, and the walk goes on.
+        // The OS will not turn the joined text into a name. `openFile` does
+        // not say whether the entry or the command's own text is at fault, so
+        // a command name the OS refuses (a `"`, `<>|`) is a miss for every
+        // entry and ends as a clean null. The one caller treats that as
+        // "absent".
         error.BadPathName => return null,
-        // The entry names a network location that cannot be reached. It holds
-        // nothing this walk can read: a miss, and the walk goes on.
+        // The entry names a network location that holds nothing this walk can
+        // read: a miss, and the walk goes on. It is returned for a host that
+        // cannot be reached and for a share that does not exist on a host
+        // that answers. The miss leaves no trace, so a command that is also
+        // further down PATH resolves to that copy.
         error.NetworkNotFound => return null,
         // The OS refuses the name for its length before it looks for anything
         // behind it, so nothing there can be read: a miss, and the walk goes
         // on.
         error.NameTooLong => return null,
+        // `Unexpected` is reachable from a PATH entry this long: joined with a
+        // name of 32748 to 32762 bytes it reaches the kernel, which answers
+        // with a status std leaves unmapped. It is returned on purpose,
+        // because it is also what a real std bug looks like, and so is any
+        // error a later std adds here: that fails loudly by design.
         else => return err,
     };
     defer f.close(io);
@@ -339,16 +350,18 @@ const Fixture = struct {
 /// Control characters make the OS reject the name as text.
 const bad_name_entry = "\x01\x02";
 
-/// A share on a host that does not exist.
+/// A share on a host that does not exist. The first open of it is
+/// network-bound and takes about a second; later ones hit a negative cache.
 const offline_share_entry = "\\\\host-does-not-exist-1477\\share";
 
 /// `C:\` padded with `a` to `len` bytes: an entry whose name is refused for
 /// its length.
 ///
-/// The OS only reports `NameTooLong` once `<entry>\<name>` is 32763 to 32767
+/// The OS only reports `NameTooLong` once `<entry>\<name>` is 32763 to 32766
 /// bytes. Shorter joined text reaches the kernel and comes back as
-/// `Unexpected`, and 32768 or more panics inside std's UTF-16 conversion, so
-/// each test sizes the entry for the longest name it opens behind it.
+/// `Unexpected`, which std leaves unmapped; 32767 is `BadPathName`; and
+/// 32768 or more panics inside std's UTF-16 conversion. Each test sizes the
+/// entry for the longest name it opens behind it.
 fn longEntry(comptime len: usize) [len]u8 {
     @setEvalBranchQuota(4 * len);
     var entry: [len]u8 = undefined;
@@ -359,6 +372,16 @@ fn longEntry(comptime len: usize) [len]u8 {
 
 /// Sized for the 12-byte command name the walk-continues tests open.
 const long_name_entry: []const u8 = &longEntry(32753);
+
+/// Sized for the bare-name tests: joined with `w` it is 32763 bytes and with
+/// `w.c` 32765, so both the bare candidate and the PATHEXT one are refused as
+/// too long.
+const long_name_entry_bare: []const u8 = &longEntry(32761);
+
+/// The name `requireOpenError` opens behind a too-long entry. It is as long
+/// as the command name the walk opens there, so the probe is refused exactly
+/// where the walk is.
+const long_probe_name = "cmd-1477.exe";
 
 /// `<entry>;<dir>`: the refused entry first, a real directory after it.
 fn pathAfter(entry: []const u8, dir: []const u8) ![]u8 {
@@ -401,33 +424,134 @@ fn expectCleanMissOnly(entry: []const u8) !void {
     );
 }
 
+/// The entry must be refused with exactly this error from `openFile`, so a
+/// test cannot pass by accident on an entry that is simply absent. `name` is
+/// what to open behind the entry: a too-long entry is refused by length, so
+/// it has to be probed with the same name the walk opens there.
+fn requireOpenError(entry: []const u8, name: []const u8, expected: anyerror) !void {
+    const probe = try std.fmt.allocPrint(testing.allocator, "{s}\\{s}", .{ entry, name });
+    defer testing.allocator.free(probe);
+    return testing.expectError(expected, std.Io.Dir.cwd().openFile(testing.io, probe, .{}));
+}
+
+/// The walk passes over `entry` and finds the bare-named command in the next
+/// entry through PATHEXT, which is the path the build's pandoc probe takes.
+/// PATHEXT is one two-byte extension so that behind a too-long entry the
+/// bare and the extended candidate are both refused as too long.
+const bare_pathext = ".c";
+const bare_name = "w";
+
+fn expectWalkContinuesBare(entry: []const u8) !void {
+    var fx = try Fixture.init("w.c");
+    defer fx.deinit();
+    const path_value = try pathAfter(entry, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    const found = (try expandPath(testing.io, testing.allocator, path_value, bare_pathext, bare_name)).?;
+    defer testing.allocator.free(found);
+
+    try testing.expect(std.mem.startsWith(u8, found, fx.dir_path));
+    try testing.expect(std.mem.endsWith(u8, found, "w.c"));
+}
+
+/// The walk passes over `entry` through PATHEXT, finds nothing in the next
+/// entry, and ends in a clean miss for the bare name.
+fn expectCleanMissAfterBare(entry: []const u8) !void {
+    var fx = try Fixture.init("other-1477.c");
+    defer fx.deinit();
+    const path_value = try pathAfter(entry, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try expandPath(testing.io, testing.allocator, path_value, bare_pathext, bare_name),
+    );
+}
+
 test "expandPath: the walk continues past a BadPathName entry" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(bad_name_entry, "zz", error.BadPathName);
     try expectWalkContinues(bad_name_entry);
 }
 
 test "expandPath: a BadPathName entry does not turn a miss into an error" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(bad_name_entry, "zz", error.BadPathName);
     try expectCleanMissAfter(bad_name_entry);
     try expectCleanMissOnly(bad_name_entry);
 }
 
 test "expandPath: the walk continues past a NetworkNotFound entry" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(offline_share_entry, "zz", error.NetworkNotFound);
     try expectWalkContinues(offline_share_entry);
 }
 
 test "expandPath: a NetworkNotFound entry does not turn a miss into an error" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(offline_share_entry, "zz", error.NetworkNotFound);
     try expectCleanMissAfter(offline_share_entry);
     try expectCleanMissOnly(offline_share_entry);
 }
 
 test "expandPath: the walk continues past a NameTooLong entry" {
     if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(long_name_entry, long_probe_name, error.NameTooLong);
     try expectWalkContinues(long_name_entry);
 }
 
 test "expandPath: a NameTooLong entry does not turn a miss into an error" {
     if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(long_name_entry, long_probe_name, error.NameTooLong);
     try expectCleanMissAfter(long_name_entry);
     try expectCleanMissOnly(long_name_entry);
+}
+
+test "expandPath: the walk continues past a BadPathName entry for a bare name" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(bad_name_entry, "zz", error.BadPathName);
+    try expectWalkContinuesBare(bad_name_entry);
+}
+
+test "expandPath: a BadPathName entry does not turn a bare miss into an error" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(bad_name_entry, "zz", error.BadPathName);
+    try expectCleanMissAfterBare(bad_name_entry);
+}
+
+test "expandPath: the walk continues past a NetworkNotFound entry for a bare name" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(offline_share_entry, "zz", error.NetworkNotFound);
+    try expectWalkContinuesBare(offline_share_entry);
+}
+
+test "expandPath: a NetworkNotFound entry does not turn a bare miss into an error" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(offline_share_entry, "zz", error.NetworkNotFound);
+    try expectCleanMissAfterBare(offline_share_entry);
+}
+
+test "expandPath: the walk continues past a NameTooLong entry for a bare name" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(long_name_entry_bare, bare_name, error.NameTooLong);
+    try requireOpenError(long_name_entry_bare, "w.c", error.NameTooLong);
+    try expectWalkContinuesBare(long_name_entry_bare);
+}
+
+test "expandPath: a NameTooLong entry does not turn a bare miss into an error" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(long_name_entry_bare, bare_name, error.NameTooLong);
+    try requireOpenError(long_name_entry_bare, "w.c", error.NameTooLong);
+    try expectCleanMissAfterBare(long_name_entry_bare);
+}
+
+test "expandPath: a command name the OS refuses is a clean miss, not an error" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError("C:\\Windows\\System32", "cmd\"exe", error.BadPathName);
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try expandPath(testing.io, testing.allocator, "C:\\Windows\\System32", null, "cmd\"exe"),
+    );
 }
 
 /// A directory holding a file that exists and that the process may not open,
@@ -436,17 +560,35 @@ test "expandPath: a NameTooLong entry does not turn a miss into an error" {
 const denied_dir = "C:\\Windows\\System32\\config";
 const denied_name = "SAM";
 
-/// Skips unless `denied_dir` really denies this process, so the tests below
-/// pin the denial memory only where there is a denial to remember.
-fn requireDeniedFile() !void {
+/// Probes `denied_dir\denied_name`, a file that exists and that a process
+/// without privileges may not open.
+fn openDeniedFile() !std.Io.File {
     if (builtin.target.os.tag != .windows) return error.SkipZigTest;
-    const probe = std.fmt.allocPrint(testing.allocator, "{s}\\{s}", .{ denied_dir, denied_name }) catch return error.SkipZigTest;
+    const probe = try std.fmt.allocPrint(testing.allocator, "{s}\\{s}", .{ denied_dir, denied_name });
     defer testing.allocator.free(probe);
-    if (std.Io.Dir.cwd().openFile(testing.io, probe, .{})) |f| {
+    return std.Io.Dir.cwd().openFile(testing.io, probe, .{});
+}
+
+/// Skips unless the denial fixture really denies this process, so the tests
+/// below pin the denial memory only where there is a denial to remember.
+fn requireDeniedFile() !void {
+    if (openDeniedFile()) |f| {
         f.close(testing.io);
         return error.SkipZigTest;
     } else |err| {
         if (err != error.AccessDenied) return error.SkipZigTest;
+    }
+}
+
+test "expandPath: the denial fixture is denied to the test process" {
+    // Not a skip: a runner that may read the fixture has no denial to
+    // remember, and the two tests that pin that memory would then skip
+    // without saying so. This test fails by name instead.
+    if (openDeniedFile()) |f| {
+        f.close(testing.io);
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try testing.expectEqual(error.AccessDenied, err);
     }
 }
 
