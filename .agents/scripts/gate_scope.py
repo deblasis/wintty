@@ -111,7 +111,6 @@ RECIPE_LEGS.update({
     "_lane": ALL_LEGS,
     "_build-in-lane": ALL_LEGS,
     "_require-lane": ALL_LEGS,
-    "_require-incoda": ALL_LEGS,
     "_signoff-in-lane": ALL_LEGS,
     "lanes": ALL_LEGS,
     "default": ALL_LEGS,

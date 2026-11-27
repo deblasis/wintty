@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import ast
 import datetime
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -475,6 +477,82 @@ def self_test() -> int:
         pass  # not-first is the point
     else:
         failures.append("a guard after a real dependency passed")
+    # The shape check must fail when either branch drops its arguments, and
+    # when the exit tail that carries incoda's status is gone.
+    lane_body = (
+        '. (Join-Path "{{justfile_directory()}}" ".agents\\scripts\\incoda-lane.ps1"); '
+        "$env:WINTTY_LANE_DECISION = ''; "
+        "if (Test-LaneReady -Keys @('wintty-build')) { $env:WINTTY_LANE_DECISION = 'lane'; "
+        '& $inc run --queue wintty-build --reason "{{reason}}" --wait {{budget}} '
+        '-- just {{private}} {{args}} } else { $env:WINTTY_LANE_DECISION = \'bare\'; '
+        'Write-LaneFallback -Keys @(\'wintty-build\'); just {{private}} {{args}} }; '
+        'exit ($LASTEXITCODE ?? 1)')
+    if _lane_shape_findings(lane_body):
+        failures.append("the good lane shape was flagged")
+    if not _lane_shape_findings(lane_body.replace("just {{private}} {{args}} };", "just {{private}} };")):
+        failures.append("a fallback branch without {{args}} passed the shape check")
+    if not _lane_shape_findings(lane_body.replace("exit ($LASTEXITCODE ?? 1)", "")):
+        failures.append("a missing exit-status tail passed the shape check")
+    # The usable-side and desktop probes must fail when their evidence is
+    # missing, not merely be present in the source.
+    if not _decides_on("if (Test-LaneReady -Keys @('wintty-desktop'))", "wintty-desktop"):
+        failures.append("a desktop decision was not recognised")
+    if _decides_on("if (Test-LaneReady -Keys @('wintty-build'))", "wintty-desktop"):
+        failures.append("a build-key decision passed as a desktop decision")
+    good_laned = "run --queue wintty-build -- just _build-dll-in-lane"
+    good_bare = "just _splash-race-in-lane SENTINEL123"
+    good_build = "run --queue wintty-build -- just build-win"
+    good_warning = "warning: desktop lane"
+    if not _usable_probe_ok(good_laned, "ok", False):
+        failures.append("a real laned run was not recognised")
+    for label, args in (
+        ("missing incoda run", ("", "ok", False)),
+        ("a warning", (good_laned, good_warning, False)),
+        ("a bare build", (good_laned, "ok", True)),
+        ("the wrong queue", ("run --queue wintty-desktop", "ok", False)),
+    ):
+        if _usable_probe_ok(*args):
+            failures.append(f"a usable-side probe with {label} passed")
+    if not _desktop_probe_ok(good_bare, good_build, good_warning):
+        failures.append("a desktop bare run was not recognised")
+    for label, args in (
+        ("no bare phase", ("", good_build, good_warning)),
+        ("a desktop lane", (good_bare, "run --queue wintty-desktop", good_warning)),
+        ("no warning", (good_bare, good_build, "")),
+        ("two warnings", (good_bare, good_build, good_warning + "\n" + good_warning)),
+    ):
+        if _desktop_probe_ok(*args):
+            failures.append(f"a desktop probe with {label} passed")
+    # The generic caller probe must fail on each clause on its own, including
+    # an arg that survives in the reason but is dropped from the private argv.
+    tok = "SENTINEL123"
+    private = "_splash-race-in-lane"
+    argv = f'run --queue wintty-desktop --reason "x {tok}" -- just {private} "{tok}"'
+    shim = f"just {private} {tok}"
+    if not _argv_carries(argv, private, tok):
+        failures.append("an anchored private argv was not recognised")
+    if _argv_carries(f'run --queue wintty-desktop --reason "x {tok}" -- just {private}', private, tok):
+        failures.append("a token in the reason passed as a private argv")
+    ok_usable = (0, "ok", argv, shim, "wintty-desktop", "usable", private, tok)
+    ok_closed = (0, "warning: desktop", "", shim, "wintty-desktop", "closed", private, tok)
+    if not _caller_probe_ok(*ok_usable) or not _caller_probe_ok(*ok_closed):
+        failures.append("a correct caller probe was rejected")
+    for label, args in (
+        ("a failed recipe", (1, "ok", argv, "", "wintty-desktop", "usable", private, tok)),
+        ("a warning in the usable path", (0, "warning: x", argv, "", "wintty-desktop", "usable", private, tok)),
+        ("no lane in the usable path", (0, "ok", "just " + private, "", "wintty-desktop", "usable", private, tok)),
+        ("no args in the usable path", (0, "ok", f"run --queue wintty-desktop -- just {private}", shim, "wintty-desktop", "usable", private, tok)),
+        ("no shimmed phase in the usable path", (0, "ok", argv, "", "wintty-desktop", "usable", private, tok)),
+        ("a lane in the closed path", (0, "warning: x", "run --queue wintty-desktop", shim, "wintty-desktop", "closed", private, tok)),
+        ("no bare phase", (0, "warning: x", "", "", "wintty-desktop", "closed", private, tok)),
+        ("no args in the bare phase", (0, "warning: x", "", f"just {private}", "wintty-desktop", "closed", private, tok)),
+        ("no warning in the closed path", (0, "ok", "", shim, "wintty-desktop", "closed", private, tok)),
+        ("two warnings in the closed path", (0, "warning: a\nwarning: b", "", shim, "wintty-desktop", "closed", private, tok)),
+        ("a duplicate bare phase", (0, "warning: a", "", shim + "\n" + shim, "wintty-desktop", "closed", private, tok)),
+        ("a duplicate in-lane phase", (0, "ok", argv, shim + "\n" + shim, "wintty-desktop", "usable", private, tok)),
+    ):
+        if _caller_probe_ok(*args):
+            failures.append(f"a caller probe with {label} passed")
     # allowlist validator refuses globs
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
@@ -544,11 +622,94 @@ def _guard_problem(name, header, desktop_privates):
     return None
 
 
+def _normalize_show(text):
+    """just --show reprints interpolations with spaces inside the braces."""
+    return re.sub(r"\s+\}\}", "}}", re.sub(r"\{\{\s+", "{{", text))
+
+
+DESKTOP_WRAPPERS = ("splash-race", "search-fuzz", "shader-notice-fuzz",
+                    "frame-style-fuzz", "seam-theme-resolution", "theme-matrix", "fuzz")
+
+
+def _decides_on(body, key):
+    """Does this normalized recipe body ask readiness about the named key?"""
+    return f"Test-LaneReady -Keys @('{key}')" in _normalize_show(body)
+
+
+def _usable_probe_ok(incoda_log, transcript, zig_ran):
+    """A usable lane was taken: incoda ran, nothing warned, no bare build."""
+    return ("run --queue wintty-build" in incoda_log
+            and "warning:" not in transcript
+            and not zig_ran)
+
+
+def _desktop_probe_ok(just_log, incoda_log, transcript):
+    """A closed desktop lane went bare: its phase ran, no desktop lane taken."""
+    return ("_splash-race-in-lane" in just_log
+            and "--queue wintty-desktop" not in incoda_log
+            and transcript.count("warning:") == 1)
+
+
+def _argv_carries(log, private, token):
+    """The token follows the private recipe in the argv, not just the reason."""
+    marker = "just " + private
+    return marker in log and token in log.split(marker, 1)[1]
+
+
+def _caller_probe_ok(rc, transcript, incoda_log, shim_log, key, mode, private, token):
+    """One shape for every lane caller: the lane and its args, or the fallback."""
+    if rc != 0:
+        return False
+    if mode == "usable":
+        if token:
+            taken = (f"--queue {key}" in incoda_log
+                     and shim_log.count(f"just {private}") == 1
+                     and _argv_carries(incoda_log, private, token)
+                     and _argv_carries(shim_log, private, token))
+        else:
+            taken = f"--queue {key}" in incoda_log and f"just {private}" in incoda_log
+        return taken and "warning:" not in transcript
+    if not private:
+        return f"--queue {key}" not in incoda_log and transcript.count("warning:") == 1
+    return (f"--queue {key}" not in incoda_log
+            and shim_log.count(f"just {private}") == 1
+            and _argv_carries(shim_log, private, token)
+            and transcript.count("warning:") == 1)
+
+
+def _lane_shape_findings(body):
+    """What is wrong with a normalized windows _lane body; empty when sound."""
+    bad = []
+    anchored = 'Join-Path "{{justfile_directory()}}" ".agents\\scripts\\incoda-lane.ps1"'
+    if anchored not in body:
+        bad.append("the helper is not dot-sourced from {{justfile_directory()}}")
+    if "Test-LaneReady -Keys @('wintty-build')" not in body:
+        bad.append("the readiness decision is missing")
+    if "Write-LaneFallback" not in body or "WINTTY_LANE_DECISION" not in body:
+        bad.append("the fallback warning or its recorded decision is missing")
+    if not body.rstrip().endswith("exit ($LASTEXITCODE ?? 1)"):
+        bad.append("the exit-status tail is missing")
+    lane_marker = "$env:WINTTY_LANE_DECISION = 'lane';"
+    bare_marker = "$env:WINTTY_LANE_DECISION = 'bare';"
+    if lane_marker not in body or bare_marker not in body:
+        bad.append("one of the decision branches is missing")
+    else:
+        lane_branch = body.split(lane_marker, 1)[1].split("} else {", 1)[0]
+        bare_branch = body.split(bare_marker, 1)[1]
+        if "just {{private}} {{args}}" not in lane_branch:
+            bad.append("the laned invocation drops {{args}}")
+        if "just {{private}} {{args}}" not in bare_branch:
+            bad.append("the fallback invocation drops {{args}}")
+        if "--queue wintty-build" not in lane_branch:
+            bad.append("the laned invocation has no build queue")
+    return bad
+
+
 # Values whose windows-body interpolation has been reviewed: raw ARGS
 # passthrough, fixed paths and numbers. Function calls (replace(...),
 # justfile_directory()) are safe by construction.
 WINDOWS_INTERPOLATION = {
-    "args", "budget", "exe", "inc", "iterations", "key", "name",
+    "args", "budget", "exe", "iterations", "key", "name",
     "private", "reason", "recipes", "run", "TEST_SEED_BOUND", "TEST_VERSION",
     "sha", "pr",
 }
@@ -611,8 +772,37 @@ def check_justfile():
         elif lane.group(1) != name or lane.group(2) != PRIVATE[name]:
             findings.append(Finding("justfile", 0, f"{name} wraps the wrong recipe ({lane.group(1)} -> {lane.group(2)})", f"[windows] {name}: (_lane \"{name}\" \"{PRIVATE[name]}\" <budget>)"))
     r = _just("--show", "_lane")
-    if r.returncode != 0 or "inc run --queue wintty-build" not in r.stdout or "LASTEXITCODE" not in r.stdout:
-        findings.append(Finding("justfile", 0, "_lane is not the one-line queued shape", "one line: & $inc run --queue wintty-build --reason ... -- just <private>; exit ($LASTEXITCODE ?? 1)"))
+    body = _normalize_show(r.stdout)
+    bad_shape = _lane_shape_findings(body)
+    if r.returncode != 0 or bad_shape:
+        findings.append(Finding("justfile", 0,
+                                "_lane is not the one-line queued shape: " + ("; ".join(bad_shape) or "show failed"),
+                                "one line: dot-source the anchored incoda-lane.ps1; if ready & $inc run --queue wintty-build ... else warn and run bare; both branches pass {{args}}; exit ($LASTEXITCODE ?? 1)"))
+    build = _just("--show", "_build-in-lane")
+    build_body = _normalize_show(build.stdout)
+    if (build.returncode != 0
+            or "-- just {{recipes}} } else {" not in build_body
+            or "; just {{recipes}} }; exit ($LASTEXITCODE ?? 1)" not in build_body
+            or "{{reason}}" not in build_body):
+        findings.append(Finding("justfile", 0, "_build-in-lane lost its build passthrough",
+                                "both decision branches run just {{recipes}}; the reason reaches incoda; exit ($LASTEXITCODE ?? 1)"))
+    guard = _just("--show", "_require-lane")
+    guard_body = _normalize_show(guard.stdout)
+    if (guard.returncode != 0
+            or 'Join-Path "{{justfile_directory()}}" ".agents\\scripts\\incoda-lane.ps1"' not in guard_body
+            or "WINTTY_LANE_DECISION" not in guard_body):
+        findings.append(Finding("justfile", 0, "_require-lane does not use the anchored decision",
+                                "dot-source (Join-Path \"{{justfile_directory()}}\" \".agents\\scripts\\incoda-lane.ps1\") and read WINTTY_LANE_DECISION"))
+    anchored = 'Join-Path "{{justfile_directory()}}" ".agents\\scripts\\incoda-lane.ps1"'
+    for name in DESKTOP_WRAPPERS:
+        wrapper = _just("--show", name)
+        wrapper_body = _normalize_show(wrapper.stdout)
+        if wrapper.returncode != 0 or not _decides_on(wrapper.stdout, "wintty-desktop"):
+            findings.append(Finding("justfile", 0, f"{name} decides on the wrong lane key",
+                                    "the caller must read wintty-desktop, matching its guard"))
+        if anchored not in wrapper_body:
+            findings.append(Finding("justfile", 0, f"{name} dot-sources the lane helper from a relative path",
+                                    f"dot-source {anchored}"))
     desktop_privates = {"_fuzz-in-lane", "_splash-race-in-lane", "_search-fuzz-in-lane",
                         "_shader-notice-fuzz-in-lane", "_frame-style-fuzz-in-lane",
                         "_theme-matrix-in-lane"}
@@ -642,11 +832,260 @@ def check_justfile():
                 findings.append(Finding("justfile", 0, f"{name} has no RECIPE_LEGS entry", "add the recipe's legs to .agents/scripts/gate_scope.py"))
     except Exception as exc:  # a broken import is itself a finding
         findings.append(Finding("justfile", 0, f"cannot read gate_scope.RECIPE_LEGS: {exc}", "keep .agents/scripts/gate_scope.py importable"))
-    # Behavioural: the guard refuses a bare private invocation.
-    env = {k: v for k, v in os.environ.items() if k.upper() != "INCODA_HELD"}
-    r = _just("_require-lane", "scan-probe", env=env)
-    if r.returncode == 0 or "Run: just" not in (r.stdout + r.stderr):
-        findings.append(Finding("justfile", 0, "_require-lane does not refuse outside the lane", "the guard must exit nonzero naming the public recipe when INCODA_HELD lacks wintty-build"))
+    # Behavioural, both sides. The fake incoda reports whatever status file
+    # the check writes, in a temp dir, so this reads no real queue state.
+    import tempfile  # noqa: PLC0415 - only this Windows-only check needs it
+
+    def read_log(path):
+        p = Path(path)
+        return p.read_text(encoding="ascii", errors="replace") if p.exists() else ""
+
+    def has_incoda(entry):
+        if not entry:
+            return False
+        try:
+            return any(Path(entry).glob("incoda.*"))
+        except OSError:
+            return False
+
+    def ready_query(env, *keys):
+        return subprocess.run(
+            ["pwsh", "-NoProfile", "-File", str(REPO / ".agents/scripts/incoda-lane.ps1"),
+             "-Ready", "-Queue", *keys],
+            cwd=REPO, capture_output=True, text=True, env=env,
+            creationflags=0x08000000 if sys.platform == "win32" else 0)
+
+    with tempfile.TemporaryDirectory() as td:
+        base = {k: v for k, v in os.environ.items() if k.upper() not in ("INCODA_HELD", "WINTTY_LANE_DECISION")}
+        base["LOCALAPPDATA"] = td
+        base["PATH"] = td + os.pathsep + base.get("PATH", "")
+        status_file = Path(td) / "status.json"
+        (Path(td) / "incoda.cmd").write_text(
+            '@echo off\nif /I "%1"=="status" (\n  type "' + str(status_file) + '"\n  exit /b 0\n)\nexit /b 1\n',
+            encoding="ascii")
+        build_ready = ('{"schema":1,"queues":[{"key":"wintty-build","exists":true,'
+                       '"config":{"slots":3,"require_reason":true}}]}')
+        status_file.write_text(build_ready, encoding="ascii")
+
+        env = dict(base)
+        r = _just("_require-lane", "scan-probe", env=env)
+        if r.returncode == 0 or "Run: just" not in (r.stdout + r.stderr):
+            findings.append(Finding("justfile", 0, "_require-lane does not refuse outside a usable lane",
+                                    "with a usable lane the guard must exit nonzero naming the public recipe when INCODA_HELD lacks wintty-build"))
+        if ready_query(env, "wintty-build").returncode != 0:
+            findings.append(Finding("justfile", 0, "-Ready rejects a usable wintty-build lane",
+                                    "Test-LaneReady must accept a queue that exists and is open"))
+
+        desktop_closed = ('{"schema":1,"queues":[{"key":"wintty-build","exists":true,'
+                          '"config":{"slots":3,"require_reason":true}},'
+                          '{"key":"wintty-desktop","exists":true,"config":{"closed":"maintenance"}}]}')
+        status_file.write_text(desktop_closed, encoding="ascii")
+        if ready_query(env, "wintty-desktop").returncode == 0:
+            findings.append(Finding("justfile", 0, "-Ready accepts a closed wintty-desktop lane",
+                                    "Test-LaneReady must check every named key, not just wintty-build"))
+
+        bare = dict(base)
+        bare["PATH"] = os.pathsep.join(p for p in bare["PATH"].split(os.pathsep) if not has_incoda(p))
+        r = _just("_require-lane", "scan-probe", env=bare)
+        if r.returncode != 0:
+            findings.append(Finding("justfile", 0, "_require-lane blocks the warned bare run",
+                                    "with no usable lane the guard must exit 0 and let the caller's bare run through"))
+        if ready_query(bare, "wintty-build").returncode == 0:
+            findings.append(Finding("justfile", 0, "-Ready accepts a machine with no incoda",
+                                    "Test-LaneReady must refuse when incoda is absent from PATH and LOCALAPPDATA"))
+
+        # Behavioural, both decision branches. Text alone cannot tell a live
+        # branch from one whose condition was neutralized.
+        unlinked_status = (
+            '{"schema":1,"queues":[{"key":"builds","exists":true,"is_pool":true,"config":{"slots":1}},'
+            '{"key":"wintty-build","exists":true,"config":{"slots":3,"require_reason":true}}]}')
+
+        def probe_env(name, payload, execute_child=False):
+            root = Path(td) / name
+            root.mkdir(parents=True, exist_ok=True)
+            warnings = Path(td) / (name + "-warnings")
+            warnings.mkdir(parents=True, exist_ok=True)
+            env = {k: v for k, v in os.environ.items()
+                   if k.upper() not in ("INCODA_HELD", "WINTTY_LANE_DECISION", "INCODA_DIR")}
+            env["LOCALAPPDATA"] = str(root)
+            env["PATH"] = str(root) + os.pathsep + env.get("PATH", "")
+            env["WINTTY_WARNING_DIR"] = str(warnings)
+            env["WINTTY_INCODA_WARNED"] = "0"
+            env["ZIG_LOG"] = str(root / "zig.log")
+            env["INC_LOG"] = str(root / "incoda.log")
+            (root / "zig.cmd").write_text(
+                '@echo off\necho STUB >> "%ZIG_LOG%"\nexit /b 0\n', encoding="ascii")
+            payload_file = root / "status.json"
+            payload_file.write_text(payload, encoding="ascii")
+            if execute_child:
+                # Emulate a real lane holder: log argv, then run the child
+                # with a ticket so the inner guard sees the same decision.
+                runner = root / "fake_incoda.py"
+                runner.write_text(
+                    'import os, subprocess, sys\n'
+                    'args = sys.argv[1:]\n'
+                    'if args and args[0] == "status":\n'
+                    '    sys.stdout.write(open(os.environ["INC_STATUS_FILE"]).read())\n'
+                    '    sys.exit(0)\n'
+                    'with open(os.environ["INC_LOG"], "a") as log:\n'
+                    '    log.write(" ".join(args) + "\\n")\n'
+                    'if "--" in args:\n'
+                    '    child_env = os.environ.copy()\n'
+                    '    child_env["INCODA_HELD"] = "wintty-build=1-1.ticket,wintty-desktop=1-2.ticket"\n'
+                    '    sys.exit(subprocess.call(" ".join(args[args.index("--") + 1:]), shell=True, env=child_env))\n'
+                    'sys.exit(0)\n', encoding="ascii")
+                env["INC_STATUS_FILE"] = str(payload_file)
+                (root / "incoda.cmd").write_text(
+                    '@echo off\npython "%~dp0fake_incoda.py" %*\nexit /b %ERRORLEVEL%\n',
+                    encoding="ascii")
+            else:
+                (root / "incoda.cmd").write_text(
+                    '@echo off\nif /I "%1"=="status" (\n  type "' + str(payload_file) + '"\n'
+                    '  exit /b 0\n)\nif /I "%1"=="run" (\n  echo %* >> "%INC_LOG%"\n'
+                    '  exit /b 0\n)\nexit /b 1\n', encoding="ascii")
+            return env, root
+
+        def check_build(env, label):
+            Path(env["ZIG_LOG"]).unlink(missing_ok=True)
+            r = _just("build-dll", env=env)
+            text = r.stdout + r.stderr
+            if r.returncode != 0 or text.count("warning:") != 1 or not Path(env["ZIG_LOG"]).exists():
+                findings.append(Finding("justfile", 0, f"{label}: an unusable lane did not warn and build bare",
+                                        "rc 0, exactly one warning, and the stubbed zig ran"))
+
+        unlinked_env, _ = probe_env("unlinked-toolchain", unlinked_status)
+        check_build(unlinked_env, "unlinked lane")
+
+        # First status says unlinked, second says linked. The guard must not
+        # re-decide from the second answer.
+        flip_env, flip_root = probe_env("flip-toolchain", unlinked_status)
+        linked_file = flip_root / "linked.json"
+        linked_file.write_text(build_ready, encoding="ascii")
+        flip_env["INC_COUNTER"] = str(flip_root / "seen")
+        flip_env["INC_UNLINKED"] = str(flip_root / "status.json")
+        flip_env["INC_LINKED"] = str(linked_file)
+        (flip_root / "incoda.cmd").write_text(
+            '@echo off\nif /I "%1"=="status" (\n  if exist "%INC_COUNTER%" (\n'
+            '    type "%INC_LINKED%"\n  ) else (\n    echo 1 > "%INC_COUNTER%"\n'
+            '    type "%INC_UNLINKED%"\n  )\n  exit /b 0\n)\nexit /b 0\n',
+            encoding="ascii")
+        check_build(flip_env, "state-flipped lane")
+
+        # A recorded bare decision clears the guard even on a usable lane.
+        bare_env, _ = probe_env("decision-toolchain", build_ready)
+        bare_env["WINTTY_LANE_DECISION"] = "bare"
+        if _just("_require-lane", "scan-probe", env=bare_env).returncode != 0:
+            findings.append(Finding("justfile", 0, "a recorded bare decision did not clear the guard",
+                                    "with WINTTY_LANE_DECISION=bare the guard must exit 0 even on a usable lane"))
+
+        # The other side of the decision: a usable lane must actually be
+        # taken. Logging incoda's argv catches an always-bare caller that
+        # every textual assertion still accepts.
+        linked = (
+            '{"schema":1,"queues":[{"key":"builds","exists":true,"is_pool":true,"config":{"slots":1}},'
+            '{"key":"wintty-build","exists":true,"config":{"slots":3,"require_reason":true,"pools":["builds"]}}]}')
+        usable_env, _ = probe_env("usable-toolchain", linked)
+        Path(usable_env["INC_LOG"]).unlink(missing_ok=True)
+        Path(usable_env["ZIG_LOG"]).unlink(missing_ok=True)
+        r = _just("build-dll", env=usable_env)
+        incoda_log = read_log(usable_env["INC_LOG"])
+        if r.returncode != 0 or not _usable_probe_ok(incoda_log, r.stdout + r.stderr,
+                                                     Path(usable_env["ZIG_LOG"]).exists()):
+            findings.append(Finding("justfile", 0, "a usable lane was not taken by just build-dll",
+                                    "incoda run --queue wintty-build in the log, no warning, no bare zig"))
+
+        # Desktop callers must read their own key. A shim named just records
+        # the phase's child instead of launching a GUI harness.
+        desktop_status = (
+            '{"schema":1,"queues":[{"key":"builds","exists":true,"is_pool":true,"config":{"slots":1}},'
+            '{"key":"wintty-build","exists":true,"config":{"slots":3,"require_reason":true,"pools":["builds"]}},'
+            '{"key":"wintty-desktop","exists":true,"config":{"closed":"maintenance"}}]}')
+        desktop_env, desktop_root = probe_env("desktop-toolchain", desktop_status)
+        shim = desktop_root / "justshim"
+        shim.mkdir()
+        just_log = shim / "just.log"
+        desktop_env["JUST_LOG"] = str(just_log)
+        (shim / "just.cmd").write_text(
+            '@echo off\necho %* >> "%JUST_LOG%"\nexit /b 0\n', encoding="ascii")
+        desktop_env["PATH"] = str(shim) + os.pathsep + desktop_env["PATH"]
+        real_just = shutil.which("just")
+        r = subprocess.run([real_just, "splash-race"], cwd=REPO,
+                           capture_output=True, text=True, env=desktop_env,
+                           creationflags=0x08000000 if sys.platform == "win32" else 0)
+        recorded_just = read_log(just_log)
+        recorded_incoda = read_log(desktop_env["INC_LOG"])
+        if r.returncode != 0 or not _desktop_probe_ok(recorded_just, recorded_incoda, r.stdout + r.stderr):
+            findings.append(Finding("justfile", 0, "splash-race did not fall back on a closed desktop lane",
+                                    "the desktop phase runs bare, no wintty-desktop lane is taken, exactly one warning"))
+
+        # One harness for every caller, instead of a probe hand-written for
+        # each recipe. A condition weakened in any caller fails its own row.
+        def lane_status(closed_key=None):
+            queues = [
+                {"key": "builds", "exists": True, "is_pool": True, "config": {"slots": 1}},
+                {"key": "computer-use", "exists": True, "is_pool": True, "config": {"slots": 1}},
+                {"key": "wintty-build", "exists": True,
+                 "config": {"slots": 3, "require_reason": True, "pools": ["builds"]}},
+                {"key": "wintty-desktop", "exists": True,
+                 "config": {"slots": 1, "require_reason": True, "pools": ["computer-use"]}},
+            ]
+            for q in queues:
+                if q["key"] == closed_key:
+                    q["config"]["closed"] = "maintenance"
+            return json.dumps({"schema": 1, "queues": queues}, separators=(",", ":"))
+
+        callers = [
+            ("_lane", ["probe-caller", "_build-dll-in-lane", "1m"], "wintty-build", False),
+            ("_build-in-lane", ["probe-caller", "build-dll"], "wintty-build", False),
+        ] + [(name, ["SENTINEL123"], "wintty-desktop", True) for name in DESKTOP_WRAPPERS]
+
+        for recipe, args, key, wrapper in callers:
+            for mode in ("usable", "closed"):
+                payload = lane_status(None if mode == "usable" else key)
+                env, root = probe_env("caller-" + recipe + "-" + mode, payload,
+                                      execute_child=(mode == "usable" and wrapper))
+                shim = root / "justshim"
+                shim.mkdir()
+                just_log = shim / "just.log"
+                env["JUST_LOG"] = str(just_log)
+                (shim / "just.cmd").write_text(
+                    '@echo off\necho just %* >> "%JUST_LOG%"\nexit /b 0\n', encoding="ascii")
+                env["PATH"] = str(shim) + os.pathsep + env["PATH"]
+                r = subprocess.run([real_just, recipe, *args], cwd=REPO,
+                                   capture_output=True, text=True, env=env,
+                                   creationflags=0x08000000 if sys.platform == "win32" else 0)
+                private = "_" + recipe + "-in-lane" if wrapper else ""
+                ok = _caller_probe_ok(
+                    r.returncode, r.stdout + r.stderr,
+                    read_log(env["INC_LOG"]), read_log(just_log),
+                    key, mode, private, "SENTINEL123" if wrapper else "")
+                if not ok:
+                    findings.append(Finding(
+                        "justfile", 0,
+                        f"{recipe} did not take the {mode} path for {key}",
+                        f"usable: run --queue {key} with no warning; closed: warn and run bare"))
+
+        # Warning dedupe across sibling shells, where the environment marker
+        # cannot travel between them.
+        sibling = Path(td) / "sibling-probe"
+        (sibling / ".agents" / "scripts").mkdir(parents=True)
+        shutil.copyfile(REPO / ".agents/scripts/incoda-lane.ps1",
+                        sibling / ".agents/scripts/incoda-lane.ps1")
+        dot = '. (Join-Path "{{justfile_directory()}}" ".agents\\scripts\\incoda-lane.ps1")'
+        (sibling / "justfile").write_text(
+            'set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]\n'
+            'a:\n    ' + dot + "; Write-LaneFallback -Keys @('wintty-build') -Label 'phase a'\n"
+            'b: a\n    ' + dot + "; Write-LaneFallback -Keys @('wintty-build') -Label 'phase b'\n",
+            encoding="utf-8")
+        sib_env = dict(bare)
+        sib_env["WINTTY_WARNING_DIR"] = str(Path(td) / "sibling-markers")
+        sib_env["WINTTY_INCODA_WARNED"] = "0"
+        r = subprocess.run([real_just, "-f", str(sibling / "justfile"), "b"],
+                           cwd=REPO, capture_output=True, text=True, env=sib_env,
+                           creationflags=0x08000000 if sys.platform == "win32" else 0)
+        if r.returncode != 0 or (r.stdout + r.stderr).count("warning:") != 1:
+            findings.append(Finding("justfile", 0, "sibling phases did not share one warning",
+                                    "the parent-key marker must suppress the second warning"))
     return findings
 
 

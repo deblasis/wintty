@@ -411,11 +411,9 @@ _test-win-in-lane: (_require-lane "test-win")
 
 # === Heavy job lanes (AGENTS.md) ===
 #
-# incoda is looked up on PATH and then in its installer's location, because
-# the agent shell this was written under had the latter and not the former.
-# This is the expression, not the path: it is evaluated inside each recipe
-# body's pwsh, so a `just test` on a Linux host never runs it.
-inc := '(Get-Command incoda -ErrorAction SilentlyContinue)?.Source ?? (Join-Path $env:LOCALAPPDATA "Programs\incoda\incoda.exe")'
+# Whether a lane can be taken is decided by .agents/scripts/incoda-lane.ps1,
+# which looks incoda up on PATH and then in its installer's location. A recipe
+# that cannot take its lane warns once and runs the same command bare.
 
 # Apply the lane configuration AGENTS.md promises (slots, descriptions, the
 # --reason requirement, the retired `wintty` key closed) from
@@ -453,7 +451,7 @@ lanes:
 # be passed; a single quote and a double quote both survive.
 [windows]
 _build-in-lane reason +recipes:
-    $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; & $inc run --queue wintty-build --reason "{{reason}}: build" -- just {{recipes}}; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-build')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-build --reason "{{reason}}: build" -- just {{recipes}} } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-build') -Label 'just {{recipes}}'; just {{recipes}} }; exit ($LASTEXITCODE ?? 1)
 
 
 # The self-laning plumbing every heavy recipe above uses (AGENTS.md, "Heavy
@@ -474,14 +472,17 @@ _lane reason private budget *args:
 
 [windows]
 _lane reason private budget *args:
-    $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; & $inc run --queue wintty-build --pty=false --reason "{{reason}}" --wait {{budget}} -- just {{private}} {{args}}; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-build')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-build --pty=false --reason "{{reason}}" --wait {{budget}} -- just {{private}} {{args}} } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-build') -Label 'just {{private}}'; just {{private}} {{args}} }; exit ($LASTEXITCODE ?? 1)
 
 # The lane guard: the FIRST dependency of every _<name>-in-lane body, so it
 # runs before any real work (just runs dependencies before body lines, and a
 # failing dependency stops the rest). Strict mode counts only KEY=TICKET
 # entries: a bare key proves nothing live. This is a guardrail against
 # accidental unlaned runs, not a boundary - a process can forge the variable
-# (AGENTS.md, "No stray windows").
+# (AGENTS.md, "No stray windows"). When the lane itself is unavailable the
+# caller records 'bare' in WINTTY_LANE_DECISION and runs the recipe with a
+# warning, so there is no lane to enforce. A private invoked straight from
+# the command line has no decision to read and asks Test-LaneReady instead.
 # On unix the guard names the public recipe the same way, so a caller of
 # a windows private from a linux host fails with a message, not a parse
 # error over a platform-gated recipe.
@@ -490,12 +491,9 @@ _require-lane name key="wintty-build":
     @echo "this runs under the heavy job lane (Windows): just {{name}}"; exit 1
 
 [windows]
-_require-lane name key="wintty-build": _require-incoda
-    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-held.ps1"); $held = @(Get-IncodaHeldKeys -Strict); if ($held -cnotcontains '{{key}}') { Write-Host "this runs under the heavy job lane. Run: just {{name}}" -ForegroundColor Red; exit 1 }; exit 0
+_require-lane name key="wintty-build":
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); if ($env:WINTTY_LANE_DECISION -eq 'bare') { exit 0 }; if (-not (Test-LaneReady -Keys @('{{key}}'))) { exit 0 }; . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-held.ps1"); $held = @(Get-IncodaHeldKeys -Strict); if ($held -cnotcontains '{{key}}') { Write-Host "this runs under the heavy job lane. Run: just {{name}}" -ForegroundColor Red; exit 1 }; exit 0
 
-[windows]
-_require-incoda:
-    $inc = {{inc}}; if (-not (Test-Path $inc)) { Write-Host "incoda not found on PATH or in Programs\incoda: the heavy job lanes need it (AGENTS.md; https://github.com/deblasis/incoda)" -ForegroundColor Red; exit 1 }; exit 0
 # Launch two instances a few hundred ms apart and watch for a launch splash
 # owned by the one that should be forwarding itself to the other. Opens real
 # windows, so it needs an interactive desktop and no Wintty already running
@@ -503,7 +501,7 @@ _require-incoda:
 # Pass extra args through, e.g. `just splash-race "-SecondaryFeatureOff"`.
 [windows]
 splash-race args="": _no-wintty-from (_build-in-lane "splash-race" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("splash-race {{replace(args, '"', '""')}}".Trim()) -- just _splash-race-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason ("splash-race {{replace(args, '"', '""')}}".Trim()) -- just _splash-race-in-lane "{{replace(args, '"', '""')}}" } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-desktop') -Label '_splash-race-in-lane'; just _splash-race-in-lane "{{replace(args, '"', '""')}}" }; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just splash-race`, inside the lane it took.
 [windows]
@@ -543,7 +541,7 @@ _no-wintty-from exe="windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/W
 # Pass extra args through, e.g. `just search-fuzz "-Seed 99 -Iterations 40"`.
 [windows]
 search-fuzz args="": _no-wintty-from (_build-in-lane "search-fuzz" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("search-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _search-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason ("search-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _search-fuzz-in-lane "{{replace(args, '"', '""')}}" } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-desktop') -Label '_search-fuzz-in-lane'; just _search-fuzz-in-lane "{{replace(args, '"', '""')}}" }; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just search-fuzz`, inside the lane it took.
 [windows]
@@ -567,7 +565,7 @@ _search-fuzz-in-lane args="": (_require-lane "search-fuzz" "wintty-desktop")
 # Pass extra args through, e.g. `just shader-notice-fuzz "-Seed 99"`.
 [windows]
 shader-notice-fuzz args="": _no-wintty-from (_build-in-lane "shader-notice-fuzz" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("shader-notice-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _shader-notice-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason ("shader-notice-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _shader-notice-fuzz-in-lane "{{replace(args, '"', '""')}}" } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-desktop') -Label '_shader-notice-fuzz-in-lane'; just _shader-notice-fuzz-in-lane "{{replace(args, '"', '""')}}" }; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just shader-notice-fuzz`, inside the lane it took.
 [windows]
@@ -595,7 +593,7 @@ _shader-notice-fuzz-in-lane args="": (_require-lane "shader-notice-fuzz" "wintty
 # Pass extra args through, e.g. `just frame-style-fuzz "-Seed 99 -Random 3"`.
 [windows]
 frame-style-fuzz args="": _no-wintty-from (_build-in-lane "frame-style-fuzz" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("frame-style-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _frame-style-fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason ("frame-style-fuzz {{replace(args, '"', '""')}}".Trim()) -- just _frame-style-fuzz-in-lane "{{replace(args, '"', '""')}}" } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-desktop') -Label '_frame-style-fuzz-in-lane'; just _frame-style-fuzz-in-lane "{{replace(args, '"', '""')}}" }; exit ($LASTEXITCODE ?? 1)
 
 # The theme resolution matrix (#1953, #2218, #2242). Seam-driven scheme
 # changes, the terminal renderer's pair against the C# chrome pair, the
@@ -607,7 +605,7 @@ frame-style-fuzz args="": _no-wintty-from (_build-in-lane "frame-style-fuzz" "bu
 # Pass extra args through, e.g. `just seam-theme-resolution "-Mutate pair"`.
 [windows]
 seam-theme-resolution args="": _no-wintty-from (_build-in-lane "seam-theme-resolution" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("seam-theme-resolution {{replace(args, '"', '""')}}".Trim()) -- just _seam-theme-resolution-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason ("seam-theme-resolution {{replace(args, '"', '""')}}".Trim()) -- just _seam-theme-resolution-in-lane "{{replace(args, '"', '""')}}" } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-desktop') -Label '_seam-theme-resolution-in-lane'; just _seam-theme-resolution-in-lane "{{replace(args, '"', '""')}}" }; exit ($LASTEXITCODE ?? 1)
 
 [windows]
 _seam-theme-resolution-in-lane args="":
@@ -655,7 +653,7 @@ _frame-style-fuzz-in-lane args="": (_require-lane "frame-style-fuzz" "wintty-des
 # Run the theme matrix (#937) under the incoda lanes against the Debug build.
 [windows]
 theme-matrix args="": _no-wintty-from (_build-in-lane "theme matrix (#937)" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("theme matrix (#937) {{replace(args, '"', '""')}}".Trim()) -- just _theme-matrix-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason ("theme matrix (#937) {{replace(args, '"', '""')}}".Trim()) -- just _theme-matrix-in-lane "{{replace(args, '"', '""')}}" } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-desktop') -Label '_theme-matrix-in-lane'; just _theme-matrix-in-lane "{{replace(args, '"', '""')}}" }; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just theme-matrix`, inside the lane it took.
 [windows]
@@ -702,7 +700,7 @@ theme-matrix-report run="windows/scripts/theme-matrix":
 # Run every GUI fuzz harness against the Debug build.
 [windows]
 fuzz args="": _no-wintty-from (_build-in-lane "fuzz" "build-dll" "build-win")
-    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason ("fuzz {{replace(args, '"', '""')}}".Trim()) -- just _fuzz-in-lane "{{replace(args, '"', '""')}}"; exit ($LASTEXITCODE ?? 1)
+    . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason ("fuzz {{replace(args, '"', '""')}}".Trim()) -- just _fuzz-in-lane "{{replace(args, '"', '""')}}" } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-desktop') -Label '_fuzz-in-lane'; just _fuzz-in-lane "{{replace(args, '"', '""')}}" }; exit ($LASTEXITCODE ?? 1)
 
 # The desktop phase of `just fuzz`, inside the lane it took.
 [windows]
@@ -1055,6 +1053,7 @@ gates-selftest: gitversion-selftest
     pwsh -NoProfile -File .agents/scripts/nightly_control.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/incoda-held.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/lanes.ps1 -SelfTest
+    pwsh -NoProfile -File .agents/scripts/incoda-lane.ps1 -SelfTest
     python .agents/scripts/no_stray_windows.py --self-test
     python .agents/scripts/no_stray_windows.py
 

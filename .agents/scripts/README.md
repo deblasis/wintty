@@ -99,6 +99,7 @@ human) working in this repo uses the same contract:
   that state in its own directory where nothing in the repo could see it,
   so the script is the record: apply touches only a lane that drifted, and
   `-Check` (what `just doctor` runs) reports each drift and changes nothing.
+- `incoda-lane.ps1` - decide whether a recipe can take its lane. `Test-LaneReady` requires an installed incoda, an open queue and, on a machine with pools, a linked queue; `Write-LaneFallback` prints one warning when the recipe runs bare instead. The justfile dot-sources both, so a missing install or an unconfigured lane builds and launches with a warning rather than a crash, while the guard still refuses an unlaned private once the lane is usable. Its `-SelfTest` uses hand-written status payloads and runs in `gates-selftest`.
 - `just gates-selftest` - prove the gates still catch what they exist for
   (recorded-PR replays, matcher escapes, exemption anchoring, the merge
   guard's refusal matrix and golden issue body) and that the nightly
