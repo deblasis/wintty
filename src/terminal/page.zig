@@ -924,7 +924,7 @@ pub const Page = struct {
 
         // If our destination has styles or graphemes then we need to
         // clear some state. This will free up the managed memory as well.
-        if (dst_row.managedMemory()) self.clearCells(dst_row, x_start, x_end);
+        if (dst_row.managedMemory()) self.clearCells(dst_row, x_start, x_end, .{});
 
         // Copy all the row metadata but keep our cells offset
         dst_row.* = copy: {
@@ -942,6 +942,16 @@ pub const Page = struct {
                 // Empty only if both the copied and kept parts were.
                 copy.blank = dst_row.blank and src_row.blank;
                 copy.dirty |= dst_row.dirty;
+
+                // The kept part may have placeholders. Like styled, this
+                // may overestimate, which only costs the renderer a scan.
+                copy.kitty_virtual_placeholder = dst_row.kitty_virtual_placeholder or
+                    src_row.kitty_virtual_placeholder;
+
+                // Both parts may have prompt cells.
+                copy.semantic_prompt = dst_row.semantic_prompt.combine(
+                    src_row.semantic_prompt,
+                );
             }
 
             // Our cell offset remains the same
@@ -1155,16 +1165,29 @@ pub const Page = struct {
         const dst_cells = dst_row.cells.ptr(self.memory)[dst_left .. dst_left + len];
 
         // Clear our destination now matter what
-        self.clearCells(dst_row, dst_left, dst_left + len);
+        self.clearCells(dst_row, dst_left, dst_left + len, .{});
 
         // The source cells may have content.
         dst_row.blank = false;
 
-        // If src has no managed memory, this is very fast.
-        if (!src_row.managedMemory()) {
+        // A partial move keeps the destination's other cells, so the row
+        // needs a mark that covers both.
+        dst_row.semantic_prompt = if (len == self.size.cols)
+            src_row.semantic_prompt
+        else
+            dst_row.semantic_prompt.combine(src_row.semantic_prompt);
+
+        // Styles are keyed by ID, so copying a cell keeps its style and
+        // ref count exact. Graphemes and hyperlinks are keyed by cell
+        // offset and have to be moved one cell at a time, and placeholders
+        // have to be found to flag the destination row.
+        if (!src_row.grapheme and
+            !src_row.hyperlink and
+            !src_row.kitty_virtual_placeholder)
+        {
             fastmem.copy(Cell, dst_cells, src_cells);
         } else {
-            // Source has graphemes or hyperlinks...
+            // Source has graphemes, hyperlinks or placeholders...
             for (src_cells, dst_cells) |*src, *dst| {
                 dst.* = src.*;
                 if (src.hasGrapheme()) {
@@ -1268,37 +1291,76 @@ pub const Page = struct {
         src.* = old_dst;
     }
 
-    /// Clear the cells in the given row. This will reclaim memory used
-    /// by graphemes and styles. Note that if the style cleared is still
-    /// active, Page cannot know this and it will still be ref counted down.
-    /// The best solution for this is to artificially increment the ref count
-    /// prior to calling this function.
+    /// Clear the cells from `left` to `end` in the given row to `blank`.
+    /// This will reclaim memory used by graphemes, hyperlinks, and styles.
+    /// Note that if the style cleared is still active, Page cannot know this
+    /// and it will still be ref counted down. The best solution for this is
+    /// to artificially increment the ref count prior to calling this function.
+    ///
+    /// This also updates `Row.blank`. A full-row clear with a zero blank cell
+    /// sets it, a colored blank cell clears it, and a partial clear with a
+    /// zero blank cell leaves it unchanged.
+    ///
+    /// Clearing any part of a row marked blank with a zero blank cell does
+    /// nothing, since the cells are already zero and there is no managed
+    /// memory to release. Full-screen programs often erase lines (EL, ECH)
+    /// that are already empty when they redraw.
     pub inline fn clearCells(
         self: *Page,
         row: *Row,
         left: usize,
         end: usize,
+        blank: Cell,
     ) void {
-        defer self.assertIntegrity();
-
+        assert(left <= end and end <= self.size.cols);
+        if (comptime std.debug.runtime_safety) {
+            const rows = self.rows.ptr(self.memory);
+            assert(@intFromPtr(row) >= @intFromPtr(&rows[0]));
+            assert(@intFromPtr(row) <= @intFromPtr(&rows[self.size.rows - 1]));
+        }
+        const blank_zero = blank.isZero();
         const cells = row.cells.ptr(self.memory)[left..end];
+        const full_row = cells.len == self.size.cols;
+        if (cells.len == 0 or (blank_zero and row.blank)) return;
 
-        // If we have managed memory (styles, graphemes, or hyperlinks)
-        // in this row then we go cell by cell and clear them if present.
+        // This whole operation does unsafe things, so we just want to assert
+        // the end state.
+        self.pauseIntegrityChecks(true);
+        defer {
+            self.pauseIntegrityChecks(false);
+            self.assertIntegrity();
+        }
+
+        if (row.managedMemory()) self.releaseCells(row, cells, full_row);
+
+        if (comptime build_options.kitty_graphics) {
+            if (full_row) {
+                row.kitty_virtual_placeholder = false;
+            }
+        }
+
+        @memset(cells, blank);
+
+        // Update Row.blank as described in the doc comment above.
+        if (full_row) {
+            row.blank = blank_zero;
+        } else if (!blank_zero) {
+            row.blank = false;
+        }
+    }
+
+    /// Release the graphemes, hyperlinks, and styles of `cells` and update
+    /// the row's flags. This is out of line so that clearCells stays small
+    /// for rows without managed memory.
+    fn releaseCells(self: *Page, row: *Row, cells: []Cell, full_row: bool) void {
+        // Clearing a grapheme or hyperlink also clears the cell's flag,
+        // so the scans see the cleared cells as empty.
         if (row.grapheme) {
             for (cells) |*cell| {
                 if (cell.hasGrapheme())
                     @call(.always_inline, clearGrapheme, .{ self, cell });
             }
-
-            // If we have no left/right scroll region we can be sure
-            // that we've cleared all the graphemes, so we clear the
-            // flag, otherwise we use the update function to update.
-            if (cells.len == self.size.cols) {
-                row.grapheme = false;
-            } else {
-                self.updateRowGraphemeFlag(row);
-            }
+            if (full_row) row.grapheme = false else self.updateRowGraphemeFlag(row);
         }
 
         if (row.hyperlink) {
@@ -1306,42 +1368,36 @@ pub const Page = struct {
                 if (cell.hyperlink)
                     @call(.always_inline, clearHyperlink, .{ self, cell });
             }
-
-            // If we have no left/right scroll region we can be sure
-            // that we've cleared all the hyperlinks, so we clear the
-            // flag, otherwise we use the update function to update.
-            if (cells.len == self.size.cols) {
-                row.hyperlink = false;
-            } else {
-                self.updateRowHyperlinkFlag(row);
-            }
+            if (full_row) row.hyperlink = false else self.updateRowHyperlinkFlag(row);
         }
 
         if (row.styled) {
-            for (cells) |*cell| {
-                if (cell.hasStyling())
-                    self.styles.release(self.memory, cell.style_id);
+            // Styled cells overwhelmingly come in runs sharing the same
+            // style (e.g. a colored status bar or a highlighted region),
+            // so group them and release each run with a single ref-count
+            // update rather than per cell.
+            const StyleMask = Mask(Cell, &.{"style_id"}, 4);
+            var released = false;
+            var i: usize = 0;
+            while (i < cells.len) {
+                const id = cells[i].style_id;
+                const j = StyleMask.eqlEnd(cells, i + 1, StyleMask.pattern(cells[i]));
+                if (id != stylepkg.default_id) {
+                    self.styles.releaseMultiple(self.memory, id, @intCast(j - i));
+                    released = true;
+                }
+                i = j;
             }
 
-            // If we have no left/right scroll region we can be sure
-            // that we've cleared all the styles, so we clear the
-            // flag, otherwise we use the update function to update.
-            if (cells.len == self.size.cols) {
+            // The cleared cells keep their style IDs until the fill, so a
+            // scan would find any we released and keep the flag set. Skip
+            // it then. A later clear of unstyled cells clears the flag.
+            if (full_row) {
                 row.styled = false;
-            } else {
+            } else if (!released) {
                 self.updateRowStyledFlag(row);
             }
         }
-
-        if (comptime build_options.kitty_graphics) {
-            if (cells.len == self.size.cols) {
-                row.kitty_virtual_placeholder = false;
-            }
-        }
-
-        // Zero the cells as u64s since empirically this seems
-        // to be a bit faster than using @memset(cells, .{})
-        @memset(@as([]u64, @ptrCast(cells)), 0);
     }
 
     /// Reset the given row to the default state: all cells zeroed and
@@ -1352,7 +1408,7 @@ pub const Page = struct {
     /// is recycled. Clearing the cells alone is not enough because row
     /// metadata such as the wrap state and semantic prompt remain.
     pub inline fn resetRow(self: *Page, row: *Row) void {
-        self.clearCells(row, 0, self.size.cols);
+        self.clearCells(row, 0, self.size.cols, .{});
 
         // Same as row.reset() but also marks the now zeroed row blank.
         assert(!row.managedMemory());
@@ -1794,8 +1850,8 @@ pub const Page = struct {
     /// Call after removing styles in a row.
     pub inline fn updateRowStyledFlag(self: *Page, row: *Row) void {
         const cells = row.cells.ptr(self.memory)[0..self.size.cols];
-        for (cells) |c| if (c.hasStyling()) return;
-        row.styled = false;
+        const StyleMask = Mask(Cell, &.{"style_id"}, 4);
+        if (StyleMask.eqlEnd(cells, 0, 0) == cells.len) row.styled = false;
     }
 
     /// Returns true if this page is dirty at all.
@@ -2290,7 +2346,7 @@ pub const Row = packed struct(u64) {
     /// This may be false for an empty row, but must never be true for
     /// a row with content. `Page.verifyIntegrity` checks this. It is set
     /// only by code that zeroes the whole row (`Page.resetRow`, or
-    /// `Screen.clearCells` with a zero blank cell) or by copying a row
+    /// `Page.clearCells` with a zero blank cell) or by copying a row
     /// that has it set.
     ///
     /// Any code that writes cells must clear it, usually with
@@ -2326,6 +2382,29 @@ pub const Row = packed struct(u64) {
         /// is found, the last (most historical) prompt continuation line is
         /// considered the prompt.
         prompt_continuation = 2,
+
+        /// Returns the mark for a row that holds cells from rows marked
+        /// `self` and `other`, such as after a partial row move inside
+        /// left and right margins. The order doesn't matter.
+        ///
+        /// ```zig
+        /// dst_row.semantic_prompt = dst_row.semantic_prompt.combine(
+        ///     src_row.semantic_prompt,
+        /// );
+        /// ```
+        ///
+        /// `.prompt` wins over `.prompt_continuation`, which wins over
+        /// `.none`. A wrong start only adds a stop when jumping between
+        /// prompts, but a wrong continuation would skip a prompt.
+        pub fn combine(
+            self: SemanticPrompt,
+            other: SemanticPrompt,
+        ) SemanticPrompt {
+            if (self == .prompt or other == .prompt) return .prompt;
+            if (self == .prompt_continuation or
+                other == .prompt_continuation) return .prompt_continuation;
+            return .none;
+        }
     };
 
     /// The backing integer of this packed struct. Prefer this over
@@ -2615,16 +2694,20 @@ pub const Cell = packed struct(u64) {
     /// Returns true if the cell has no text or styling.
     pub fn isEmpty(self: Cell) bool {
         return switch (self.content_tag) {
-            // Textual cells are empty if they have no text and are narrow.
-            // The "narrow" requirement is because wide spacers are meaningful.
             .codepoint,
             .codepoint_grapheme,
-            => !self.hasText() and self.wide == .narrow,
+            => self.isBlank(),
 
             .bg_color_palette,
             .bg_color_rgb,
             => false,
         };
+    }
+
+    /// Like isEmpty, but a cell with only a background color is blank.
+    /// Wide spacers are meaningful, so they are never blank.
+    pub fn isBlank(self: Cell) bool {
+        return !self.hasText() and self.wide == .narrow;
     }
 
     pub inline fn hasGrapheme(self: Cell) bool {
@@ -3575,7 +3658,7 @@ test "Page clearCells full row clears kitty placeholder flag" {
     rac.cell.* = .init(kitty.graphics.unicode.placeholder);
     rac.row.kitty_virtual_placeholder = true;
 
-    page.clearCells(rac.row, 0, page.size.cols);
+    page.clearCells(rac.row, 0, page.size.cols, .{});
     try testing.expect(!rac.row.kitty_virtual_placeholder);
 }
 
@@ -4458,6 +4541,81 @@ test "Page moveCells text-only" {
     }
 }
 
+test "Page moveCells styled" {
+    var page = try Page.init(.{
+        .cols = 10,
+        .rows = 10,
+        .styles = 8,
+    });
+    defer page.deinit();
+
+    const id = try page.styles.add(page.memory, .{ .flags = .{
+        .bold = true,
+    } });
+
+    // Write
+    for (0..page.size.cols) |x| {
+        const rac = page.getRowAndCell(x, 0);
+        rac.row.styled = true;
+        rac.cell.* = .{
+            .content_tag = .codepoint,
+            .content = .{ .codepoint = .{ .data = @intCast(x + 1) } },
+            .style_id = id,
+        };
+        page.styles.use(page.memory, id);
+    }
+
+    // The original style add would have incremented the
+    // ref count too, so release it to balance that out.
+    page.styles.release(page.memory, id);
+    const original_refs = page.styles.refCount(page.memory, id);
+
+    // Move the middle of the row, like a scroll within left and
+    // right margins does.
+    const src = page.getRow(0);
+    const dst = page.getRow(1);
+    page.moveCells(src, 2, dst, 2, 6);
+
+    // The moved cells keep their style and the references move with them.
+    try testing.expect(dst.styled);
+    try testing.expect(src.styled);
+    try testing.expectEqual(original_refs, page.styles.refCount(page.memory, id));
+    for (0..page.size.cols) |x| {
+        const moved = x >= 2 and x < 8;
+        const src_cell = page.getRowAndCell(x, 0).cell;
+        const dst_cell = page.getRowAndCell(x, 1).cell;
+        const keep = if (moved) dst_cell else src_cell;
+        const empty = if (moved) src_cell else dst_cell;
+        try testing.expectEqual(@as(u21, @intCast(x + 1)), keep.content.codepoint.data);
+        try testing.expectEqual(id, keep.style_id);
+        try testing.expectEqual(@as(u21, 0), empty.content.codepoint.data);
+        try testing.expectEqual(stylepkg.default_id, empty.style_id);
+    }
+    try page.verifyIntegrity(testing.allocator);
+}
+
+test "Page moveCells kitty placeholder" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var page = try Page.init(.{
+        .cols = 10,
+        .rows = 10,
+        .styles = 8,
+    });
+    defer page.deinit();
+
+    const rac = page.getRowAndCell(3, 0);
+    rac.cell.* = .init(kitty.graphics.unicode.placeholder);
+    rac.row.kitty_virtual_placeholder = true;
+
+    const src = page.getRow(0);
+    const dst = page.getRow(1);
+    page.moveCells(src, 0, dst, 0, page.size.cols);
+
+    try testing.expect(dst.kitty_virtual_placeholder);
+    try testing.expect(!src.kitty_virtual_placeholder);
+}
+
 test "Page moveCells graphemes" {
     var page = try Page.init(.{
         .cols = 10,
@@ -4784,6 +4942,123 @@ test "Page cloneRowFrom partial keeps blank only if both parts are blank" {
     src.getRow(2).blank = true;
     try dst.clonePartialRowFrom(&src, dst.getRow(2), src.getRow(2), 2, 8);
     try testing.expect(!dst.getRow(2).blank);
+}
+
+test "Page cloneRowFrom partial keeps kitty placeholder flag" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var src = try Page.init(.{
+        .cols = 10,
+        .rows = 10,
+        .styles = 8,
+    });
+    defer src.deinit();
+    var dst = try Page.init(.{
+        .cols = 10,
+        .rows = 10,
+        .styles = 8,
+    });
+    defer dst.deinit();
+
+    // A placeholder in the kept part of the destination: the flag stays.
+    {
+        const rac = dst.getRowAndCell(0, 0);
+        rac.cell.* = .init(kitty.graphics.unicode.placeholder);
+        rac.row.kitty_virtual_placeholder = true;
+    }
+    try dst.clonePartialRowFrom(&src, dst.getRow(0), src.getRow(0), 2, 8);
+    try testing.expect(dst.getRow(0).kitty_virtual_placeholder);
+    try testing.expectEqual(
+        kitty.graphics.unicode.placeholder,
+        dst.getRowAndCell(0, 0).cell.codepoint(),
+    );
+
+    // A placeholder in the copied part of the source: the flag is set.
+    {
+        const rac = src.getRowAndCell(4, 1);
+        rac.cell.* = .init(kitty.graphics.unicode.placeholder);
+        rac.row.kitty_virtual_placeholder = true;
+    }
+    try dst.clonePartialRowFrom(&src, dst.getRow(1), src.getRow(1), 2, 8);
+    try testing.expect(dst.getRow(1).kitty_virtual_placeholder);
+
+    // No placeholders on either side: the flag stays clear.
+    try dst.clonePartialRowFrom(&src, dst.getRow(2), src.getRow(2), 2, 8);
+    try testing.expect(!dst.getRow(2).kitty_virtual_placeholder);
+
+    try dst.verifyIntegrity(testing.allocator);
+}
+
+test "Page cloneRowFrom partial combines semantic prompt" {
+    const SP = Row.SemanticPrompt;
+    const cases = [_]struct { dst: SP, src: SP, expected: SP }{
+        .{ .dst = .none, .src = .none, .expected = .none },
+        .{ .dst = .none, .src = .prompt, .expected = .prompt },
+        .{ .dst = .none, .src = .prompt_continuation, .expected = .prompt_continuation },
+        .{ .dst = .prompt, .src = .none, .expected = .prompt },
+        .{ .dst = .prompt, .src = .prompt, .expected = .prompt },
+        .{ .dst = .prompt, .src = .prompt_continuation, .expected = .prompt },
+        .{ .dst = .prompt_continuation, .src = .none, .expected = .prompt_continuation },
+        .{ .dst = .prompt_continuation, .src = .prompt, .expected = .prompt },
+        .{ .dst = .prompt_continuation, .src = .prompt_continuation, .expected = .prompt_continuation },
+    };
+
+    var src = try Page.init(.{
+        .cols = 10,
+        .rows = cases.len,
+        .styles = 8,
+    });
+    defer src.deinit();
+    var dst = try Page.init(.{
+        .cols = 10,
+        .rows = cases.len,
+        .styles = 8,
+    });
+    defer dst.deinit();
+
+    for (cases, 0..) |c, y| {
+        dst.getRow(y).semantic_prompt = c.dst;
+        src.getRow(y).semantic_prompt = c.src;
+        try dst.clonePartialRowFrom(&src, dst.getRow(y), src.getRow(y), 2, 8);
+        try testing.expectEqual(c.expected, dst.getRow(y).semantic_prompt);
+    }
+}
+
+test "Page moveCells combines semantic prompt" {
+    const SP = Row.SemanticPrompt;
+    const cases = [_]struct { dst: SP, src: SP, expected: SP }{
+        .{ .dst = .none, .src = .none, .expected = .none },
+        .{ .dst = .none, .src = .prompt, .expected = .prompt },
+        .{ .dst = .none, .src = .prompt_continuation, .expected = .prompt_continuation },
+        .{ .dst = .prompt, .src = .none, .expected = .prompt },
+        .{ .dst = .prompt, .src = .prompt, .expected = .prompt },
+        .{ .dst = .prompt, .src = .prompt_continuation, .expected = .prompt },
+        .{ .dst = .prompt_continuation, .src = .none, .expected = .prompt_continuation },
+        .{ .dst = .prompt_continuation, .src = .prompt, .expected = .prompt },
+        .{ .dst = .prompt_continuation, .src = .prompt_continuation, .expected = .prompt_continuation },
+    };
+
+    var page = try Page.init(.{
+        .cols = 10,
+        .rows = cases.len * 2,
+        .styles = 8,
+    });
+    defer page.deinit();
+
+    for (cases, 0..) |c, i| {
+        const src = page.getRow(i * 2);
+        const dst = page.getRow(i * 2 + 1);
+        src.semantic_prompt = c.src;
+        dst.semantic_prompt = c.dst;
+        page.moveCells(src, 2, dst, 2, 6);
+        try testing.expectEqual(c.expected, dst.semantic_prompt);
+
+        // A full row move takes the source's mark.
+        src.semantic_prompt = c.src;
+        dst.semantic_prompt = c.dst;
+        page.moveCells(src, 0, dst, 0, page.size.cols);
+        try testing.expectEqual(c.src, dst.semantic_prompt);
+    }
 }
 
 test "Page exactRowCapacity empty rows" {

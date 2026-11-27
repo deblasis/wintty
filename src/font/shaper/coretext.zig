@@ -74,9 +74,9 @@ pub const Shaper = struct {
     /// attributed strings.
     cached_fonts: std.ArrayList(?*macos.foundation.Dictionary),
 
-    /// The grid that our cached fonts correspond to.
-    /// If the grid changes then we need to reset our cache.
-    cached_font_grid: usize,
+    /// The id of the grid that our cached fonts correspond to, or 0 if
+    /// there is none. If the grid changes then we need to reset our cache.
+    cached_font_grid_id: usize,
 
     /// The list of CoreFoundation objects to release on the dedicated
     /// release thread. This is built up over the course of shaping and
@@ -234,7 +234,7 @@ pub const Shaper = struct {
             .features_no_default = features_no_default,
             .typesetter_attr_dict = typesetter_attr_dict,
             .cached_fonts = .empty,
-            .cached_font_grid = 0,
+            .cached_font_grid_id = 0,
             .cf_release_pool = .empty,
             .cf_release_thread = cf_release_thread,
             .cf_release_thr = cf_release_thr,
@@ -314,10 +314,7 @@ pub const Shaper = struct {
         self: *Shaper,
         opts: font.shape.RunOptions,
     ) font.shape.RunIterator {
-        return .{
-            .hooks = .{ .shaper = self },
-            .opts = opts,
-        };
+        return .init(.{ .shaper = self }, opts);
     }
 
     /// Note that this will accumulate garbage in the release pool. The
@@ -562,11 +559,12 @@ pub const Shaper = struct {
     ) !*macos.foundation.Dictionary {
         // If this grid doesn't match the one we've cached fonts for,
         // then we reset the cache list since it's no longer valid.
-        // We use an intFromPtr rather than direct pointer comparison
-        // because we don't want anyone to inadvertently use the pointer.
-        const grid_id: usize = @intFromPtr(grid);
-        if (grid_id != self.cached_font_grid) {
-            if (self.cached_font_grid > 0) {
+        // We compare grid ids rather than pointers because a grid can be
+        // freed and a different grid allocated at the same address, which
+        // would leave us with fonts that belong to the old grid. The id is
+        // immutable after init so reading it doesn't require the grid lock.
+        if (grid.id != self.cached_font_grid_id) {
+            if (self.cached_font_grid_id > 0) {
                 // Put all the currently cached fonts in to
                 // the release pool before clearing the list.
                 try self.cf_release_pool.ensureUnusedCapacity(
@@ -581,7 +579,7 @@ pub const Shaper = struct {
                 self.cached_fonts.clearRetainingCapacity();
             }
 
-            self.cached_font_grid = grid_id;
+            self.cached_font_grid_id = grid.id;
         }
 
         const index_int = index.int();
@@ -1000,7 +998,7 @@ test "run iterator: empty cells with background set" {
         {
             const run = (try it.next(alloc)).?;
             const cells = try shaper.shape(run);
-            try testing.expectEqual(@as(usize, 3), cells.len);
+            try testing.expectEqual(@as(usize, 1), cells.len);
         }
         try testing.expect(try it.next(alloc) == null);
     }
@@ -1459,6 +1457,120 @@ test "shape variation selector VS16" {
         try testing.expectEqual(@as(usize, 1), cells.len);
     }
     try testing.expectEqual(@as(usize, 1), count);
+}
+
+test "shape emoji modifier implies emoji presentation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    // Emoji fonts are fallbacks, as in SharedGridSet, so they must match
+    // the requested presentation.
+    var c = Collection.init();
+    c.load_options = .{ .library = lib };
+    _ = try c.add(alloc, try .init(
+        lib,
+        font.embedded.inconsolata,
+        .{ .size = .{ .points = 12 } },
+    ), .{ .style = .regular, .fallback = false, .size_adjustment = .none });
+    const color = color: {
+        var disco = font.Discover.init(lib);
+        defer disco.deinit();
+        var disco_it = try disco.discover(alloc, .{
+            .family = "Apple Color Emoji",
+            .size = 12,
+            .monospace = false,
+        });
+        defer disco_it.deinit();
+        var face = (try disco_it.next()).?;
+        errdefer face.deinit();
+        break :color try c.addDeferred(alloc, face, .{
+            .style = .regular,
+            .fallback = true,
+            .size_adjustment = .none,
+        });
+    };
+    _ = try c.add(alloc, try .init(
+        lib,
+        font.embedded.emoji_text,
+        .{ .size = .{ .points = 12 } },
+    ), .{ .style = .regular, .fallback = true, .size_adjustment = .none });
+
+    var grid: SharedGrid = try .init(alloc, .{ .collection = c });
+    defer grid.deinit(alloc);
+    var shaper: Shaper = try .init(alloc, .{});
+    defer shaper.deinit();
+
+    var t = try terminal.Terminal.init(io, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[?2027h");
+    s.nextSlice("\u{1F590}\u{1F3FB}\r\n"); // Raised hand, light skin tone
+    s.nextSlice("\u{270C}\u{1F3FB}\r\n"); // Victory hand, light skin tone
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    for (0..2) |y| {
+        var it = shaper.runIterator(.{
+            .grid = &grid,
+            .cells = state.row_data.get(y).cells.slice(),
+        });
+        const run = (try it.next(alloc)).?;
+        try testing.expectEqual(color, run.font_index);
+    }
+}
+
+test "shape emoji modifier without a color font" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    // With no color font, the text font is used instead of U+FFFD.
+    var c = Collection.init();
+    c.load_options = .{ .library = lib };
+    _ = try c.add(alloc, try .init(
+        lib,
+        font.embedded.inconsolata,
+        .{ .size = .{ .points = 12 } },
+    ), .{ .style = .regular, .fallback = false, .size_adjustment = .none });
+    const text = try c.add(alloc, try .init(
+        lib,
+        font.embedded.emoji_text,
+        .{ .size = .{ .points = 12 } },
+    ), .{ .style = .regular, .fallback = true, .size_adjustment = .none });
+
+    var grid: SharedGrid = try .init(alloc, .{ .collection = c });
+    defer grid.deinit(alloc);
+    var shaper: Shaper = try .init(alloc, .{});
+    defer shaper.deinit();
+
+    var t = try terminal.Terminal.init(io, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[?2027h\u{1F590}\u{1F3FB}");
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var it = shaper.runIterator(.{
+        .grid = &grid,
+        .cells = state.row_data.get(0).cells.slice(),
+    });
+    const run = (try it.next(alloc)).?;
+    try testing.expectEqual(text, run.font_index);
 }
 
 test "shape with empty cells in between" {
@@ -2526,6 +2638,75 @@ test "shape high plane sprite font codepoint" {
     try testing.expectEqual(null, try it.next(alloc));
 }
 
+test "shape after grid is replaced at the same address" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Any codepoint that both fonts have but map to different glyph indexes.
+    const cp: u21 = 'a';
+
+    var t = try testShaperWithFont(alloc, .inconsolata);
+    defer t.deinit();
+
+    const before = try shapeOneCodepoint(alloc, &t.shaper, t.grid, cp);
+    try testing.expectEqual(before.expected, before.glyph);
+
+    // Build the replacement first so that if it fails, t still owns the
+    // original grid and frees it exactly once.
+    const new_grid = try testGridWithFont(alloc, t.lib, .jetbrains_mono);
+
+    // Reinitialize the grid in place instead of freeing and re-allocating it,
+    // because whether the allocator hands back the same address is not
+    // deterministic, and a stale font cache only shows up at the same address.
+    t.grid.deinit(alloc);
+    t.grid.* = new_grid;
+
+    const after = try shapeOneCodepoint(alloc, &t.shaper, t.grid, cp);
+
+    // Without differing glyph indexes the test cannot tell the fonts apart.
+    try testing.expect(before.expected != after.expected);
+    try testing.expectEqual(after.expected, after.glyph);
+}
+
+/// Shape a single codepoint and return the resulting glyph index along with
+/// the glyph index that the face chosen for the run reports for it.
+fn shapeOneCodepoint(
+    alloc: Allocator,
+    shaper: *Shaper,
+    grid: *SharedGrid,
+    cp: u21,
+) !struct { glyph: u32, expected: u32 } {
+    const testing = std.testing;
+
+    var buf: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(cp, &buf);
+
+    var t = try terminal.Terminal.init(testing.io, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice(buf[0..len]);
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var it = shaper.runIterator(.{
+        .grid = grid,
+        .cells = state.row_data.get(0).cells.slice(),
+    });
+    const run = (try it.next(alloc)).?;
+    const cells = try shaper.shape(run);
+    try testing.expectEqual(1, cells.len);
+
+    const face = try grid.resolver.collection.getFace(run.font_index);
+    return .{
+        .glyph = cells[0].glyph_index,
+        .expected = face.glyphIndex(cp).?,
+    };
+}
+
 const TestShaper = struct {
     alloc: Allocator,
     shaper: Shaper,
@@ -2552,6 +2733,38 @@ const TestFont = enum {
 /// Helper to return a fully initialized shaper.
 fn testShaper(alloc: Allocator) !TestShaper {
     return try testShaperWithFont(alloc, .inconsolata);
+}
+
+/// Return a grid whose only font is the given embedded font. On error
+/// nothing is leaked.
+fn testGridWithFont(alloc: Allocator, lib: Library, font_req: TestFont) !SharedGrid {
+    const data = switch (font_req) {
+        .code_new_roman => font.embedded.code_new_roman,
+        .inconsolata => font.embedded.inconsolata,
+        .geist_mono => font.embedded.geist_mono,
+        .jetbrains_mono => font.embedded.jetbrains_mono,
+        .monaspace_neon => font.embedded.monaspace_neon,
+        .nerd_font => font.embedded.test_nerd_font,
+    };
+
+    var c = Collection.init();
+    c.load_options = .{ .library = lib };
+    // The grid owns the collection only once init succeeds.
+    errdefer c.deinit(alloc);
+
+    {
+        var face: font.Face = try .init(lib, data, .{ .size = .{ .points = 12 } });
+        // The collection owns the face only once add succeeds. This is
+        // scoped so it doesn't also run if the grid init below fails.
+        errdefer face.deinit();
+        _ = try c.add(alloc, face, .{
+            .style = .regular,
+            .fallback = false,
+            .size_adjustment = .none,
+        });
+    }
+
+    return try .init(alloc, .{ .collection = c });
 }
 
 fn testShaperWithFont(alloc: Allocator, font_req: TestFont) !TestShaper {
