@@ -485,7 +485,9 @@ fn expectCleanMissAfterBare(entry: []const u8) !void {
 /// its default, `.COM;.EXE;.BAT;.CMD`. That is the path the build's pandoc
 /// probe takes. The list only fits behind an entry the OS refuses whatever
 /// the name is: its extensions are four bytes, so behind a too-long entry
-/// the first extended candidate lands past the `NameTooLong` window.
+/// the first extended candidate lands past the `NameTooLong` window. The
+/// walk hands back the candidate it built, so the path found ends in the
+/// list's spelling, `w.EXE`, and not in the file's, `w.exe`.
 fn expectWalkContinuesDefault(entry: []const u8) !void {
     var fx = try Fixture.init("w.exe");
     defer fx.deinit();
