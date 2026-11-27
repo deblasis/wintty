@@ -169,8 +169,15 @@ fn tryPathImpl(
         // is swallowed the same way. The miss leaves no trace, so a command
         // that is also further down PATH resolves to that copy.
         error.NameTooLong => return null,
-        // `Unexpected` is reachable from a PATH entry this long: joined with a
-        // name of 32748 to 32762 bytes it reaches the kernel, which answers
+        // The entry names a volume that holds no media, so nothing there can
+        // be read: a miss, and the walk goes on. The arm does not say whether
+        // the entry or the command's own text is at fault, so a command the
+        // OS reports this way is swallowed the same way. The miss leaves no
+        // trace, so a command that is also further down PATH resolves to that
+        // copy.
+        error.NoDevice => return null,
+        // `Unexpected` is reachable from a PATH entry this long: once the
+        // joined path reaches about 32747 to 32762 bytes the kernel answers
         // with a status std leaves unmapped. It is returned on purpose,
         // because it is also what a real std bug looks like, and so is any
         // error a later std adds here: that fails loudly by design.
@@ -362,9 +369,10 @@ const offline_share_entry = "\\\\host-does-not-exist-1477\\share";
 ///
 /// The OS only reports `NameTooLong` once `<entry>\<name>` is 32763 to 32766
 /// bytes. Shorter joined text reaches the kernel and comes back as
-/// `Unexpected`, which std leaves unmapped; 32767 is `BadPathName`; and
-/// 32768 or more panics inside std's UTF-16 conversion. Each test sizes the
-/// entry for the longest name it opens behind it.
+/// `Unexpected`, which std leaves unmapped, until about 32743, below which the
+/// kernel answers `FileNotFound`. 32767 is `BadPathName`; 32768 or more panics
+/// inside std's UTF-16 conversion. Each test sizes the entry for the longest
+/// name it opens behind it.
 fn longEntry(comptime len: usize) [len]u8 {
     @setEvalBranchQuota(4 * len);
     var entry: [len]u8 = undefined;
@@ -448,7 +456,7 @@ fn requireOpenError(entry: []const u8, name: []const u8, expected: anyerror) !vo
 const bare_pathext = ".c";
 
 /// The bare command name every bare-name test looks for: the file is `w.c`
-/// with `bare_pathext` and `w.exe` with the default list.
+/// with `bare_pathext` and `w.EXE` with the default list.
 const bare_name = "w";
 
 /// The walk passes over `entry` and finds the bare-named command in the next
@@ -487,9 +495,10 @@ fn expectCleanMissAfterBare(entry: []const u8) !void {
 /// the name is: its extensions are four bytes, so behind a too-long entry
 /// the first extended candidate lands past the `NameTooLong` window. The
 /// walk hands back the candidate it built, so the path found ends in the
-/// list's spelling, `w.EXE`, and not in the file's, `w.exe`.
+/// list's spelling, `w.EXE`; the fixture is created under that spelling too,
+/// so the match does not need a case-insensitive directory.
 fn expectWalkContinuesDefault(entry: []const u8) !void {
-    var fx = try Fixture.init("w.exe");
+    var fx = try Fixture.init("w.EXE");
     defer fx.deinit();
     const path_value = try pathAfter(entry, fx.dir_path);
     defer testing.allocator.free(path_value);
@@ -499,8 +508,8 @@ fn expectWalkContinuesDefault(entry: []const u8) !void {
 
     try testing.expect(std.mem.startsWith(u8, found, fx.dir_path));
     // The walk returns the candidate it built, spelled as the default list
-    // spells its extension. The OS matched it to `w.exe` without regard to
-    // case, and `.COM` comes first in the list but opens nothing here.
+    // spells its extension, so this holds without depending on case. `.COM`
+    // comes first in the list but opens nothing here.
     try testing.expect(std.mem.endsWith(u8, found, "w.EXE"));
 }
 
@@ -569,6 +578,24 @@ test "expandPath: a BadPathName entry does not turn a bare miss into an error" {
     try expectCleanMissAfterBare(bad_name_entry);
 }
 
+test "expandPath: the walk continues past a BadPathName entry for a bare name with a three-byte extension" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(bad_name_entry, "zz", error.BadPathName);
+    // The other bare-name tests run a two-byte extension (`.c`) and the
+    // default list's four-byte ones; a walk that granted the miss only to
+    // those lengths would pass all of them. Three bytes closes that.
+    var fx = try Fixture.init("w.py");
+    defer fx.deinit();
+    const path_value = try pathAfter(bad_name_entry, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    const found = (try expandPath(testing.io, testing.allocator, path_value, ".py", bare_name)).?;
+    defer testing.allocator.free(found);
+
+    try testing.expect(std.mem.startsWith(u8, found, fx.dir_path));
+    try testing.expect(std.mem.endsWith(u8, found, "w.py"));
+}
+
 test "expandPath: the walk continues past a NetworkNotFound entry for a bare name" {
     if (builtin.target.os.tag != .windows) return error.SkipZigTest;
     try requireOpenError(offline_share_entry, "zz", error.NetworkNotFound);
@@ -625,6 +652,64 @@ test "expandPath: a command name the OS refuses is a clean miss, not an error" {
     try testing.expectEqual(
         @as(?[]u8, null),
         try expandPath(testing.io, testing.allocator, "C:\\Windows\\System32", null, "cmd\"exe"),
+    );
+}
+
+/// A drive with no media in it. No test can create such a volume, so the
+/// error comes from the faked `Io` below: what the tests pin is the walk's
+/// mapping of `error.NoDevice`, not std's derivation of it from the status
+/// the OS hands back.
+const media_less_entry = "Q:";
+
+/// `testing.io` with one difference: opening anything under
+/// `media_less_entry` fails with `error.NoDevice`, as a drive with no media
+/// does. Every other call goes to `testing.io`.
+fn openFileWithoutMedia(
+    userdata: ?*anyopaque,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    options: std.Io.Dir.OpenFileOptions,
+) std.Io.File.OpenError!std.Io.File {
+    if (std.mem.startsWith(u8, sub_path, media_less_entry)) return error.NoDevice;
+    return testing.io.vtable.dirOpenFile(userdata, dir, sub_path, options);
+}
+
+/// An `Io` that behaves like `testing.io` except for `openFileWithoutMedia`.
+/// The vtable is copied so that exactly one entry changes, and it lives in
+/// the caller's frame at `vtable`.
+fn ioWithoutMedia(vtable: *std.Io.VTable) std.Io {
+    vtable.* = testing.io.vtable.*;
+    vtable.dirOpenFile = openFileWithoutMedia;
+    return .{ .userdata = testing.io.userdata, .vtable = vtable };
+}
+
+test "expandPath: the walk continues past a media-less drive entry" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    var fx = try Fixture.init("cmd-1477.exe");
+    defer fx.deinit();
+    const path_value = try pathAfter(media_less_entry, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    var vtable: std.Io.VTable = undefined;
+    const io = ioWithoutMedia(&vtable);
+    const found = (try expandPath(io, testing.allocator, path_value, null, "cmd-1477.exe")).?;
+    defer testing.allocator.free(found);
+
+    try testing.expect(std.mem.startsWith(u8, found, fx.dir_path));
+    try testing.expect(std.mem.endsWith(u8, found, "cmd-1477.exe"));
+}
+
+test "expandPath: a media-less drive entry does not turn a miss into an error" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    var fx = try Fixture.init("other-1477.exe");
+    defer fx.deinit();
+    const path_value = try pathAfter(media_less_entry, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    var vtable: std.Io.VTable = undefined;
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try expandPath(ioWithoutMedia(&vtable), testing.allocator, path_value, null, "cmd-1477.exe"),
     );
 }
 
