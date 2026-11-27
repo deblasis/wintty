@@ -81,24 +81,12 @@ pub fn warmup() void {
         enableDebugLayer();
     }
 
-    const factory_flags: u32 = if (comptime builtin.mode == .debug)
-        dxgi.DXGI_CREATE_FACTORY_DEBUG
-    else
-        0;
-
-    var factory: ?*dxgi.IDXGIFactory2 = null;
-    {
-        const hr = dxgi.CreateDXGIFactory2(
-            factory_flags,
-            &dxgi.IDXGIFactory2.IID,
-            @ptrCast(&factory),
-        );
-        if (FAILED(hr)) {
-            log.warn("warmup: CreateDXGIFactory2 failed: 0x{x}", .{@as(u32, @bitCast(hr))});
-            return;
-        }
-    }
-    defer _ = factory.?.Release();
+    var factory_hr: HRESULT = 0;
+    const factory = createFactory(&factory_hr) catch {
+        log.warn("warmup: CreateDXGIFactory2 failed: 0x{x}", .{@as(u32, @bitCast(factory_hr))});
+        return;
+    };
+    defer _ = factory.Release();
 
     var device: ?*d3d12.ID3D12Device = null;
     {
@@ -418,24 +406,12 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     }
 
     // -- DXGI factory --
-    const factory_flags: u32 = if (comptime builtin.mode == .debug)
-        dxgi.DXGI_CREATE_FACTORY_DEBUG
-    else
-        0;
-
-    var factory: ?*dxgi.IDXGIFactory2 = null;
-    {
-        const hr = dxgi.CreateDXGIFactory2(
-            factory_flags,
-            &dxgi.IDXGIFactory2.IID,
-            @ptrCast(&factory),
-        );
-        if (FAILED(hr)) {
-            log.err("CreateDXGIFactory2 failed: 0x{x}", .{@as(u32, @bitCast(hr))});
-            return error.DXGIFactoryCreationFailed;
-        }
-    }
-    defer _ = factory.?.Release();
+    var factory_hr: HRESULT = 0;
+    const factory = createFactory(&factory_hr) catch {
+        log.err("CreateDXGIFactory2 failed: 0x{x}", .{@as(u32, @bitCast(factory_hr))});
+        return error.DXGIFactoryCreationFailed;
+    };
+    defer _ = factory.Release();
 
     // -- Device --
     // Pass null adapter to let DXGI pick the default GPU.
@@ -550,7 +526,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
             // HWND surface: composition swap chain + DirectComposition.
             // DX12 command queues implement IUnknown, which DXGI needs.
             const result = try createCompositionSwapChain(
-                factory.?,
+                factory,
                 command_queue.?,
                 opts.width,
                 opts.height,
@@ -594,7 +570,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
             // (the blank-until-focus startup race) -- and the binding
             // survives ResizeBuffers without re-binding.
             const result = try createSurfaceHandleSwapChain(
-                factory.?,
+                factory,
                 command_queue.?,
                 opts.width,
                 opts.height,
@@ -610,7 +586,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
             // via ghostty_surface_get_swap_chain and binds it to a
             // Windows.UI.Composition visual for per-pixel alpha.
             const result = try createCompositionSwapChain(
-                factory.?,
+                factory,
                 command_queue.?,
                 opts.width,
                 opts.height,
@@ -1166,6 +1142,50 @@ fn enableDebugLayer() void {
     }
 }
 
+/// Create the DXGI factory, falling back to the plain one when the debug
+/// factory is unavailable.
+///
+/// DXGI_CREATE_FACTORY_DEBUG needs the Graphics Tools optional feature,
+/// the same component D3D12GetDebugInterface needs. Without it
+/// CreateDXGIFactory2 returns DXGI_ERROR_INVALID_CALL (0x887a0001), and
+/// Device.init used to turn that into a failed renderer: a Debug build on
+/// such a machine drew nothing, and every DX12 GPU test reported the two
+/// log lines as "N errors were logged". The debug factory is a
+/// diagnostic, so its absence falls back to the plain factory; only that
+/// attempt failing is fatal.
+///
+/// `hr_out` receives the HRESULT of the attempt that decided the result,
+/// so each caller keeps the code in its own log line and level.
+fn createFactory(hr_out: *HRESULT) error{DXGIFactoryCreationFailed}!*dxgi.IDXGIFactory2 {
+    // S_OK is what a caller sees when either attempt succeeded; the
+    // failing HRESULT is written below before returning the error.
+    hr_out.* = 0;
+
+    if (comptime builtin.mode == .debug) {
+        var debug_factory: ?*dxgi.IDXGIFactory2 = null;
+        const debug_hr = dxgi.CreateDXGIFactory2(
+            dxgi.DXGI_CREATE_FACTORY_DEBUG,
+            &dxgi.IDXGIFactory2.IID,
+            @ptrCast(&debug_factory),
+        );
+        if (SUCCEEDED(debug_hr) and debug_factory != null) return debug_factory.?;
+        log.info(
+            "DXGI debug factory unavailable: 0x{x}; using the plain factory",
+            .{@as(u32, @bitCast(debug_hr))},
+        );
+    }
+
+    var factory: ?*dxgi.IDXGIFactory2 = null;
+    const hr = dxgi.CreateDXGIFactory2(
+        0,
+        &dxgi.IDXGIFactory2.IID,
+        @ptrCast(&factory),
+    );
+    hr_out.* = hr;
+    if (FAILED(hr) or factory == null) return error.DXGIFactoryCreationFailed;
+    return factory.?;
+}
+
 /// Build the swap-chain description shared by every composition path
 /// (HWND, SwapChainPanel via surface handle, and bare composition).
 ///
@@ -1473,6 +1493,20 @@ test "composition swap chain desc: STRETCH scaling, waitable only when paced" {
 
 test "frame_count is 3" {
     try std.testing.expectEqual(@as(u32, 3), frame_count);
+}
+
+test "createFactory returns a factory with or without the debug component" {
+    // Without the Graphics Tools optional feature the debug attempt fails
+    // with DXGI_ERROR_INVALID_CALL and the fallback has to produce the
+    // factory; with it, the first attempt does. This host is the former,
+    // where the missing fallback used to abort Device.init and fail every
+    // DX12 GPU test with "N errors were logged".
+    if (comptime builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+    var hr: HRESULT = 0;
+    const factory = try createFactory(&hr);
+    defer _ = factory.Release();
+    try std.testing.expectEqual(@as(HRESULT, 0), hr);
 }
 
 test "warm device slot: take clears it, empty take returns null" {
