@@ -466,14 +466,16 @@ def self_test() -> int:
         failures.append("stdout=None satisfied the capture rule")
     if scan_py("tools/x.py", "import subprocess\nsubprocess.run(['x'], creationflags=0x08000000, stdout=subprocess.PIPE)"):
         failures.append("a piped stream was flagged")
-    # the private's guard: first position, right key, comment-only is not a dep
-    if _guard_problem("_test-in-lane", '_test-in-lane: # _require-lane "test"', set()) is None:
+    # the private's guard: first position, the key of its callers' queue, comment-only is not a dep
+    if _guard_problem("_test-in-lane", '_test-in-lane: # _require-lane "test"', {}) is None:
         failures.append("a comment-only guard satisfied the first-dependency rule")
-    if _guard_problem("_fuzz-in-lane", '_fuzz-in-lane: (_require-lane "fuzz" "wintty-build")', {"_fuzz-in-lane"}) is None:
+    if _guard_problem("_fuzz-in-lane", '_fuzz-in-lane: (_require-lane "fuzz" "wintty-build")',
+                      {"_fuzz-in-lane": {"wintty-desktop"}}) is None:
         failures.append("a desktop private accepted the build key")
-    if _guard_problem("_fuzz-in-lane", '_fuzz-in-lane: (_require-lane "fuzz" "wintty-desktop")', {"_fuzz-in-lane"}) is not None:
+    if _guard_problem("_fuzz-in-lane", '_fuzz-in-lane: (_require-lane "fuzz" "wintty-desktop")',
+                      {"_fuzz-in-lane": {"wintty-desktop"}}) is not None:
         failures.append("the correct desktop guard was flagged")
-    if _guard_problem("_test-in-lane", '_test-in-lane: test-configure (_require-lane "test")', set()) is not None:
+    if _guard_problem("_test-in-lane", '_test-in-lane: test-configure (_require-lane "test")', {}) is not None:
         pass  # not-first is the point
     else:
         failures.append("a guard after a real dependency passed")
@@ -553,6 +555,220 @@ def self_test() -> int:
     ):
         if _caller_probe_ok(*args):
             failures.append(f"a caller probe with {label} passed")
+
+    if _guard_problem("_x-in-lane", '_x-in-lane: (_require-lane "x" "wintty-build")',
+                      {"_x-in-lane": {"wintty-build", "wintty-desktop"}}) is None:
+        failures.append("a single-key guard satisfied a two-queue private on its own")
+    # what is held to the guard, and the queue its key must match, both come
+    # from what a caller hands to incoda. Each row is a shape a review planted,
+    # on a base whose own result is the empty one.
+    def caller(pub, target, queue):
+        return (f'\n[windows]\n{pub}:\n    & $inc run --queue {queue} '
+                f'--reason "{pub}" -- just {target}; exit 0\n')
+    base = "\n[windows]\nbuild-x: (_lane \"build-x\" \"_build-x-in-lane\" \"39m\")\n"
+    body = '\n[private]\n_x-body:\n    pwsh -NoProfile -File windows/scripts/nope.ps1\n'
+    for label, text, want in [
+        ("base", "", (set(), {}, [])),
+        ("renamed-private", caller("theme-x", "_x-body", "wintty-desktop") + body,
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        ("in-lane-by-name-without-a-caller", "\n[private]\n_orphan-in-lane:\n    echo x\n",
+         ({"_orphan-in-lane"}, {}, [])),
+        ("two-queues", caller("pub-a", "_x-in-lane", "wintty-desktop") + caller("pub-b", "_x-in-lane", "wintty-build"),
+         ({"_x-in-lane"}, {"_x-in-lane": {"wintty-desktop", "wintty-build"}},
+          ["_x-in-lane is handed to incoda under more than one queue (wintty-build, wintty-desktop): give each queue its own recipe"])),
+        ("continuation", '\n[windows]\ncont:\n    & $inc run --queue wintty-desktop \\\n        --reason "c" -- just _x-body; exit 0\n',
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        ("queue-equals", '\n[windows]\neq:\n    & $inc run --queue=wintty-desktop --reason "eq" -- just _x-body; exit 0\n',
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        ("queue-quoted", caller("q", "_x-body", '"wintty-desktop"'), ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        ("comma-list", caller("cl", "_x-body", "wintty-build,wintty-desktop"),
+         ({"_x-body"}, {"_x-body": {"wintty-desktop", "wintty-build"}},
+          ["_x-body is handed to incoda under more than one queue (wintty-build, wintty-desktop): give each queue its own recipe"])),
+        ("two-queue-flags-last-wins", '\n[windows]\ntq:\n    & $inc run --queue wintty-build --queue wintty-desktop --reason "tq" -- just _x-body; exit 0\n',
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}},
+          ["names --queue twice on one line (incoda keeps the last, 'wintty-desktop')"])),
+        ("queue-inside-a-value-is-not-a-queue",
+         '\n[windows]\niv:\n    & $inc run --reason "backup --queue wintty-desktop" --queue wintty-build --reason "iv" -- just _x-body; exit 0\n',
+         ({"_x-body"}, {"_x-body": {"wintty-build"}}, [])),
+        ("queue-after-double-dash-is-not-a-queue", caller("ad", "_x-body --queue wintty-build", "wintty-desktop"),
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        ("comment-plants-queue", '\n[windows]\nc:\n    # --queue wintty-desktop -- just _x-body\n'
+         '    & $inc run --queue wintty-build --reason "c" -- just _x-body; exit 0\n',
+         ({"_x-body"}, {"_x-body": {"wintty-build"}}, [])),
+        ("backtick-continuation", '\n[windows]\nbc:\n    & $inc run --queue wintty-desktop `\n        --reason "bc" -- just _x-body; exit 0\n',
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        ("no-queue", '\n[windows]\nn:\n    & $inc run --reason "n" -- just _x-body; exit 0\n',
+         ({"_x-body"}, {"_x-body": set()}, ["names no queue"])),
+        ("variable-target", caller("v", "$t", "wintty-desktop"),
+         (set(), {}, ["hands incoda a target this scan cannot read ($t)"])),
+        ("interpolated-target", caller("it", "{{_tgt}}", "wintty-desktop"),
+         (set(), {}, ["hands incoda a target this scan cannot read ({{_tgt}})"])),
+        ("braced-target", caller("bt", "_x-{body}", "wintty-desktop"),
+         (set(), {}, ["hands incoda a target this scan cannot read (_x-{body})"])),
+        ("no-target", '\n[windows]\nnt:\n    & $inc run --queue wintty-desktop --reason "nt" -- just\n',
+         (set(), {}, ["hands incoda a target this scan cannot read (nothing)"])),
+        ("generic-wrapper-is-quiet", '\n[windows]\nw:\n    & $inc run --queue wintty-build --reason "{{reason}}" --wait {{budget}} -- just {{private}} {{args}}\n',
+         (set(), {}, [])),
+        ("comment-line-is-not-a-caller", '\n[windows]\nc0:\n#    & $inc run --queue wintty-desktop --reason "c0" -- just _x-body\n',
+         (set(), {}, [])),
+        ("statement-ends-before-exit", '\n[windows]\nse:\n    & $inc run --queue wintty-desktop --reason "se" -- just _x-body; exit ($LASTEXITCODE ?? 1)\n',
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        ("no-target-when-statement-has-none", '\n[windows]\nnn:\n    & $inc run --queue wintty-desktop --reason "nn" -- just _x-body "an arg"; exit 0\n',
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        # a caller AFTER a separator on the same line: only the statement splitter finds it
+        ("second-statement-is-a-caller", '\n[windows]\ns2:\n    echo hi; & $inc run --queue wintty-build --reason "s2" -- just _y-body; exit 0\n',
+         ({"_y-body"}, {"_y-body": {"wintty-build"}}, [])),
+        # a `--` on the line but the caller commented out, and a real caller after it
+        ("commented-caller-then-real-caller", '\n[windows]\nc1:\n    # & $inc run --queue wintty-desktop --reason "c1" -- just _z-body\n    & $inc run --queue wintty-build --reason "c1" -- just _z-body\n',
+         ({"_z-body"}, {"_z-body": {"wintty-build"}}, [])),
+        ("unknown-queue", caller("u", "_x-body", "wintty-other"), ({"_x-body"}, {"_x-body": {"wintty-other"}},
+         ["_x-body is handed to an unknown queue (wintty-other)"])),
+        ("wrapper-only-private-is-build", caller("w", "_x-in-lane", "wintty-build"),
+         ({"_x-in-lane"}, {"_x-in-lane": {"wintty-build"}}, [])),
+        ("hash-inside-a-reason-string", '\n[windows]\nr:\n    & $inc run --queue wintty-desktop --reason ("theme matrix (#937)" ).Trim()) -- just _x-in-lane; exit 0\n',
+         ({"_x-in-lane"}, {"_x-in-lane": {"wintty-desktop"}}, [])),
+        # a bare `just` reaches its target with no lane: the target is held,
+        # and the call is a lane skip unless the line also offers the lane
+        # (a caller's fallback) or the target takes its own lane
+        ("bare-just-to-a-held-private",
+         caller("pub", "_x-body", "wintty-desktop") + "\n[windows]\nrewire:\n    just _x-body\n",
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}},
+          ["a bare `just _x-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        # the target held by NOTHING else: the bare call is what makes it need a guard
+        ("bare-just-to-an-unheld-private",
+         "\n[windows]\nmy-lane:\n    just _seam-body\n[private]\n_seam-body:\n    pwsh -NoProfile -File windows/scripts/nope.ps1\n",
+         ({"_seam-body"}, {},
+          ["a bare `just _seam-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        # a caller's fallback: the bare call sits in the else branch of a lane decision,
+        # with the real caller's `;`s, so it IS split out as its own statement
+        ("bare-just-in-a-fallback-is-quiet",
+         "\n[windows]\nfb:\n    $inc = {{inc}}; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason fb -- just _x-body } else { $env:WINTTY_LANE_DECISION = 'bare'; just _x-body }\n",
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        # offering the lane somewhere on the line is not a fallback: these run bare outside the else
+        ("bare-just-beside-a-lane-call-fires",
+         "\n[windows]\nbb:\n    $inc = {{inc}}; & $inc run --queue wintty-desktop --reason bb -- just _x-body; $env:WINTTY_LANE_DECISION = 'bare'; just _x-body\n",
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}},
+          ["a bare `just _x-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("bare-just-after-the-else-closes-fires",
+         "\n[windows]\nac:\n    $inc = {{inc}}; if (Test-LaneReady -Keys @('wintty-desktop')) { & $inc run --queue wintty-desktop --reason ac -- just _x-body } else { $env:WINTTY_LANE_DECISION = 'bare'; just _x-body }; just _x-body\n",
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}},
+          ["a bare `just _x-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("bare-just-in-an-unrelated-else-fires",
+         "\n[windows]\nue:\n    $inc = {{inc}}; if ($x) { & $inc run --queue wintty-desktop --reason ue -- just _x-body } else { $env:WINTTY_LANE_DECISION = 'bare'; just _x-body }\n",
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}},
+          ["a bare `just _x-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("bare-just-to-a-public-recipe", "\n[windows]\ntest: (_lane \"test\" \"_test-in-lane\" \"1m\")\n[windows]\nchain:\n    just test\n",
+         (set(), {}, [])),
+        # a desktop caller is laned AFTER its _no-wintty-from dependency: anywhere in the deps counts
+        ("bare-just-to-a-desktop-caller-is-quiet",
+         "\n[windows]\ndc: _no-wintty-from (_build-in-lane \"dc\" \"build-win\")\n[windows]\nuse-dc:\n    just dc\n", (set(), {}, [])),
+        # a lane claimed only in a comment, in a parameter default, or under [unix] is not a lane here
+        ("lane-in-a-comment-is-not-a-lane",
+         "\n[windows]\nlc: echo y # (_lane \"lc\" \"_x\" \"1m\")\n[windows]\nuse-lc:\n    just lc\n",
+         ({"lc"}, {}, ["a bare `just lc` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("lane-in-a-parameter-default-is-not-a-lane",
+         "\n[windows]\nlp arg=\"(_lane x)\":\n    echo y\n[windows]\nuse-lp:\n    just lp\n",
+         ({"lp"}, {}, ["a bare `just lp` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("lane-under-unix-only-is-not-a-lane-here",
+         "\n[unix]\nlu: (_lane \"lu\" \"_x\" \"1m\")\n[windows]\nlu: echo w\n[windows]\nuse-lu:\n    just lu\n",
+         ({"lu"}, {}, ["a bare `just lu` takes no lane: the line offers none, so the target's guard is the only check"])),
+    ]:
+        held, queues, problems = _in_lane_privates(base + text)
+        # the wrapper `_build-x-in-lane` is held by name in every row; a row states the rest
+        got = (held - {"_build-x-in-lane"}, queues, problems)
+        if got != want:
+            failures.append(f"held-set row {label}: got {got}, want {want}")
+    real_held, _real_queues, problems = _in_lane_privates()
+    if problems:
+        failures.append(f"the real justfile has a queue problem: {problems}")
+    # a heavy recipe tied to no leg is a finding: every way a body invokes the
+    # tool is reported, and only text, a binding, and a mapped recipe stay quiet
+    mapped = {"mapped-heavy": ("zig-tests",), "empty-map": (), "chained": ("zig-tests",),
+              "chained-quiet": ("zig-tests",)}
+    synth = "\n".join([
+        "mapped-heavy:", "    zig build test",
+        "bare-heavy:", "    zig build test",
+        "cd-heavy:", "    cd pkg/wuffs && zig build test",
+        "amp-heavy:", "    & dotnet build windows/x.sln",
+        "var-heavy:", "    $zig build test",
+        "quiet-heavy:", "    @zig build test",
+        "pipe-heavy:", "    echo x | zig build test",
+        "paren-heavy:", '    & (Join-Path $PWD "tools/zig.exe") build',
+        "path-heavy:", r"    C:\tools\zig\zig.exe build test",
+        "spaced-heavy:", '    & "C:\\Program Files\\zig\\zig.exe" build test',
+        "wrap-heavy:", '    pwsh -NoProfile -Command "zig build test"',
+        "cmd-heavy:", "    & cmd /c 'zig build test'",
+        "start-heavy:", "    Start-Process -FilePath zig -ArgumentList 'build' -Wait",
+        "sub-heavy:", "    $v = $(zig version)",
+        "assign-heavy:", "    $o = & zig build test",
+        "indirect-heavy:", "    $z = 'zig'", "    & $z build test",
+        "chain-heavy:", "    just chained",
+        "unix-heavy:", "    zig build test",
+        "[unix]", "unix-only:", "    zig build test",
+        "empty-map:", "    zig build test",
+        "bind-only:", "    $zig = 'zig'",
+        "bind-path:", '    $z = "C:\\tools\\zig.exe"',
+        "start-other:", "    Start-Process -FilePath notepad.exe",
+        "call-other:", "    $z = 'cmake'", "    & $z build test",
+        "quiet:", "    echo hi",
+        "says:", '    @echo "It runs zig build test natively on Windows."',
+        "braced:", "    if ($x) { zig build test }",
+        "copy:", "    Copy-Item windows/zig-out/bin/a.exe dist/",
+        "[unix]", "unix-quiet:", "    echo hi",
+        "chained:", "    zig build test",
+        "chained-quiet:", "    echo chained",
+        "chain-quiet:", "    just chained-quiet",
+        # a command word that cannot be read: code handed to an interpreter, a
+        # process started through .NET, an unread file, an unbound variable
+        "iex-heavy:", "    Invoke-Expression 'zig build test'",
+        "iex-alias-heavy:", "    iex 'dotnet build'",
+        "job-heavy:", "    Start-Job { zig build test }",
+        "process-heavy:", "    [System.Diagnostics.Process]::Start('zig','build')",
+        "parts-heavy:", "    $n = 'zi' + 'g'", "    & $n build",
+        "env-heavy:", "    & $env:ZIG_EXE build",
+        "foreach-heavy:", "    foreach ($x in 'zig') { & $x build }",
+        "block-literal-heavy:", "    if ($x) { zig build test }",
+        "block-quiet:", "    if ($x) { echo hi }",
+        "here-heavy:", "    $c = @'", "    zig build test", "    '@", "    iex $c",
+        "outside-heavy:", "    . C:\\tools\\helper.ps1",
+        "unbound-heavy:", "    & $tool build",
+        # and what stays quiet: a readable binding, a scanned file, an assignment, a subshell
+        "incoda-quiet:", '    $inc = {{inc}}; & $inc run --queue wintty-build --reason "x" -- just _x-in-lane',
+        "dot-quiet:", "    . ./windows/scripts/lib/wintty-process.ps1",
+        "dotjoin-quiet:", '    . (Join-Path "{{justfile_directory()}}" ".agents\\scripts\\incoda-held.ps1")',
+        "assign-quiet:", "    $drift = ($LASTEXITCODE -ne 0)",
+        "sub-quiet:", '    (cd "$dir" && echo x)',
+        "bash-quiet:", "    #!/usr/bin/env bash", "    glslang=${GLSLANG:-glslang}", "    command -v \"$glslang\"",
+        "[unix]", "bash-unix-quiet:", "    #!/usr/bin/env bash", "    \"$tool\" build",
+        "bash-unbound-quiet:", "    #!/usr/bin/env bash", "    for f in *.zig; do", "    & $f", "    done",
+        "pwsh-block-heavy:", "    #!/usr/bin/env pwsh", "    & $env:ZIG_EXE build",
+    ])
+    got = _unmapped_heavy_recipes(synth, mapped)
+    want = ["amp-heavy", "assign-heavy", "bare-heavy", "block-literal-heavy", "braced", "cd-heavy",
+            "chain-heavy", "cmd-heavy", "empty-map", "env-heavy", "foreach-heavy", "here-heavy",
+            "iex-alias-heavy", "iex-heavy", "indirect-heavy", "job-heavy", "outside-heavy",
+            "paren-heavy", "parts-heavy", "path-heavy", "pipe-heavy", "process-heavy", "pwsh-block-heavy",
+            "quiet-heavy", "spaced-heavy", "start-heavy", "sub-heavy", "unix-heavy", "unbound-heavy",
+            "unix-only", "var-heavy", "wrap-heavy"]
+    if got != sorted(want):
+        failures.append(f"unmapped-heavy rows wrong: only expected {sorted(set(want) - set(got))}, only reported {sorted(set(got) - set(want))}")
+    # the parser reads what just reads: settings, exports, aliases and imports are
+    # not recipes; a recipe whose name merely starts with such a word is one
+    for label, text, want in [
+        ("export-and-alias", 'export X := "a:b"\nalias r2 := rec\nrec:\n    echo r\n', ["rec"]),
+        ("settings-imports", 'set shell := ["pwsh"]\nimport "x.just"\nmod m "y.just"\nunexport X\nrec:\n    echo r\n', ["rec"]),
+        ("names-that-start-like-settings", "set-x:\n    echo a\nexports:\n    echo b\naliasing:\n    echo c\nmodernise:\n    echo d\nset:\n    echo e\n",
+         ["aliasing", "exports", "modernise", "set", "set-x"]),
+    ]:
+        got = sorted({name for name, _a, _b in _recipes_with_bodies(text)})
+        if got != want:
+            failures.append(f"parser row {label}: got {got}, want {want}")
+    # a shebang body keeps its own `[ -f x ] || continue`, and ends at an attribute line
+    rows = [(n, sorted(a), b) for n, a, b in _recipes_with_bodies(
+        "[windows]\np:\n    #!/usr/bin/env bash\n    [ -f x ] || continue\n    echo w\n[unix]\np:\n    echo u\n")]
+    if rows != [("p", ["windows"], ["#!/usr/bin/env bash", "[ -f x ] || continue", "echo w"]), ("p", ["unix"], ["echo u"])]:
+        failures.append(f"parser row shebang-then-attribute: got {rows}")
+
     # allowlist validator refuses globs
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
@@ -606,12 +822,468 @@ def _just(*args, env=None):
         ["just", *args], cwd=REPO, capture_output=True, text=True, env=env,
         creationflags=0x08000000 if sys.platform == "win32" else 0)
 
+_NOT_A_RECIPE = re.compile(r'^(?:(?:set|export|unexport|import|unimport|alias|mod)\s|[\w-]+\s*[?+:]?=[^=])')
+_RECIPE_HEADER = re.compile(r'^[\w][\w-]*\s*(?:\+[^:\n]*)?(?::=|:[^=]|:\s*$|:$)')
+_ATTRIBUTE_LINE = re.compile(r'^\[[^\]]*\]')
 
-def _guard_problem(name, header, desktop_privates):
-    """The first dependency must be the lane guard, with the right key."""
+
+def _recipes_with_bodies(text):
+    """(name, attributes, body lines) for every recipe definition, found by a
+    column-0 header. The name is the header's first word. Comment lines are
+    not recipes; a [..] line sets the attributes of the next recipe only.
+    A body that opens with a shebang keeps column 0 until the next header:
+    bash writes its own `[ -f x ] || continue` tests there."""
+    pending, cur, cur_attrs, body, out = set(), None, set(), [], []
+    shebang = False
+    def flush():
+        if cur is not None:
+            out.append((cur, set(cur_attrs), list(body)))
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not line:
+            continue
+        if cur is not None and shebang:
+            is_attribute_list = bool(_ATTRIBUTE_LINE.match(stripped))
+            if line[0].isspace() or stripped.startswith('#') or (stripped.startswith('[') and not is_attribute_list):
+                body.append(stripped)      # `[ -f x ] || continue` is bash, not an attribute list
+                continue
+            flush()                         # a header or an attribute list starts the next recipe
+            cur = None
+        if line[:1] == '[' and ']' in line and not line[0].isspace():
+            pending = {a.lower() for a in re.findall(r'[a-z]+', line.split('#', 1)[0])}
+            continue
+        if (not line[0].isspace() and not stripped.startswith('#') and ':' in line
+                and not _NOT_A_RECIPE.match(stripped)):
+            flush()
+            cur = re.match(r'^[\w][\w-]*', stripped).group(0)
+            cur_attrs, body = pending, []   # attributes belong to this recipe only
+            shebang, pending = False, set()
+            continue
+        if cur is not None and line[0].isspace():
+            body.append(stripped)
+            shebang = shebang or stripped.startswith('#!')
+    flush()
+    return out
+
+
+_TOOL = r'(?:zig|dotnet)'
+_PATH_TO_TOOL = re.compile(r'^(?:[A-Za-z]:[\\/])?(?:[\w .-]+[\\/])*' + _TOOL + r'(?:\.exe)?$', re.I)
+_NAME_IN_PATH = re.compile(r'(?<![\w-])' + _TOOL + r'(?![\w-])', re.I)
+_UNQUOTE = re.compile(r'^(["\'])(.*)\1$', re.S)
+_WRAP_ASSIGN = re.compile(r'^\$[\w:]+\s*(?:\+?=)\s*(.+)$', re.S)
+_WRAP_SHELL = re.compile(r'^(?:pwsh|powershell|bash|sh|cmd)(?:\.exe)?\s+(?:-{1,2}\w+\s+)*'
+                        r'(?:-Command|-c|/c)\s+(.+)$', re.I | re.S)
+_WRAP_CD = re.compile(r'^cd\s+(?:"[^"]*"|\'[^\']*\'|\S+)\s*&&\s*(.+)$', re.S)
+_WRAP_SUB = re.compile(r'^\$\(\s*(.+?)\s*\)$', re.S)
+_CALL_OP = re.compile(r'^[@&\s]+')
+_ARG = r'(?:"[^"]*"|\'[^\']*\'|\S+)'
+_LITERAL = re.compile(r'^(?:["\'].*["\']|[\w.\\/: -]+)$', re.S)
+# A statement whose COMMAND WORD cannot be read: code handed to an interpreter, a
+# process started through .NET, a file the tree scan does not read, or a variable
+# nothing readable is bound to. Nothing can say what such a statement runs.
+_RUNS_CODE = re.compile(r'^(?:Invoke-Expression|iex|Start-Job|Start-ThreadJob|Invoke-Command|ForEach-Object|ScriptBlock::Create)\b', re.I)
+_DOTNET_PROCESS = re.compile(r'^\[[\w.]+\]::(?:Start|StartInfo)\b')
+_DOT_SOURCE = re.compile(r'^\.\s+(\S+)')
+_BLOCK_CONTROL = re.compile(r'^(?:foreach|for|while|if|do|switch)\b', re.I)
+_SCRIPT_BLOCK = re.compile(r'\{(.*)\}', re.S)
+_SAFE_BINDING = re.compile(r'^(?:\{\{[^}]*\}\}|"[^"]*"|\'[^\']*\'|[\w.\\/: +-]+)$')   # a just interpolation (the whitelist reviews it), a literal, a path
+_SCANNED_FILE = re.compile(r'(?:\.agents|windows)[/\\][\w./\\-]+\.ps1$')
+_PWSH_SHEBANG = re.compile(r'pwsh|powershell|cmd|\.exe', re.I)
+
+
+def _unquote(s):
+    m = _UNQUOTE.match(s)
+    return m.group(2) if m else s
+
+
+def _is_tool_path(word):
+    return bool(_PATH_TO_TOOL.match(_unquote(word)))
+
+
+def _strip_comment(code):
+    """The code up to the first `#` that is outside quotes."""
+    out, quote = [], None
+    for ch in code:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in '"\'':
+            quote = ch
+        elif ch == '#':
+            break
+        out.append(ch)
+    return ''.join(out).strip()
+
+
+def _statement_heavy(code, bound, depth=0):
+    """True when one statement runs zig or dotnet. The statement is unwrapped
+    until a command word is left: an assignment's right side, the string a
+    shell's `-Command` carries, `cd dir &&`, a `$(...)`, and the call operator.
+    The command is the tool when it is a path to it, or a variable this body
+    bound to such a path, or `Start-Process` naming it. Text is never heavy:
+    `echo "zig build"` and a comment say the name without running it."""
+    code = _CALL_OP.sub('', _strip_comment(code))
+    if not code or depth > 12:
+        return False
+    m = _WRAP_ASSIGN.match(code)
+    if m:
+        rhs = m.group(1).strip()
+        if _LITERAL.match(rhs):
+            return False                    # `$z = 'zig'` binds a literal; _bound_names() records it
+        return _statement_heavy(rhs, bound, depth + 1)
+    for wrap in (_WRAP_SHELL, _WRAP_CD, _WRAP_SUB):
+        m = wrap.match(code)
+        if m:
+            return _statement_heavy(_unquote(m.group(1).strip()), bound, depth + 1)
+    if code.startswith('('):                # `& (...) args`: the call operator's target
+        level, j = 0, 0
+        while j < len(code):
+            level += code[j] == '('
+            level -= code[j] == ')'
+            if level == 0:
+                break
+            j += 1
+        inner, rest = code[1:j], code[j + 1:]
+        if not inner.strip().startswith('$') and _NAME_IN_PATH.search(inner):
+            return True                     # `(Join-Path $PWD "tools/zig.exe") build`
+        return _statement_heavy(rest, bound, depth + 1)
+    m = re.match(r'^(' + _ARG + r')\s*(.*)$', code, re.S)
+    if not m:
+        return False
+    word, rest = m.group(1), m.group(2)
+    if re.match(r'^Start-Process\b', word, re.I):
+        return bool(_NAME_IN_PATH.search(rest))
+    if word.startswith('$'):
+        var = re.sub(r'[{}$]', '', word.split('.')[0].split('[')[0]).lower()
+        if var in bound or _NAME_IN_PATH.search(word):
+            return True
+    return _is_tool_path(word)
+
+def _readable_bindings(body):
+    """Variables this body binds to something readable, statement by statement:
+    `$inc = {{inc}}; & $inc run` is an assignment followed by a call."""
+    out = set()
+    for line in body:
+        for piece in re.split(r'&&|\|\||[;|]', _strip_comment(line)):
+            m = _WRAP_ASSIGN.match(_CALL_OP.sub('', piece.strip()))
+            if m and _SAFE_BINDING.match(m.group(1).strip()):
+                out.add(re.sub(r'[{}$]', '', piece.strip().split('=', 1)[0]).strip().lower())
+    return out
+
+
+def _statement_unreadable(code, bound, depth=0):
+    """True when a statement's command word cannot be read, so nothing can say
+    what it runs. Quiet by rule: text, an assignment, a subshell, a variable bound
+    to a literal, a path or a reviewed `{{interpolation}}`, and a dot-source of a
+    file the tree scan reads. Applied to PowerShell bodies only: a bash body has
+    its own grammar and `"$glslang"` is a shader compiler, not a hidden tool."""
+    code = _CALL_OP.sub('', _strip_comment(code))
+    if not code or depth > 12:
+        return False
+    if _WRAP_ASSIGN.match(code):             # an assignment is not a command
+        return False
+    if _RUNS_CODE.match(code) or _DOTNET_PROCESS.match(code):
+        return True
+    m = _DOT_SOURCE.match(code)
+    if m:
+        target = code[m.start(1):]           # the whole argument: a Join-Path carries the path in parts
+        return not (_SCANNED_FILE.search(target) or '{{' in target)
+    if _BLOCK_CONTROL.match(code):
+        m = _SCRIPT_BLOCK.search(code)      # the block's own statements, each on its own
+        if m:
+            return any(_statement_unreadable(p, bound, depth + 1) for p in re.split(r'&&|\|\||[;|]', m.group(1)))
+    m = re.match(r'^\$\{?([A-Za-z_][\w:]*)\}?(?:\.|\[|\s|$)', code)
+    if m:
+        return m.group(1).lower() not in bound
+    return False
+
+
+def _bound_names(body):
+    """Variables a body binds straight to the tool: `$z = 'zig'`, `$z = "C:\\tools\\zig.exe"`.
+    A variable bound any other way (`Join-Path $PWD "zig.exe"`) is not followed."""
+    out = set()
+    for line in body:
+        code = _strip_comment(line)
+        m = _WRAP_ASSIGN.match(code)
+        if m and _is_tool_path(m.group(1).strip()):
+            out.add(re.sub(r'[{}$]', '', code.split('=', 1)[0]).strip().lower())
+    return out
+
+def _runs_heavy(body, bodies=None, seen=frozenset()):
+    """True when a recipe body runs zig/dotnet, itself or through a `just <recipe>`
+    it delegates to, or when a statement's command word cannot be read. `bodies`
+    maps recipe names to their lines. The unreadable half is for PowerShell bodies:
+    a body that opens with a bash shebang has its own grammar."""
+    bound = _bound_names(body)
+    readable = _readable_bindings(body)
+    pwsh = not (body and body[0].startswith('#!') and not _PWSH_SHEBANG.search(body[0]))
+    for line in body:
+        # a control block's contents are statements of their own: `if (..) { zig build }` runs the tool
+        block = _SCRIPT_BLOCK.search(line) if _BLOCK_CONTROL.match(_CALL_OP.sub('', _strip_comment(line))) else None
+        for piece in re.split(r'&&|\|\||[;|]', block.group(1) if block else line):
+            if _statement_heavy(piece, bound) or (pwsh and _statement_unreadable(piece, readable)):
+                return True
+    for line in body:
+        m = re.match(r'^just\s+([A-Za-z_][\w-]*)', _strip_comment(line))
+        if m and bodies and m.group(1) in bodies and m.group(1) not in seen:
+            if _runs_heavy(bodies[m.group(1)], bodies, seen | {m.group(1)}):
+                return True
+    return False
+
+
+def _unmapped_heavy_recipes(text, mapped):
+    """Recipes that run a heavy command but are tied to no leg, so no signoff leg
+    ever has to see a change to them. `mapped` is gate_scope.RECIPE_LEGS; a
+    recipe mapped to no leg at all, `()` included, counts as unmapped. Every
+    definition is read, the other platform's too: a recipe tied to no leg is
+    outside every check wherever it runs."""
+    rows = _recipes_with_bodies(text)
+    bodies = {}
+    for name, _attrs, lines in rows:
+        bodies.setdefault(name, []).extend(lines)
+    return sorted({name for name, _attrs, lines in rows
+                   if not mapped.get(name) and _runs_heavy(lines, bodies)})
+
+
+_KNOWN_QUEUES = {"wintty-build", "wintty-desktop"}
+_LANE_WRAPPERS = {"_lane", "_build-in-lane"}                   # the generic wrappers: build queue by construction
+_WRAPPER_TARGETS = {"{{private}}", "{{recipes}}"}              # what the generic wrappers hand to incoda
+_TOKEN = re.compile(r'''\s*(?:
+    (?P<dq>"(?:[^"]|"")*")        |     # a double-quoted string; "" is a literal quote
+    (?P<sq>'[^']*')               |     # a single-quoted string, verbatim
+    (?P<word>[^\s;|&]+)           )     # a bare word
+''', re.X)
+_STATEMENT_END = re.compile(r';|&&|\|\||(?<![|])\|(?![|])')   # `;`, `&&`, `||`, or one `|`
+_CALLER_CALL_OP = re.compile(r'^[@&]\s*')                     # PowerShell's call operator, on a caller statement
+_RECIPE_NAME = re.compile(r'^[A-Za-z_][\w-]*$')
+
+
+def _statements(code):
+    """The statements of one logical line, split outside quotes. A leading `&` is
+    the call operator (`& $inc run ...`), not a separator."""
+    out, buf, quote, i = [], "", None, 0
+    while i < len(code):
+        ch = code[i]
+        if quote:
+            buf += ch
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf += ch
+            i += 1
+            continue
+        m = _STATEMENT_END.match(code, i)
+        if m:
+            out.append(buf)
+            buf = ""
+            i = m.end()
+            continue
+        buf += ch
+        i += 1
+    out.append(buf)
+    return [s.strip() for s in out if s.strip()]
+
+
+def _tokens(code):
+    """(kind, value) for one statement: a double-quoted string ("" is a literal
+    quote), a single-quoted one, or a bare word."""
+    out, i = [], 0
+    code = code.strip()
+    while i < len(code):
+        m = _TOKEN.match(code, i)
+        if not m:
+            break
+        if m.group("dq") is not None:
+            out.append(("str", m.group("dq")[1:-1].replace('""', '"')))
+        elif m.group("sq") is not None:
+            out.append(("str", m.group("sq")[1:-1]))
+        else:
+            out.append(("word", m.group("word")))
+        i = m.end()
+    return out
+
+
+def _logical_lines(text):
+    """Lines with a continuation joined: a trailing backslash, or a trailing
+    backtick outside quotes. A comment is cut first, so a commented-out caller
+    is an empty line and continues nothing."""
+    out, held = [], ""
+    for line in text.splitlines():
+        s = _strip_comment(line)
+        r = s.rstrip()
+        if r.endswith(("\\", "`")) and not _ends_in_quote(r[:-1]):
+            held += r[:-1] + " "
+            continue
+        out.append(held + s)
+        held = ""
+    return out
+
+
+def _ends_in_quote(s):
+    quote = None
+    for ch in s:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+    return quote is not None
+
+
+def _read_caller(code):
+    """(target, queues, problems) for one statement that hands a recipe to incoda
+    with `-- just`. Read the way incoda's flag parser reads: positionally, so a
+    flag's value is never a flag; the last `--queue` wins; `--` ends the flags.
+    target is None when the statement is no such caller or hands one this scan
+    cannot read (a variable, an interpolation other than the wrappers' own)."""
+    toks = _tokens(_CALLER_CALL_OP.sub("", code.strip()))
+    dd = next((i for i, (k, v) in enumerate(toks) if k == "word" and v == "--"), None)
+    if dd is None:
+        return None, set(), []
+    flags, rest = toks[:dd], toks[dd + 1:]
+    if not rest or rest[0] != ("word", "just"):
+        return None, set(), []              # `--` then something else: not a just invocation
+    problems, queue, nqueue, i = [], None, 0, 0
+    while i < len(flags):
+        kind, val = flags[i]
+        if kind == "word" and val.startswith("-"):
+            name, eq, inline = val.partition("=")
+            if name in ("--queue", "-queue"):
+                nqueue += 1
+                if eq:
+                    queue = inline
+                else:
+                    queue = flags[i + 1][1] if i + 1 < len(flags) else ""
+                    i += 1
+        i += 1
+    if nqueue > 1:
+        problems.append(f"names --queue twice on one line (incoda keeps the last, {queue!r})")
+    if queue is None:
+        problems.append("names no queue")
+    keys = {q.strip().lower() for q in (queue or "").split(",") if q.strip()}
+    kind, val = rest[1] if len(rest) > 1 else ("word", "")
+    if not (kind == "word" and _RECIPE_NAME.match(val)):
+        if val not in _WRAPPER_TARGETS:     # `{{private}}` is the generic wrapper, held by name elsewhere
+            problems.append(f"hands incoda a target this scan cannot read ({val or 'nothing'})")
+        return None, keys, problems
+    return val, keys, problems
+
+
+def _takes_own_lane(text):
+    """Recipes whose header depends on a lane wrapper, on the definition THIS HOST
+    runs: a name laned only under `[unix]` is not laned here, and the scan runs on
+    Windows. A recipe laned only through another dependency is not counted: that
+    would excuse a bare call on a reading of the file rather than on its own header."""
+    out, attrs = set(), set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if line[:1] == "[" and not line[0].isspace():
+            attrs = {a.lower() for a in re.findall(r"[a-z]+", line.split("#", 1)[0])}
+            continue
+        if line and not line[0].isspace() and not stripped.startswith("#") and ":" in line:
+            if not (attrs & {"unix", "linux", "macos", "posix"}):
+                header = re.sub(r"\s+#.*$", "", stripped)     # a comment cannot claim a lane
+                if re.match(r"^([A-Za-z_][\w-]*)[^:\n]*:.*\(_(?:lane|build-in-lane)\b", header):
+                    out.add(re.match(r"^([A-Za-z_][\w-]*)", header).group(1))
+            attrs = set()
+    return out
+
+
+def _in_lane_privates(text=None):
+    """(held, queues, problems). `held` is every recipe that must carry the lane
+    guard: each `*-in-lane` recipe but the wrappers; everything a caller hands
+    to incoda, whatever it is named; and everything a bare `just <recipe>` in a
+    body reaches, since that call takes no lane and the target's own guard is
+    then all that stands between it and a bare run. So a private cannot be
+    freed by a rename, nor by being reached some other way. `queues` maps each
+    recipe to the queues its incoda callers ask for, and is the rule for the
+    key its guard must check; a recipe no caller names directly is reached only
+    through `_lane`, which is the build queue.
+    `problems` names a recipe handed to incoda under more than one queue, under
+    a queue that does not exist, or by a line that shows no queue; a caller
+    that hands incoda a target this scan cannot read; and a bare `just` to a
+    held recipe on a line that offers no lane for it, which is a lane skip. The
+    sanctioned form is a caller's fallback: the same logical line hands the
+    target to incoda and runs it bare only when the lane is not usable."""
+    if text is None:
+        text = (REPO / "justfile").read_text(encoding="utf-8", errors="replace")
+    held = {name for name, _attrs, _lines in _recipes_with_bodies(text)
+            if name.endswith("-in-lane")} - _LANE_WRAPPERS
+    # a recipe whose header depends on a lane wrapper takes its own lane, so a
+    # bare `just <recipe>` to it is how the umbrella recipes chain
+    takes_own_lane = _takes_own_lane(text)
+    queues, problems = {}, []
+    for raw in _logical_lines(text):
+        flat = [s for statement in _statements(raw) for s in _with_block_contents(statement)]
+        offered = {t for s in flat for t in (_read_caller(s)[0],) if t is not None}
+        # A caller's fallback is the bare call in the else branch of a lane decision:
+        # it runs only when the lane is not usable. Offering the lane somewhere on
+        # the line is not enough: `& $inc run .. -- just X; just X` would then pass,
+        # and with WINTTY_LANE_DECISION set by hand that bare call opens the window.
+        else_at, else_end = raw.find("} else {"), raw.rfind("}")
+        cursor = 0
+        for statement in flat:
+            at = raw.find(statement, cursor)
+            if at >= 0:
+                cursor = at + len(statement)
+            target, keys, probs = _read_caller(statement)
+            problems += probs                       # each names its own unreadable shape
+            if target is not None:
+                held.add(target)
+                queues.setdefault(target, set()).update(keys)
+            for reached in _bare_just_targets(statement):
+                if reached in _LANE_WRAPPERS or reached in takes_own_lane:
+                    continue                         # the wrappers themselves, or a recipe that takes its own lane
+                held.add(reached)                   # reached with no lane: its guard is the only check
+                fallback = (reached in offered and "Test-LaneReady" in raw
+                            and else_at != -1 and else_at < at < else_end)
+                if not fallback:
+                    problems.append(f"a bare `just {reached}` takes no lane: the line offers none, so the target's guard is the only check")
+    for target, qs in sorted(queues.items()):
+        if len(qs) > 1:
+            problems.append(f"{target} is handed to incoda under more than one queue ({', '.join(sorted(qs))}): give each queue its own recipe")
+        for q in sorted(qs - _KNOWN_QUEUES):
+            problems.append(f"{target} is handed to an unknown queue ({q})")
+    return held, queues, problems
+
+
+def _with_block_contents(statement):
+    """The statement and, when it opens a control block, the statements inside
+    the block's braces. `if (Test-LaneReady ..) { ..; & $inc run .. }` is one
+    statement to a splitter that only knows `;`, so the caller inside it would
+    be read or missed depending on where the `;` falls."""
+    out = [statement]
+    if _BLOCK_CONTROL.match(_CALLER_CALL_OP.sub("", _strip_comment(statement))):
+        m = _SCRIPT_BLOCK.search(statement)
+        if m:
+            out += _statements(m.group(1))
+    return out
+
+
+def _bare_just_targets(statement):
+    """(target) when the statement is a bare `just <recipe> ...`: a call that takes no lane."""
+    toks = _tokens(_CALLER_CALL_OP.sub("", statement))
+    if len(toks) > 1 and toks[0] == ("word", "just") and toks[1][0] == "word" and _RECIPE_NAME.match(toks[1][1]):
+        return (toks[1][1],)
+    return ()
+
+
+def _guard_problem(name, header, queues):
+    """The first dependency must be the lane guard, with the key of the queue
+    the private's callers ask for (the build queue when none names it). A private
+    under more than one queue has no single right key: that is the finding, whatever
+    guard it carries, so this holds on its own and not only when the caller emits
+    the queue problems first."""
+    asked = queues.get(name) or set()
+    if len(asked) > 1:
+        return Finding("justfile", 0, f"{name} guards one of {len(asked)} queues ({', '.join(sorted(asked))})",
+                       "give each queue its own recipe; one guard cannot serve two keys")
     deps = header.split(":", 1)[1].strip() if ":" in header else ""
     m = re.match(r'\(_require-lane "([^"]+)"(?: "([^"]+)")?\)', deps)
-    expected_key = "wintty-desktop" if name in desktop_privates else "wintty-build"
+    expected_key = "wintty-desktop" if asked == {"wintty-desktop"} else "wintty-build"
     if not m:
         return Finding("justfile", 0, f"{name} lacks the lane guard as its first dependency",
                        "first dependency: (_require-lane \"<public recipe>\" [\"<key>\"])")
@@ -758,6 +1430,13 @@ def check_justfile():
         # `just --show` resolves the unix bodies and the windows assertions
         # do not apply. The spawn scan and interpolation checks still run.
         return _interpolation_findings()
+    # A justfile just cannot load has no recipe to check: say that, with just's
+    # own reason, instead of one "missing" finding per recipe.
+    load = _just("--dump")
+    if load.returncode != 0:
+        reason = next((ln.strip() for ln in (load.stderr or load.stdout).splitlines() if ln.strip().startswith("error")), "").strip()
+        return [Finding("justfile", 0, f"just cannot read the justfile: {reason}",
+                        "fix the line just names; nothing below was checked")]
     for name in HEAVY:
         r = _just("--show", name)
         if r.returncode != 0:
@@ -803,10 +1482,18 @@ def check_justfile():
         if anchored not in wrapper_body:
             findings.append(Finding("justfile", 0, f"{name} dot-sources the lane helper from a relative path",
                                     f"dot-source {anchored}"))
-    desktop_privates = {"_fuzz-in-lane", "_splash-race-in-lane", "_search-fuzz-in-lane",
-                        "_shader-notice-fuzz-in-lane", "_frame-style-fuzz-in-lane",
-                        "_theme-matrix-in-lane"}
-    for name in sorted(set(PRIVATE.values()) | desktop_privates):
+    # Every `*-in-lane` recipe and everything a caller hands to incoda is held
+    # to the guard, found from the justfile rather than listed: a private
+    # added or renamed later is covered the day it lands. The lane plumbing
+    # (_build-in-lane) is the wrapper itself and is checked above.
+    held, queues, problems = _in_lane_privates()
+    for text in problems:
+        findings.append(Finding("justfile", 0, text, "one recipe, one queue, both on the caller's line"))
+    missing = sorted(set(PRIVATE.values()) - held)
+    if missing:
+        findings.append(Finding("justfile", 0, f"no *-in-lane recipe for {', '.join(missing)}",
+                                "keep the real body in _<name>-in-lane"))
+    for name in sorted(held):
         r = _just("--show", name)
         if r.returncode != 0:
             findings.append(Finding("justfile", 0, f"in-lane body {name} missing", "keep the real body in _<name>-in-lane"))
@@ -814,7 +1501,7 @@ def check_justfile():
         header = next((ln for ln in r.stdout.splitlines()
                        if ln.strip()
                        and not ln.strip().startswith(("[", "#"))), "")
-        problem = _guard_problem(name, header, desktop_privates)
+        problem = _guard_problem(name, header, queues)
         if problem:
             findings.append(problem)
             continue
@@ -830,6 +1517,13 @@ def check_justfile():
         for name in HEAVY:
             if name not in gate_scope.RECIPE_LEGS:
                 findings.append(Finding("justfile", 0, f"{name} has no RECIPE_LEGS entry", "add the recipe's legs to .agents/scripts/gate_scope.py"))
+        # A recipe that builds or tests but is tied to no leg is outside every
+        # check: nothing says what a change to it can affect. Mapping it (at
+        # least to gates-selftest) puts it back in front of this scan.
+        for name in _unmapped_heavy_recipes((REPO / "justfile").read_text(encoding="utf-8", errors="replace"),
+                                            gate_scope.RECIPE_LEGS):
+            findings.append(Finding("justfile", 0, f"{name} runs a heavy command but is tied to no leg",
+                                    "map the recipe in .agents/scripts/gate_scope.py (at least gates-selftest)"))
     except Exception as exc:  # a broken import is itself a finding
         findings.append(Finding("justfile", 0, f"cannot read gate_scope.RECIPE_LEGS: {exc}", "keep .agents/scripts/gate_scope.py importable"))
     # Behavioural, both sides. The fake incoda reports whatever status file

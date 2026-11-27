@@ -739,6 +739,12 @@ def self_test():
         (["global.json"], False, ["release-gate", "windows-tests"]),
         (["src/a.zig", "windows/b.cs"], False, ["windows-tests", "zig-fmt", "zig-tests"]),
         (["brand/new/dir/thing.bin"], False, sorted(gate_scope.ALL_LEGS)),
+        # A module the justfile imports is read by no rule: it must stay
+        # fail-closed. The gates scan reads the main justfile only, so a
+        # `.just` path rule mapping it to () would let recipes the scan never
+        # sees merge on a scoped record.
+        (["lanes.just"], False, sorted(gate_scope.ALL_LEGS)),
+        (["lanes.just", "README.md"], False, sorted(gate_scope.ALL_LEGS)),
         (["justfile"], list(gate_scope.ALL_LEGS), sorted(gate_scope.ALL_LEGS)),
         (["justfile"], [], []),
     ]
