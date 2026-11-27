@@ -164,7 +164,10 @@ fn tryPathImpl(
         error.NetworkNotFound => return null,
         // The OS refuses the name for its length before it looks for anything
         // behind it, so nothing there can be read: a miss, and the walk goes
-        // on.
+        // on. The arm does not say whether the entry or the command's own
+        // name is the long one, so a command name long enough to be refused
+        // is swallowed the same way. The miss leaves no trace, so a command
+        // that is also further down PATH resolves to that copy.
         error.NameTooLong => return null,
         // `Unexpected` is reachable from a PATH entry this long: joined with a
         // name of 32748 to 32762 bytes it reaches the kernel, which answers
@@ -370,12 +373,16 @@ fn longEntry(comptime len: usize) [len]u8 {
     return entry;
 }
 
-/// Sized for the 12-byte command name the walk-continues tests open.
+/// Sized for the 12-byte command name the walk-continues tests open:
+/// 32753 + 1 + 12 = 32766, the last byte of the window. At 32754 the join is
+/// 32767, `BadPathName`, and at 32755 it is 32768, where std panics in the
+/// UTF-16 conversion.
 const long_name_entry: []const u8 = &longEntry(32753);
 
-/// Sized for the bare-name tests: joined with `w` it is 32763 bytes and with
-/// `w.c` 32765, so both the bare candidate and the PATHEXT one are refused as
-/// too long.
+/// Sized for the bare-name tests, so that both the bare candidate and the
+/// PATHEXT one are refused as too long: 32761 + 1 + 1 = 32763 with `w`, and
+/// 32761 + 1 + 3 = 32765 with `w.c`. At 32763 `w.c` joins to 32767,
+/// `BadPathName`; at 32764 it joins to 32768, where std panics.
 const long_name_entry_bare: []const u8 = &longEntry(32761);
 
 /// The name `requireOpenError` opens behind a too-long entry. It is as long
@@ -434,13 +441,18 @@ fn requireOpenError(entry: []const u8, name: []const u8, expected: anyerror) !vo
     return testing.expectError(expected, std.Io.Dir.cwd().openFile(testing.io, probe, .{}));
 }
 
-/// The walk passes over `entry` and finds the bare-named command in the next
-/// entry through PATHEXT, which is the path the build's pandoc probe takes.
-/// PATHEXT is one two-byte extension so that behind a too-long entry the
-/// bare and the extended candidate are both refused as too long.
+/// PATHEXT for the tests that pin the walk's PATHEXT call site with one
+/// extension of their own: `.c` is two bytes, which is what keeps both the
+/// bare and the extended candidate inside the `NameTooLong` window behind a
+/// too-long entry. Behind the other entries it is only a short stand-in.
 const bare_pathext = ".c";
+
+/// The bare command name every bare-name test looks for: the file is `w.c`
+/// with `bare_pathext` and `w.exe` with the default list.
 const bare_name = "w";
 
+/// The walk passes over `entry` and finds the bare-named command in the next
+/// entry through the PATHEXT call site, with `bare_pathext`.
 fn expectWalkContinuesBare(entry: []const u8) !void {
     var fx = try Fixture.init("w.c");
     defer fx.deinit();
@@ -454,8 +466,8 @@ fn expectWalkContinuesBare(entry: []const u8) !void {
     try testing.expect(std.mem.endsWith(u8, found, "w.c"));
 }
 
-/// The walk passes over `entry` through PATHEXT, finds nothing in the next
-/// entry, and ends in a clean miss for the bare name.
+/// The walk passes over `entry` through the PATHEXT call site, finds nothing
+/// in the next entry, and ends in a clean miss for the bare name.
 fn expectCleanMissAfterBare(entry: []const u8) !void {
     var fx = try Fixture.init("other-1477.c");
     defer fx.deinit();
@@ -465,6 +477,42 @@ fn expectCleanMissAfterBare(entry: []const u8) !void {
     try testing.expectEqual(
         @as(?[]u8, null),
         try expandPath(testing.io, testing.allocator, path_value, bare_pathext, bare_name),
+    );
+}
+
+/// The walk passes over `entry` and finds the bare-named command in the next
+/// entry with the caller's extension list: PATHEXT unset, so the walk uses
+/// its default, `.COM;.EXE;.BAT;.CMD`. That is the path the build's pandoc
+/// probe takes. The list only fits behind an entry the OS refuses whatever
+/// the name is: its extensions are four bytes, so behind a too-long entry
+/// the first extended candidate lands past the `NameTooLong` window.
+fn expectWalkContinuesDefault(entry: []const u8) !void {
+    var fx = try Fixture.init("w.exe");
+    defer fx.deinit();
+    const path_value = try pathAfter(entry, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    const found = (try expandPath(testing.io, testing.allocator, path_value, null, bare_name)).?;
+    defer testing.allocator.free(found);
+
+    try testing.expect(std.mem.startsWith(u8, found, fx.dir_path));
+    // The walk returns the candidate it built, spelled as the default list
+    // spells its extension. The OS matched it to `w.exe` without regard to
+    // case, and `.COM` comes first in the list but opens nothing here.
+    try testing.expect(std.mem.endsWith(u8, found, "w.EXE"));
+}
+
+/// The walk passes over `entry` with the default extension list, finds
+/// nothing in the next entry, and ends in a clean miss for the bare name.
+fn expectCleanMissAfterDefault(entry: []const u8) !void {
+    var fx = try Fixture.init("other-1477.exe");
+    defer fx.deinit();
+    const path_value = try pathAfter(entry, fx.dir_path);
+    defer testing.allocator.free(path_value);
+
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try expandPath(testing.io, testing.allocator, path_value, null, bare_name),
     );
 }
 
@@ -536,6 +584,30 @@ test "expandPath: the walk continues past a NameTooLong entry for a bare name" {
     try requireOpenError(long_name_entry_bare, bare_name, error.NameTooLong);
     try requireOpenError(long_name_entry_bare, "w.c", error.NameTooLong);
     try expectWalkContinuesBare(long_name_entry_bare);
+}
+
+test "expandPath: the walk continues past a BadPathName entry for a bare name with the default extensions" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(bad_name_entry, "zz", error.BadPathName);
+    try expectWalkContinuesDefault(bad_name_entry);
+}
+
+test "expandPath: a BadPathName entry does not turn a bare miss into an error with the default extensions" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(bad_name_entry, "zz", error.BadPathName);
+    try expectCleanMissAfterDefault(bad_name_entry);
+}
+
+test "expandPath: the walk continues past a NetworkNotFound entry for a bare name with the default extensions" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(offline_share_entry, "zz", error.NetworkNotFound);
+    try expectWalkContinuesDefault(offline_share_entry);
+}
+
+test "expandPath: a NetworkNotFound entry does not turn a bare miss into an error with the default extensions" {
+    if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+    try requireOpenError(offline_share_entry, "zz", error.NetworkNotFound);
+    try expectCleanMissAfterDefault(offline_share_entry);
 }
 
 test "expandPath: a NameTooLong entry does not turn a bare miss into an error" {
