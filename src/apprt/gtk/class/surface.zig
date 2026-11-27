@@ -608,6 +608,13 @@ pub const Surface = extern struct {
         /// Whether the mouse should be hidden or not as requested externally.
         mouse_hidden: bool = false,
 
+        /// The source that applies the mouse shape and hidden state to
+        /// the render surface's cursor. See `queueCursorUpdate`.
+        idle_cursor: ?c_uint = null,
+
+        /// The name of the cursor last set on the render surface.
+        cursor_name: ?[:0]const u8 = null,
+
         /// The URL that the mouse is currently hovering over.
         mouse_hover_url: ?[:0]const u8 = null,
 
@@ -1303,7 +1310,12 @@ pub const Surface = extern struct {
             // were composing because different input methods call the callbacks
             // in different orders. For example, ibus calls commit THEN preedit
             // end but simple calls preedit end THEN commit.
-            priv.in_keyevent = if (priv.im_composing) .composing else .not_composing;
+            priv.in_keyevent = if (action == .release)
+                .release
+            else if (priv.im_composing)
+                .composing
+            else
+                .not_composing;
             defer priv.in_keyevent = .false;
 
             // Pass the event through the input method which returns true if handled.
@@ -1863,6 +1875,7 @@ pub const Surface = extern struct {
         );
 
         // Setup properties we can't set from our Blueprint file.
+        priv.cursor_name = "text";
         priv.render_surface.as(gtk.Widget).setCursorFromName("text");
         priv.drag_handle.setCursorFromName("grab");
 
@@ -1934,6 +1947,13 @@ pub const Surface = extern struct {
                 log.warn("unable to remove idle source", .{});
             }
             priv.idle_rechild = null;
+        }
+
+        if (priv.idle_cursor) |v| {
+            if (glib.Source.remove(v) == 0) {
+                log.warn("unable to remove idle cursor source", .{});
+            }
+            priv.idle_cursor = null;
         }
 
         if (priv.pending_horizontal_scroll_reset) |v| {
@@ -2520,17 +2540,7 @@ pub const Surface = extern struct {
         _: *gobject.ParamSpec,
         _: ?*anyopaque,
     ) callconv(.c) void {
-        const priv = self.private();
-
-        // If we're hidden we set it to "none"
-        if (priv.mouse_hidden) {
-            priv.render_surface.as(gtk.Widget).setCursorFromName("none");
-            return;
-        }
-
-        // If we're not hidden we just trigger the mouse shape
-        // prop notification to handle setting the proper mouse shape.
-        self.propMouseShape(undefined, null);
+        self.queueCursorUpdate();
     }
 
     fn propMouseShape(
@@ -2538,13 +2548,32 @@ pub const Surface = extern struct {
         _: *gobject.ParamSpec,
         _: ?*anyopaque,
     ) callconv(.c) void {
+        self.queueCursorUpdate();
+    }
+
+    /// Update the render surface's cursor on the next idle tick.
+    ///
+    /// Programs can change the mouse shape many times in a single write,
+    /// e.g. tmux toggles mouse reporting after every passthrough chunk of
+    /// a Kitty graphics image, and every toggle changes the shape. Each
+    /// cursor change is a request to the Wayland compositor, so applying
+    /// them one by one can fill the socket buffer and GTK exits when it
+    /// can't flush the display. Applying only the final shape on idle
+    /// collapses a burst into at most one request.
+    fn queueCursorUpdate(self: *Self) void {
         const priv = self.private();
+        if (priv.idle_cursor == null) priv.idle_cursor = glib.idleAdd(
+            onIdleCursor,
+            self,
+        );
+    }
 
-        // If our mouse should be hidden currently then we don't
-        // do anything.
-        if (priv.mouse_hidden) return;
+    fn onIdleCursor(ud: ?*anyopaque) callconv(.c) c_int {
+        const self: *Self = @ptrCast(@alignCast(ud orelse return 0));
+        const priv = self.private();
+        priv.idle_cursor = null;
 
-        const name: [:0]const u8 = switch (priv.mouse_shape) {
+        const name: [:0]const u8 = if (priv.mouse_hidden) "none" else switch (priv.mouse_shape) {
             .default => "default",
             .help => "help",
             .pointer => "pointer",
@@ -2581,8 +2610,13 @@ pub const Surface = extern struct {
             .zoom_out => "zoom-out",
         };
 
-        // Set our new cursor.
+        // A burst usually ends on the shape it started with, so
+        // there's often nothing to change.
+        if (priv.cursor_name) |v| if (std.mem.eql(u8, v, name)) return 0;
+
+        priv.cursor_name = name;
         priv.render_surface.as(gtk.Widget).setCursorFromName(name.ptr);
+        return 0;
     }
 
     fn vadjValueChanged(adj: *gtk.Adjustment, self: *Self) callconv(.c) void {
@@ -2809,6 +2843,7 @@ pub const Surface = extern struct {
             const object = value.getObject() orelse return 0;
             const file = gobject.ext.cast(gio.File, object) orelse return 0;
             const path = file.getPath() orelse return 0;
+            defer glib.free(path);
             var stream: std.Io.Writer.Allocating = .init(alloc);
             defer stream.deinit();
 
@@ -2828,6 +2863,7 @@ pub const Surface = extern struct {
                 return 0;
             };
             defer alloc.free(string);
+            Clipboard.paste(self, string);
             return 1;
         }
 
@@ -3366,6 +3402,12 @@ pub const Surface = extern struct {
             // and we don't want to encode it alongside the keypress.
             .composing => {},
 
+            // An IME can commit on modifier release (for example, fcitx
+            // switching to English with Shift), even without client preedit.
+            // Send this text independently of the key: release events don't
+            // encode text and would otherwise discard the commit.
+            .release => {},
+
             // If we're not composing then this commit is just a normal
             // key encoding and we want our key event to handle it so
             // that Ghostty can be aware of the key event alongside
@@ -3385,8 +3427,8 @@ pub const Surface = extern struct {
             },
         }
 
-        // If we reach this point from above it means we're composing OR
-        // not in a keypress. In either case, we want to commit the text
+        // If we reach this point from above it means we're composing, handling
+        // a key release, or not in a key event. We want to commit the text
         // given to us because that's what GTK is asking us to do. If we're
         // not in a keypress it means that this commit came via a non-keyboard
         // event (i.e. on-screen keyboard, tablet of some kind, etc.).
@@ -4083,10 +4125,14 @@ fn logWarnOnce(comptime format: []const u8, args: anytype) void {
 }
 
 /// The state of the key event while we're doing IM composition.
-/// See gtkKeyPressed for detailed descriptions.
+/// See Surface.keyEvent for detailed descriptions.
 pub const IMKeyEvent = enum {
     /// Not in a key event.
     false,
+
+    /// In a key release. Commits must be sent as independent text even if
+    /// client preedit is disabled and we never entered the composing state.
+    release,
 
     /// In a key event but im_composing was either true or false
     /// prior to the calling IME processing. This is important to

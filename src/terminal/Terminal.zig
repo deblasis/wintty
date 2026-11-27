@@ -3618,17 +3618,23 @@ fn rowWillBeShifted(
 ) void {
     const cells = row.cells.ptr(page.memory.ptr);
 
-    // If our scrolling region includes the rightmost column then we
-    // need to turn any spacer heads in to normal empty cells, since
-    // once we move them they no longer correspond with soft-wrapped
-    // wide characters.
+    // With left or right margins, rows are only partly moved. If the
+    // region includes the rightmost column, any spacer heads need to
+    // become normal empty cells, since once we move them they no
+    // longer correspond with soft-wrapped wide characters.
     //
     // If it contains either of the 2 leftmost columns, then the wide
     // characters in the first column which may be associated with a
     // spacer head will be either moved or cleared, so we also need
     // to turn the spacer heads in to empty cells in that case.
-    if (self.scrolling_region.right == self.cols - 1 or
-        self.scrolling_region.left < 2)
+    //
+    // A full-width shift moves whole rows, so spacer heads stay with
+    // their wide characters. rowClearWrap clears them where it breaks
+    // a wrap.
+    const left_right = self.scrolling_region.left > 0 or
+        self.scrolling_region.right < self.cols - 1;
+    if (left_right and (self.scrolling_region.right == self.cols - 1 or
+        self.scrolling_region.left < 2))
     {
         const end_cell: *Cell = &cells[page.size.cols - 1];
         if (end_cell.wide == .spacer_head) {
@@ -3663,6 +3669,37 @@ fn rowWillBeShifted(
         right_cell.wide = .narrow;
         tail_cell.wide = .narrow;
     }
+}
+
+/// The row at `pin` no longer soft-wraps into the row below it. This
+/// is Screen.cursorResetWrap for an arbitrary row, without the next
+/// row's half: see rowClearWrapContinuation.
+///
+/// xterm doesn't do this when it moves lines. A line there keeps its
+/// wrapped flag after the line below it is inserted, deleted, or
+/// scrolled away, and copying then joins lines that were never one
+/// line. We also reflow on resize, which would join them for good,
+/// so we reset the flag. VTE and iTerm2 do the same.
+inline fn rowClearWrap(pin: PageList.Pin) void {
+    const page = pin.node.page();
+    const row = page.getRow(pin.y);
+    if (!row.wrap) return;
+    row.wrap = false;
+    row.dirty = true;
+
+    // A spacer head only exists for a wide character that wrapped
+    // to the next row, which is no longer the case.
+    const cells = page.getCells(row);
+    const end = &cells[cells.len - 1];
+    if (end.wide == .spacer_head) end.wide = .narrow;
+}
+
+/// The row at `pin` no longer continues a soft wrap from the row above.
+inline fn rowClearWrapContinuation(pin: PageList.Pin) void {
+    const row = pin.node.page().getRow(pin.y);
+    if (!row.wrap_continuation) return;
+    row.wrap_continuation = false;
+    row.dirty = true;
 }
 
 /// Renew every live page generation in an inclusive range before a full-width
@@ -3778,14 +3815,6 @@ pub fn insertLines(self: *Terminal, count: usize) void {
             self.rowWillBeShifted(cur_p.node.page(), cur_row);
             self.rowWillBeShifted(off_p.node.page(), off_row);
 
-            // If our scrolling region is full width, then we unset wrap.
-            if (!left_right) {
-                off_row.wrap = false;
-                cur_row.wrap = false;
-                off_row.wrap_continuation = false;
-                cur_row.wrap_continuation = false;
-            }
-
             const src_p = off_p;
             const src_row = off_row;
             const dst_p = cur_p;
@@ -3858,6 +3887,26 @@ pub fn insertLines(self: *Terminal, count: usize) void {
         y -= 1;
         // Move our pin up to the next row.
         if (cur_p.up(1)) |p| cur_p.* = p;
+    }
+
+    // Rows that moved together keep their soft wraps. A wrap can only
+    // break where the neighbor of a row changed.
+    if (!left_right) {
+        const top = self.screens.active.cursor.page_pin.*;
+
+        // The row above the cursor is now followed by a blank row.
+        if (top.up(1)) |p| rowClearWrap(p);
+
+        // The first moved row now follows a blank row.
+        if (adjusted_count < rem) rowClearWrapContinuation(
+            top.down(adjusted_count).?,
+        );
+
+        // The rows that followed the new bottom row were pushed out
+        // of the region, and the row below the region lost the row
+        // it followed.
+        rowClearWrap(top.down(rem - 1).?);
+        if (top.down(rem)) |p| rowClearWrapContinuation(p);
     }
 }
 
@@ -3946,14 +3995,6 @@ pub fn deleteLines(self: *Terminal, count: usize) void {
             self.rowWillBeShifted(cur_p.node.page(), cur_row);
             self.rowWillBeShifted(off_p.node.page(), off_row);
 
-            // If our scrolling region is full width, then we unset wrap.
-            if (!left_right) {
-                off_row.wrap = false;
-                cur_row.wrap = false;
-                off_row.wrap_continuation = false;
-                cur_row.wrap_continuation = false;
-            }
-
             const src_p = off_p;
             const src_row = off_row;
             const dst_p = cur_p;
@@ -4026,6 +4067,25 @@ pub fn deleteLines(self: *Terminal, count: usize) void {
         y += 1;
         // Move our pin down to the next row.
         if (cur_p.down(1)) |p| cur_p.* = p;
+    }
+
+    // Rows that moved together keep their soft wraps. A wrap can only
+    // break where the neighbor of a row changed.
+    if (!left_right) {
+        const top = self.screens.active.cursor.page_pin.*;
+
+        // The row above the cursor and the row now at the cursor
+        // were not adjacent before.
+        if (top.up(1)) |p| rowClearWrap(p);
+        rowClearWrapContinuation(top);
+
+        // The last moved row is now followed by a blank row.
+        if (adjusted_count < rem) rowClearWrap(
+            top.down(rem - adjusted_count - 1).?,
+        );
+
+        // The row below the region now follows a blank row.
+        if (top.down(rem)) |p| rowClearWrapContinuation(p);
     }
 }
 
@@ -6652,6 +6712,8 @@ test "Terminal: graphemeWidth parity" {
     try expectGraphemeWidthParity(&.{ 0x23, 0xFE0F, 0x20E3 });
     try expectGraphemeWidthParity(&.{ '1', 0x20E3 });
     try expectGraphemeWidthParity(&.{ 0x1F44B, 0x1F3FF });
+    try expectGraphemeWidthParity(&.{ 0x261D, 0x1F3FB });
+    try expectGraphemeWidthParity(&.{ 0x1F575, 0x1F3FB, 0x200D, 0x2642, 0xFE0F });
     try expectGraphemeWidthParity(&.{ 0x1F1E6, 0x1F1E7, 0x1F1E8 });
     try expectGraphemeWidthParity(&.{ 'a', 'b' });
     try expectGraphemeWidthParity(&.{ 0x0301, 0x0302 });
@@ -6890,6 +6952,95 @@ test "Terminal: Fitzpatrick skin tone next valid base" {
         try testing.expect(cell.hasGrapheme());
         try testing.expectEqual(Cell.Wide.wide, cell.wide);
     }
+}
+
+test "Terminal: Fitzpatrick skin tone widens a narrow base like VS16" {
+    // Every emoji that accepts a skin tone but is drawn as text by
+    // default (Emoji_Modifier_Base minus Emoji_Presentation in
+    // emoji-data.txt). Each is narrow on its own. A skin tone modifier
+    // asks for the emoji form, so base + modifier must lay out exactly
+    // like base + VS16.
+    const bases = [_]u21{
+        0x261D,  0x26F9,  0x270C,  0x270D,  0x1F3CB,
+        0x1F3CC, 0x1F574, 0x1F575, 0x1F590,
+    };
+
+    // A 3 column screen, with the base printed in each column. VS16 and
+    // every modifier must produce the same expected result.
+    const Case = struct {
+        x: u16,
+        wraparound: bool,
+        // Where the base ends up and whether its cell became wide.
+        base_x: u16,
+        base_y: u16,
+        wide: bool,
+        cursor_x: u16,
+        cursor_y: u16,
+        pending_wrap: bool,
+    };
+    const cases = [_]Case{
+        // First column: the cell widens in place.
+        .{ .x = 0, .wraparound = true, .base_x = 0, .base_y = 0, .wide = true, .cursor_x = 2, .cursor_y = 0, .pending_wrap = false },
+        .{ .x = 0, .wraparound = false, .base_x = 0, .base_y = 0, .wide = true, .cursor_x = 2, .cursor_y = 0, .pending_wrap = false },
+        // Second-to-last column: the tail lands in the last column.
+        .{ .x = 1, .wraparound = true, .base_x = 1, .base_y = 0, .wide = true, .cursor_x = 2, .cursor_y = 0, .pending_wrap = true },
+        .{ .x = 1, .wraparound = false, .base_x = 1, .base_y = 0, .wide = true, .cursor_x = 2, .cursor_y = 0, .pending_wrap = true },
+        // Last column: the cluster moves to the next line.
+        .{ .x = 2, .wraparound = true, .base_x = 0, .base_y = 1, .wide = true, .cursor_x = 2, .cursor_y = 1, .pending_wrap = false },
+        // Last column without wraparound: the second code point is dropped.
+        .{ .x = 2, .wraparound = false, .base_x = 2, .base_y = 0, .wide = false, .cursor_x = 2, .cursor_y = 0, .pending_wrap = true },
+    };
+
+    const seconds = [_]u21{ 0xFE0F, 0x1F3FB, 0x1F3FC, 0x1F3FD, 0x1F3FE, 0x1F3FF };
+
+    for (cases) |c| for (bases) |base| for (seconds) |second| {
+        var t = try init(testing.io, testing.allocator, .{ .cols = 3, .rows = 5 });
+        defer t.deinit(testing.allocator);
+        t.modes.set(.grapheme_cluster, true);
+        t.modes.set(.wraparound, c.wraparound);
+
+        t.setCursorPos(1, c.x + 1);
+        try t.print(base);
+        try t.print(second);
+
+        const cursor = &t.screens.active.cursor;
+        try testing.expectEqual(@as(usize, c.cursor_x), cursor.x);
+        try testing.expectEqual(@as(usize, c.cursor_y), cursor.y);
+        try testing.expectEqual(c.pending_wrap, cursor.pending_wrap);
+
+        const list_cell = t.screens.active.pages.getCell(.{ .screen = .{
+            .x = c.base_x,
+            .y = c.base_y,
+        } }).?;
+        const cell = list_cell.cell;
+        try testing.expectEqual(base, cell.content.codepoint.data);
+        if (c.wide) {
+            try testing.expectEqual(Cell.Wide.wide, cell.wide);
+            try testing.expectEqualSlices(
+                u21,
+                &.{second},
+                list_cell.node.page().lookupGrapheme(cell).?,
+            );
+
+            const tail = t.screens.active.pages.getCell(.{ .screen = .{
+                .x = c.base_x + 1,
+                .y = c.base_y,
+            } }).?.cell;
+            try testing.expectEqual(Cell.Wide.spacer_tail, tail.wide);
+
+            // Wrapping leaves a spacer head in the last column.
+            if (c.base_y == 1) {
+                const head = t.screens.active.pages.getCell(.{ .screen = .{
+                    .x = 2,
+                    .y = 0,
+                } }).?.cell;
+                try testing.expectEqual(Cell.Wide.spacer_head, head.wide);
+            }
+        } else {
+            try testing.expectEqual(Cell.Wide.narrow, cell.wide);
+            try testing.expect(!cell.hasGrapheme());
+        }
+    };
 }
 
 test "Terminal: Fitzpatrick skin tone next to non-base" {
@@ -13379,12 +13530,12 @@ test "Terminal: deleteLines wide character spacer head" {
 
     // Delete the top line
     // +-----+
-    // |BBBB | < Non-wrapped
-    // |WWCCC| < Non-wrapped
+    // |BBBB*| < Wrapped
+    // |WWCCC| < Non-wrapped (continued)
     // |     | < Non-wrapped
     // +-----+
-    // This should convert the spacer head to
-    // a regular empty cell, and un-set wrap.
+    // The wrapped rows move together, so the
+    // spacer head and wrap are kept.
     t.setCursorPos(1, 1);
     t.deleteLines(1);
 
@@ -13394,7 +13545,7 @@ test "Terminal: deleteLines wide character spacer head" {
         const unwrapped_str = try t.plainStringUnwrapped(testing.allocator);
         defer testing.allocator.free(unwrapped_str);
         try testing.expectEqualStrings("BBBB\n\u{1F600}CCC", str);
-        try testing.expectEqualStrings("BBBB\n\u{1F600}CCC", unwrapped_str);
+        try testing.expectEqualStrings("BBBB\u{1F600}CCC", unwrapped_str);
     }
 }
 
@@ -19648,6 +19799,117 @@ test "Terminal: deleteLines blank row does not retain semantic prompt" {
     }
 }
 
+test "Terminal: insertLines and deleteLines in margins keep semantic prompt" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+
+    // Each case prints a prompt "$ " on row `prompt_y`, then runs IL
+    // (row 2 into row 3) or DL (row 3 into row 2) inside margins. Margins
+    // 3;10 leave the prompt in place and 1;8 move it. Row `check_y` must
+    // still be marked as a prompt.
+    const Case = struct {
+        seq: []const u8,
+        margins: []const u8,
+        prompt_y: u16,
+        check_y: u16,
+    };
+    const cases = [_]Case{
+        .{ .seq = "\x1b[L", .margins = "\x1b[3;10s", .prompt_y = 3, .check_y = 3 },
+        .{ .seq = "\x1b[L", .margins = "\x1b[1;8s", .prompt_y = 2, .check_y = 3 },
+        .{ .seq = "\x1b[M", .margins = "\x1b[3;10s", .prompt_y = 2, .check_y = 2 },
+        .{ .seq = "\x1b[M", .margins = "\x1b[1;8s", .prompt_y = 3, .check_y = 2 },
+    };
+
+    // Same page uses Page.moveCells, different pages use
+    // Page.clonePartialRowFrom.
+    for ([_]bool{ false, true }) |cross_page| for (cases) |c| {
+        var t = try init(io_impl, alloc, .{
+            .rows = 5,
+            .cols = 10,
+            .max_scrollback_bytes = 1024,
+        });
+        defer t.deinit(alloc);
+
+        // Put active rows 0-2 and 3-4 on different pages.
+        const pages = &t.screens.active.pages;
+        if (cross_page) {
+            const first_page_rows = pages.pages.first.?.capacity().rows;
+            for (0..first_page_rows + 1) |_| try t.linefeed();
+        }
+        const row2 = pages.pin(.{ .active = .{ .y = 2 } }).?;
+        const row3 = pages.pin(.{ .active = .{ .y = 3 } }).?;
+        try testing.expectEqual(cross_page, row2.node != row3.node);
+
+        var s = t.vtStream();
+        defer s.deinit();
+
+        var buf: [64]u8 = undefined;
+        s.nextSlice(try std.mem.print(
+            &buf,
+            "\x1b[{d};1H\x1b]133;A\x07$ \x1b]133;C\x07",
+            .{c.prompt_y + 1},
+        ));
+        s.nextSlice("\x1b[?69h");
+        s.nextSlice(c.margins);
+        s.nextSlice("\x1b[3;3H");
+        s.nextSlice(c.seq);
+
+        const rac = pages.getCell(.{ .active = .{ .y = c.check_y } }).?;
+        try testing.expectEqual(.prompt, rac.cell.semantic_content);
+        try testing.expectEqual(.prompt, rac.row.semantic_prompt);
+    };
+}
+
+test "Terminal: insertLines in margins keeps kitty placeholder flag" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{
+        .rows = 5,
+        .cols = 10,
+        .max_scrollback_bytes = 1024,
+    });
+    defer t.deinit(alloc);
+
+    // Put active rows 0-2 and 3-4 on different pages.
+    const pages = &t.screens.active.pages;
+    const first_page_rows = pages.pages.first.?.capacity().rows;
+    for (0..first_page_rows + 1) |_| try t.linefeed();
+    {
+        const row2 = pages.pin(.{ .active = .{ .y = 2 } }).?;
+        const row3 = pages.pin(.{ .active = .{ .y = 3 } }).?;
+        const row4 = pages.pin(.{ .active = .{ .y = 4 } }).?;
+        try testing.expect(row2.node != row3.node);
+        try testing.expect(row3.node == row4.node);
+    }
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // A styled placeholder at the start of row 3.
+    s.nextSlice("\x1b[4;1H\x1b[38;5;1m\u{10EEEE}\x1b[m");
+
+    // IL across the page boundary with the placeholder outside the
+    // margins. Row 3 keeps it, so it must keep the flag.
+    s.nextSlice("\x1b[?69h\x1b[3;10s\x1b[3;3H\x1b[L");
+    {
+        const rac = pages.getCell(.{ .active = .{ .y = 3 } }).?;
+        try testing.expectEqual(kitty.graphics.unicode.placeholder, rac.cell.codepoint());
+        try testing.expect(rac.row.kitty_virtual_placeholder);
+    }
+
+    // IL on one page moves the placeholder into row 4. Page.moveCells
+    // only looks for placeholders when the flag is set, so a flag
+    // dropped above would hide the image here.
+    s.nextSlice("\x1b[1;4s\x1b[4;1H\x1b[L");
+    {
+        const rac = pages.getCell(.{ .active = .{ .y = 4 } }).?;
+        try testing.expectEqual(kitty.graphics.unicode.placeholder, rac.cell.codepoint());
+        try testing.expect(rac.row.kitty_virtual_placeholder);
+    }
+}
+
 test "Terminal: eraseDisplay complete ignores stale prompt on recycled row" {
     const alloc = testing.allocator;
     const io_impl = testing.io;
@@ -19757,4 +20019,253 @@ test "Terminal: eraseDisplay complete at input prompt copied from alt screen scr
     t.eraseDisplay(.complete, false);
 
     try testing.expect(t.screens.active.pages.total_rows > t.screens.active.pages.rows);
+}
+
+test "Terminal: resize grows rows while viewport is scrolled up" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 2, .rows = 1 });
+    defer t.deinit(alloc);
+
+    try t.printString("abcd");
+    try t.printString("e");
+    t.scrollViewport(.{ .delta = -1 });
+    try t.printString("fgh");
+    try testing.expect(t.screens.active.pages.viewport == .pin);
+
+    // Reflow to 4 columns leaves two rows, so growing to four pulls in
+    // every row and the scrolled-up viewport becomes the active area.
+    try t.resize(alloc, .{ .cols = 4, .rows = 4 });
+    try testing.expect(t.screens.active.pages.viewport == .active);
+}
+
+test "Terminal: resize grows rows while viewport is scrolled up, cursor not at bottom" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 5, .rows = 3 });
+    defer t.deinit(alloc);
+
+    try t.printString("1\r\n2\r\n3\r\n4\r\n5\r\n6");
+    t.setCursorPos(1, 1);
+    t.scrollViewport(.{ .delta = -1 });
+    try testing.expect(t.screens.active.pages.viewport == .pin);
+
+    // The cursor isn't at the bottom, so no scrollback is pulled down and
+    // the viewport stays scrolled up.
+    try t.resize(alloc, .{ .cols = 5, .rows = 6 });
+    try testing.expect(t.screens.active.pages.viewport == .pin);
+}
+
+test "Terminal: insertLines preserves wrap of rows shifted together" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 4, .cols = 3 });
+    defer t.deinit(alloc);
+
+    try t.printString("ABCDE");
+
+    t.setTopAndBottomMargin(1, 3);
+    t.setCursorPos(1, 1);
+    t.insertLines(1);
+
+    const str = try t.plainStringUnwrapped(testing.allocator);
+    defer testing.allocator.free(str);
+    try testing.expectEqualStrings("\nABCDE", str);
+}
+
+test "Terminal: deleteLines preserves wrap of rows shifted together" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .rows = 4, .cols = 3 });
+    defer t.deinit(alloc);
+
+    try t.print('1');
+    t.carriageReturn();
+    try t.linefeed();
+    try t.printString("ABCDE");
+
+    t.setTopAndBottomMargin(1, 3);
+    t.setCursorPos(1, 1);
+    t.deleteLines(1);
+
+    const str = try t.plainStringUnwrapped(testing.allocator);
+    defer testing.allocator.free(str);
+    try testing.expectEqualStrings("ABCDE", str);
+}
+
+test "Terminal: insertLines and deleteLines soft wrap state" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+
+    // Four lines of 13 characters at 10 columns. Rows 1, 3, 5, and 7
+    // wrap, and rows 2, 4, 6, and 8 continue them.
+    const fill = "\x1b[H" ++
+        "aaaaaaaaaaAAA\r\n" ++
+        "bbbbbbbbbbBBB\r\n" ++
+        "ccccccccccCCC\r\n" ++
+        "ddddddddddDDD";
+
+    // The state of each row after the operation: 'w' wraps into the
+    // next row, 'c' continues the previous row, 'b' is both, and '.'
+    // is neither.
+    const cases = [_]struct {
+        ops: []const u8,
+        rows: *const [8]u8,
+    }{
+        .{ .ops = "", .rows = "wcwcwcwc" },
+
+        // Rows that move together keep their state. A row stops
+        // wrapping when its continuation is pushed out of the region.
+        .{ .ops = "\x1b[3;1H\x1b[L", .rows = "wc.wcwc." },
+        .{ .ops = "\x1b[3;1H\x1b[3L", .rows = "wc...wc." },
+        .{ .ops = "\x1b[3;1H\x1b[99L", .rows = "wc......" },
+        .{ .ops = "\x1b[3;1H\x1b[2M", .rows = "wcwcwc.." },
+        .{ .ops = "\x1b[3;1H\x1b[99M", .rows = "wc......" },
+
+        // Inserting between the two rows of a pair splits it.
+        .{ .ops = "\x1b[2;1H\x1b[L", .rows = "...wcwc." },
+        .{ .ops = "\x1b[3;6r\x1b[4;1H\x1b[L", .rows = "wc....wc" },
+
+        // Deleting one row of a pair leaves the other on its own.
+        .{ .ops = "\x1b[3;1H\x1b[M", .rows = "wc.wcwc." },
+        .{ .ops = "\x1b[2;1H\x1b[M", .rows = ".wcwcwc." },
+        .{ .ops = "\x1b[4;1H\x1b[2M", .rows = "wc..wc.." },
+        .{ .ops = "\x1b[3;6r\x1b[4;1H\x1b[M", .rows = "wc.wc.wc" },
+
+        // A region with a pair on each side of both edges. The pairs
+        // inside it move whole.
+        .{ .ops = "\x1b[3;6r\x1b[3;1H\x1b[L", .rows = "wc.wc.wc" },
+        .{ .ops = "\x1b[3;6r\x1b[3;1H\x1b[M", .rows = "wc.wc.wc" },
+
+        // A region whose top and bottom edges each split a pair. The
+        // rows outside it lose the row they wrapped into or continued.
+        .{ .ops = "\x1b[2;5r\x1b[2;1H\x1b[L", .rows = "...wc.wc" },
+        .{ .ops = "\x1b[2;5r\x1b[2;1H\x1b[M", .rows = ".wc...wc" },
+
+        // SU, SD, and RI go through the same code.
+        .{ .ops = "\x1b[2;5r\x1b[S", .rows = ".wc...wc" },
+        .{ .ops = "\x1b[2;5r\x1b[T", .rows = "...wc.wc" },
+        .{ .ops = "\x1b[2;5r\x1b[2;1H\x1bM", .rows = "...wc.wc" },
+
+        // Left and right margins move cells, not rows, so every row
+        // keeps its state. This is what xterm does.
+        .{ .ops = "\x1b[?69h\x1b[3;8s\x1b[3;3H\x1b[L", .rows = "wcwcwcwc" },
+        .{ .ops = "\x1b[?69h\x1b[3;8s\x1b[3;3H\x1b[M", .rows = "wcwcwcwc" },
+    };
+
+    for (cases) |case| {
+        var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 8 });
+        defer t.deinit(alloc);
+        {
+            var s = t.vtStream();
+            defer s.deinit();
+            s.nextSlice(fill);
+            s.nextSlice(case.ops);
+        }
+
+        var actual: [8]u8 = undefined;
+        for (&actual, 0..) |*c, y| {
+            const row = t.screens.active.pages.getCell(.{ .active = .{
+                .x = 0,
+                .y = @intCast(y),
+            } }).?.row;
+            c.* = if (row.wrap and row.wrap_continuation)
+                'b'
+            else if (row.wrap)
+                'w'
+            else if (row.wrap_continuation)
+                'c'
+            else
+                '.';
+        }
+        try testing.expectEqualStrings(case.rows, &actual);
+    }
+}
+
+test "Terminal: insertLines and deleteLines clear a spacer head with its wrap" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+
+    // Both operations take away the row that the wide character
+    // wrapped to, so the row above no longer wraps.
+    for ([_][]const u8{ "\x1b[L", "\x1b[M" }) |op| {
+        var t = try init(io_impl, alloc, .{ .cols = 5, .rows = 4 });
+        defer t.deinit(alloc);
+
+        // +-----+
+        // |AAAA*| < Wrapped
+        // |WWB  | < Non-wrapped (continued)
+        // +-----+
+        // where * represents a spacer head cell
+        // and WW is the wide character.
+        try t.printString("AAAA\u{1F600}B");
+        {
+            const list_cell = t.screens.active.pages.getCell(.{ .active = .{ .x = 4, .y = 0 } }).?;
+            try testing.expect(list_cell.row.wrap);
+            try testing.expectEqual(Cell.Wide.spacer_head, list_cell.cell.wide);
+        }
+
+        t.setCursorPos(2, 1);
+        {
+            var s = t.vtStream();
+            defer s.deinit();
+            s.nextSlice(op);
+        }
+
+        const list_cell = t.screens.active.pages.getCell(.{ .active = .{ .x = 4, .y = 0 } }).?;
+        try testing.expect(!list_cell.row.wrap);
+        try testing.expectEqual(Cell.Wide.narrow, list_cell.cell.wide);
+    }
+}
+
+test "Terminal: insertLines and deleteLines keep soft wraps across a page boundary" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+
+    // Insert a line above three wrapped pairs, then delete it again.
+    // The second pair has one row on each page, so both directions
+    // copy a row and its state to another page.
+    var t = try init(io_impl, alloc, .{ .rows = 7, .cols = 5, .max_scrollback_bytes = 1024 * 1024 });
+    defer t.deinit(alloc);
+
+    const first_page = t.screens.active.pages.pages.first.?;
+    const first_page_nrows = first_page.capacity().rows;
+
+    // Fill up the first page minus 3 rows
+    for (0..first_page_nrows - 3) |_| try t.linefeed();
+    try t.printString("aaaaaAA");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.printString("bbbbbBB");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.printString("cccccCC");
+
+    // The top row of the screen is blank and the "b" pair straddles
+    // the page boundary.
+    try testing.expect(t.screens.active.pages.pin(.{ .active = .{ .y = 3 } }).?.node !=
+        t.screens.active.pages.pin(.{ .active = .{ .y = 4 } }).?.node);
+
+    t.setCursorPos(2, 1);
+    t.insertLines(1);
+    {
+        const str = try t.plainStringUnwrapped(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings("\n\naaaaaAA\nbbbbbBB\nccccc", str);
+    }
+    for ([_]bool{ false, false, true, false, true, false, false }, 0..) |wrap, y| {
+        const row = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?.row;
+        try testing.expectEqual(wrap, row.wrap);
+        try testing.expectEqual(y == 3 or y == 5, row.wrap_continuation);
+    }
+
+    t.deleteLines(1);
+    {
+        const str = try t.plainStringUnwrapped(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings("\naaaaaAA\nbbbbbBB\nccccc", str);
+    }
+    for ([_]bool{ false, true, false, true, false, false, false }, 0..) |wrap, y| {
+        const row = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?.row;
+        try testing.expectEqual(wrap, row.wrap);
+        try testing.expectEqual(y == 2 or y == 4, row.wrap_continuation);
+    }
 }
