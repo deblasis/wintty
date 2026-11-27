@@ -121,8 +121,10 @@ Who takes which lane:
 - The heavy recipes take the lane THEMSELVES on Windows: `just test`, every
   `test-*` recipe, `test-win`, `build-dll`, `build-dll-release`, `build-win`,
   `build-win-release`, `test-examples`, `release-gate-check`, `signoff` and
-  `default` queue on `wintty-build` through the justfile's `_lane` wrapper
-  and refuse to run without incoda. Call them BARE. An outer
+  `default` queue on `wintty-build` through the justfile's `_lane` wrapper.
+  Call them BARE. When incoda is absent or its `wintty-build` lane is not
+  usable, they print one warning and run the same command with no lane; the
+  guard lets that warned run through. An outer
   `incoda run --queue wintty-build -- just test` still works: the nested
   wrapper passes through on the held key. The `[unix]` bodies are unchanged,
   so a Linux or macOS host runs the plain recipes. `just signoff` itself
@@ -149,9 +151,12 @@ Who takes which lane:
   process is up. That window is a hazard no lane covers: the justfile
   harnesses check for it before building, and most harnesses refuse to
   start beside it, so close it before queueing one.
-- The harness recipes and `run-win` refuse to run without incoda on PATH or
-  in its installer's location (`%LOCALAPPDATA%\Programs\incoda`), naming
-  the install. On this machine that is not optional.
+- The harness recipes and `run-win` look for incoda on PATH or in its
+  installer's location (`%LOCALAPPDATA%\Programs\incoda`). A missing install,
+  a missing or closed queue, or a queue incoda has not linked to its pools
+  all print one warning naming what is unusable; the command then runs with
+  no lane. On the development machine the three lanes are configured, so the
+  runs take the lanes described above.
 - Anything else under `windows/scripts/` that launches a window goes under
   `wintty-desktop`; anything timing-sensitive enough to fail on a loaded
   machine goes under the exclusive pair above.
