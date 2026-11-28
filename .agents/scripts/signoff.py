@@ -55,6 +55,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gate_scope  # noqa: E402
 import leg_cache  # noqa: E402
+import no_stray_windows  # noqa: E402 - its held-set rule, so the selector and the scan agree
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BASE_REF = "origin/windows"
@@ -305,7 +306,10 @@ def justfile_legs(base):
 
     Editing the recipe a leg runs through invalidates that leg only; a
     change outside every recipe (a setting, an assignment) can reach any
-    of them and forces all. Adding an unrelated recipe forces nothing.
+    of them and forces all. Adding a recipe that gate_scope maps to no
+    leg forces gates-selftest alone: the scan there checks recipe shape,
+    and a new heavy recipe reaches it that way without costing a typo fix
+    the hour of tests.
     Comment lines and doc comments are free where just parses them as
     comments; a script's body and a platform region keep every line,
     because there a `#` line can be payload; a comment at the end of a
@@ -349,6 +353,27 @@ def justfile_legs(base):
         return every
     old_sem = _compared_semantics(old_sem)
     new_sem = _compared_semantics(new_sem)
+    # The scan holds a recipe when a caller hands it to incoda, whether or
+    # not its name says so, and reads the queue each caller asks for: the
+    # selector must add that leg for the same recipes and for any change to
+    # those queues, or removing a guard from a mapped private, or flipping the
+    # queue it is guarded for, merges unseen. Both versions are read: an edit
+    # that unhooks a caller and removes the guard at once leaves the private
+    # held in neither scan, and it is exactly the recipe to look at.
+    # held is None when either version's callers cannot be read: fail closed.
+    try:
+        old_held, old_queues, _old_problems = no_stray_windows._in_lane_privates(old_blob.decode("utf-8", "surrogateescape"))
+        new_held, new_queues, _new_problems = no_stray_windows._in_lane_privates(new_blob.decode("utf-8", "surrogateescape"))
+    except Exception:  # noqa: BLE001 - a parse that cannot say is not a proof it is safe
+        old_held = new_held = None
+        old_queues = new_queues = {}
+    held = None if old_held is None else old_held | new_held
+    # the recipes whose queue changed between the versions, or that are asked
+    # for under more than one: a guard key is derived from the queue, so the
+    # scan is the leg that can see whether it still matches
+    moved = {name for name in old_queues.keys() | new_queues.keys()
+             if old_queues.get(name) != new_queues.get(name)
+             or len(new_queues.get(name) or ()) > 1 or len(old_queues.get(name) or ()) > 1}
     legs = set()
     if old_sem != new_sem:
         for key in (set(old_sem) | set(new_sem)) - {"recipes"}:
@@ -358,17 +383,37 @@ def justfile_legs(base):
         new_recipes = new_sem.get("recipes") or {}
         for name in set(old_recipes) | set(new_recipes):
             if old_recipes.get(name) != new_recipes.get(name):
-                # Unknown or unlisted recipes fail closed: they can reach any
-                # leg (the lane plumbing especially), and an empty set here
-                # once let a justfile-only edit carry a stale green.
-                legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
+                legs.update(_recipe_legs(name, held))
+    # (a caller's queue can move through a region-only edit too, so the check is made once, after both)
     old_regions, old_suspicious = _variant_regions(old_blob.decode("utf-8", "surrogateescape"))
     new_regions, new_suspicious = _variant_regions(new_blob.decode("utf-8", "surrogateescape"))
     if old_suspicious or new_suspicious:
         return every
     for name in set(old_regions) | set(new_regions):
         if old_regions.get(name) != new_regions.get(name):
-            legs.update(gate_scope.RECIPE_LEGS.get(name, ()))
+            legs.update(_recipe_legs(name, held))
+    if moved:
+        legs.add(gate_scope.LEG_GATES)        # a caller's queue changed, or split: only the scan checks the guard key against it
+    return legs
+
+
+def _recipe_legs(name, held=frozenset()):
+    """The legs a changed recipe can have altered. One that gate_scope maps to no
+    leg is unreviewed: nothing says what it runs, so it gets the leg that reads
+    the justfile's shape (the spawn scan and the guard checks). An empty set
+    here once let a justfile-only edit carry a stale green.
+
+    A recipe the scan holds gets that leg too, whatever else it is mapped to:
+    the scan is what holds its lane guard, and its own legs (the tests it runs)
+    never run the scan, so removing a guard from it selected no leg that could
+    see the removal. `held` is the set the scan holds, read from both versions
+    of the justfile; `None` means that set could not be read, and then every
+    recipe counts as held: a parse that cannot say is not a proof it is safe.
+    The `-in-lane` suffix alone is the fallback for a caller that has no
+    justfile text to read (the oracle rows)."""
+    legs = set(gate_scope.RECIPE_LEGS.get(name) or (gate_scope.LEG_GATES,))
+    if name.endswith("-in-lane") or name in (held if held is not None else {name}):
+        legs.add(gate_scope.LEG_GATES)
     return legs
 
 
@@ -910,6 +955,7 @@ def self_test():
         finally:
             globals()["_just_blob"], globals()["_just_semantics"] = saved_blob, saved_sem
 
+    gates = {gate_scope.LEG_GATES}
     same = sem({"test": {"body": ["a"]}, "hello": {}})
     oracle_cases = [
         ("old-blob-missing", None, b"x", None, None, every),
@@ -931,12 +977,85 @@ def self_test():
         ("assignment-named-line", b"x", b"y", sem(assignments={"line": "1"}), sem(assignments={"line": "2"}), every),
         ("recipe-added", b"x", b"y", sem({"hello": {}}), sem({"hello": {}, "test-win": {}}), win),
         ("recipe-removed", b"x", b"y", sem({"test": {}, "hello": {}}), sem({"hello": {}}), zig),
-        ("unrelated-recipe-only", b"x", b"y", sem({"hello": {"body": ["a"]}}), sem({"hello": {"body": ["b"]}}), set()),
+        ("unmapped-recipe-only", b"x", b"y", sem({"hello": {"body": ["a"]}}), sem({"hello": {"body": ["b"]}}), gates),
+        ("unmapped-recipe-added", b"x", b"y", sem({"hello": {}}), sem({"hello": {}, "other": {}}), gates),
+        ("unmapped-recipe-removed", b"x", b"y", sem({"hello": {}, "other": {}}), sem({"hello": {}}), gates),
+        ("unmapped-doc-comment-free", b"x", b"y", sem({"hello": {"doc": "a"}}), sem({"hello": {"doc": "b"}}), set()),
+        ("empty-mapped-recipe", b"x", b"y", sem({"signoff-docs": {"body": ["--no-legs-only"]}}),
+         sem({"signoff-docs": {"body": ["--full"]}}), gates),
+        ("mapped-and-unmapped", b"x", b"y", sem({"test": {"body": ["a"]}, "hello": {"body": ["a"]}}),
+         sem({"test": {"body": ["b"]}, "hello": {"body": ["b"]}}), zig | gates),
+        ("in-lane-private-keeps-gates", b"x", b"y", sem({"_test-win-in-lane": {"body": ["a"]}}),
+         sem({"_test-win-in-lane": {"body": ["b"]}}), win | gates),
+        ("in-lane-private-added", b"x", b"y", sem({"hello": {}}),
+         sem({"hello": {}, "_new-in-lane": {}}), gates),
+        # Deliberately the mapped, caller-held, non-`-in-lane` shape: test-win is
+        # mapped to windows-tests, and the blob hands it to incoda, so the scan
+        # that holds its guard must be selected as well. A rename must not free
+        # a private from the scan.
+        ("caller-held-mapped-private",
+         b'[windows]\ntheme:\n    & $inc run --queue wintty-desktop -- just test-win\n',
+         b'[windows]\ntheme:\n    & $inc run --queue wintty-desktop -- just test-win\n',
+         sem({"test-win": {"body": ["a"]}}), sem({"test-win": {"body": ["b"]}}), win | gates),
+        # The same private when the edit unhooks its caller in the same change,
+        # and the caller is MAPPED (an unmapped caller would select gates for its
+        # own change and hide what is being pinned): held in the OLD version only.
+        # Reading the new version alone let this merge with the scan never selected.
+        ("caller-removed-mapped-private",
+         b'[windows]\ntest:\n    & $inc run --queue wintty-desktop -- just test-win\n',
+         b'[windows]\ntest:\n    echo gone\n',
+         sem({"test-win": {"body": ["a"]}, "test": {"body": ["x"]}}),
+         sem({"test-win": {"body": ["b"]}, "test": {"body": ["y"]}}), zig | win | gates),
         ("position-keys-stripped", b"x", b"y", sem({"test": {"body": ["a"], "line": 1}}), sem({"test": {"body": ["a"], "line": 9}}), set()),
+        # A caller's queue flipped and NOTHING else: the target's body is the
+        # same on both sides, so no recipe is held differently and no held
+        # recipe changed. Only reading the queues from both versions can select
+        # the scan that checks the guard key against the new queue. (An earlier
+        # version of this row also changed the target's body, and so passed
+        # through the held-recipe rule with the queue rule removed.)
+        ("caller-queue-flipped",
+         b'[windows]\ntest:\n    & $inc run --queue wintty-desktop -- just test-win\n',
+         b'[windows]\ntest:\n    & $inc run --queue wintty-build -- just test-win\n',
+         sem({"test": {"body": ["a"]}, "test-win": {"body": ["same"]}}),
+         sem({"test": {"body": ["b"]}, "test-win": {"body": ["same"]}}), zig | gates),
+        # A held recipe asked for under two queues: both callers MAPPED to legs
+        # that exclude the scan, the target's body unchanged, and only one caller
+        # changed. The multi-valued clause is then the only route to the scan.
+        ("caller-queue-split",
+         b'[windows]\ntest:\n    & $inc run --queue wintty-desktop -- just test-win\n'
+         b'[windows]\nbuild-win:\n    echo x\n',
+         b'[windows]\ntest:\n    & $inc run --queue wintty-desktop -- just test-win\n'
+         b'[windows]\nbuild-win:\n    & $inc run --queue wintty-build -- just test-win\n',
+         sem({"test": {"body": ["a"]}, "test-win": {"body": ["same"]}, "build-win": {"body": ["x"]}}),
+         sem({"test": {"body": ["a"]}, "test-win": {"body": ["same"]}, "build-win": {"body": ["y"]}}),
+         win | gates),
+        # The same two queues on both sides, so no queue set changed, and the
+        # target's body is unchanged: one caller's body simply changed. A guard
+        # cannot serve two keys, so the scan stays selected for as long as the
+        # recipe is asked for under two queues. Only the multi-valued clause
+        # can select it here.
+        ("caller-queue-stays-split",
+         b'[windows]\ntest:\n    & $inc run --queue wintty-desktop -- just test-win\n'
+         b'[windows]\nbuild-win:\n    & $inc run --queue wintty-build -- just test-win\n',
+         b'[windows]\ntest:\n    & $inc run --queue wintty-desktop -- just test-win\n'
+         b'[windows]\nbuild-win:\n    & $inc run --queue wintty-build -- just test-win\n',
+         sem({"test": {"body": ["a"]}, "test-win": {"body": ["same"]}, "build-win": {"body": ["x"]}}),
+         sem({"test": {"body": ["a"]}, "test-win": {"body": ["same"]}, "build-win": {"body": ["y"]}}),
+         win | gates),
     ]
     for label, ob, nb, os_, ns_, expect in oracle_cases:
         got = with_justfile_reading(ob, nb, os_, ns_)
         report(got == expect, f"justfile-oracle-{label}", str(sorted(got)))
+    # The held set could not be read: every changed recipe is treated as held,
+    # so the scan runs. Without the `held is None` clause a parse failure
+    # would trust a green no rule produced.
+    real_in_lane = no_stray_windows._in_lane_privates
+    try:
+        no_stray_windows._in_lane_privates = lambda text=None: (_ for _ in ()).throw(ValueError("unreadable"))
+        got = with_justfile_reading(b"x", b"y", sem({"test-win": {"body": ["a"]}}), sem({"test-win": {"body": ["b"]}}))
+    finally:
+        no_stray_windows._in_lane_privates = real_in_lane
+    report(got == win | gates, "justfile-oracle-held-unreadable-fails-closed", str(sorted(got)))
 
     # Platform regions are compared from the raw text, because the host's
     # dump shows only this host's definition of a recipe defined once per
@@ -945,7 +1064,7 @@ def self_test():
     variant_blobs = [
         ("variant-body-edited", b"no regions", b"[unix]\ntest-win:\n    echo a\n", win),
         ("variant-added", b"no regions", b"[linux]\ntest:\n    echo a\n", zig),
-        ("variant-unmapped", b"no regions", b"[unix]\nhello:\n    echo a\n", set()),
+        ("variant-unmapped", b"no regions", b"[unix]\nhello:\n    echo a\n", gates),
         ("variant-comment-counts", b"[unix]\ntest-win:\n    echo a\n", b"[unix]\ntest-win:\n    # note\n    echo a\n", win),
         ("variant-attr-spelling-free", b"[unix] # note\ntest-win:\n    echo a\n", b"[ unix ]\ntest-win:\n    echo a\n", set()),
         ("variant-attr-flip-counts", b"[unix]\ntest-win:\n    echo a\n", b"[linux]\ntest-win:\n    echo a\n", win),
