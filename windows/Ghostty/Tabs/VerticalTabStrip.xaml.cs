@@ -1314,9 +1314,14 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// This is the same fact <c>UpdateSelectionRow</c> already spends on the
     /// selection fill's fourth stroke ("a square meets nothing"), asked
     /// where the cover can hear it.
+    ///
+    /// The property is declared non-null, but <c>TabManager</c> backs its value
+    /// with <c>null!</c>, so that is a promise rather than a fact. The lookup
+    /// indexes the row dictionaries by key, and a dictionary rejects a null
+    /// one, so a missing tab is settled here instead of being handed over.
     /// </summary>
     internal bool ActiveRowMeetsThePane
-        => RowElementOf(_manager.ActiveTab) is not VerticalTabPinnedRow;
+        => _manager.ActiveTab is { } tab && RowElementOf(tab) is not VerticalTabPinnedRow;
 
     /// <summary>Raised whenever the selection row moves, resizes, or hides.</summary>
     internal event Action? SelectionRowChanged;
