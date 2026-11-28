@@ -97,6 +97,9 @@ RECIPE_LEGS.update({
     "_test-pkg-in-lane": RECIPE_LEGS["test-pkg"],
     "_test-reachability-in-lane": RECIPE_LEGS["test-reachability"],
     "_test-examples-in-lane": RECIPE_LEGS["test-examples"],
+    # the two helpers the example leg runs; a change here is a zig-leg change
+    "_test-examples-zig": RECIPE_LEGS["test-examples"],
+    "_test-examples-cmake": RECIPE_LEGS["test-examples"],
     "_build-dll-in-lane": RECIPE_LEGS["build-dll"],
     "_build-dll-release-in-lane": RECIPE_LEGS["build-dll-release"],
     "_build-win-in-lane": RECIPE_LEGS["build-win"],
