@@ -608,7 +608,7 @@ seam-theme-resolution args="": _no-wintty-from (_build-in-lane "seam-theme-resol
     . (Join-Path "{{justfile_directory()}}" ".agents\scripts\incoda-lane.ps1"); $env:WINTTY_LANE_DECISION = ''; $inc = Find-Incoda; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason ("seam-theme-resolution {{replace(args, '"', '""')}}".Trim()) -- just _seam-theme-resolution-in-lane "{{replace(args, '"', '""')}}" } else { $env:WINTTY_LANE_DECISION = 'bare'; Write-LaneFallback -Keys @('wintty-desktop') -Label '_seam-theme-resolution-in-lane'; just _seam-theme-resolution-in-lane "{{replace(args, '"', '""')}}" }; exit ($LASTEXITCODE ?? 1)
 
 [windows]
-_seam-theme-resolution-in-lane args="":
+_seam-theme-resolution-in-lane args="": (_require-lane "seam-theme-resolution" "wintty-desktop")
     pwsh -NoProfile -File windows/scripts/seam-theme-resolution.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/seam-theme-resolution {{args}}; exit ($LASTEXITCODE ?? 1)

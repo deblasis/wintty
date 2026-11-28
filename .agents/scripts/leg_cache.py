@@ -205,7 +205,8 @@ def parse_justfile(text):
     digest; a shebang is not a comment, it picks the interpreter, so it
     stays. Attribute lines ([windows], [private]) travel with the recipe
     they decorate because they change where and whether it runs, and a
-    name defined twice under different attributes keeps both bodies."""
+    name defined twice keeps both definitions, merged into one text (the
+    attribute lines stay in it, so which body was which is still readable)."""
     recipes = {}
     preamble = []
     pending_attrs = []
@@ -1252,7 +1253,11 @@ def self_test():
         "    cd pkg/wuffs && zig build test",
         "_test-reachability-in-lane: (_require-lane \"test-reachability\")",
         "    python .agents/scripts/test_reachability.py",
-        "_test-examples-in-lane: (_require-lane \"test-examples\")",
+        "_test-examples-in-lane: (_require-lane \"test-examples\") _test-examples-zig _test-examples-cmake",
+        "_test-examples-zig:",
+        "    echo zig",
+        "_test-examples-cmake:",
+        "    echo cmake",
         "    zig build examples",
         "_build-dll-in-lane: (_require-lane \"build-dll\")",
         "    zig build",
@@ -1372,6 +1377,7 @@ def self_test():
         inputs_zig, _ = leg_inputs(ZIG, ctx0)
         report("recipe/test-full" in inputs_zig and "recipe/test-configure" in inputs_zig
                and "recipe/unrelated" not in inputs_zig and "recipe/build-dll" in inputs_zig
+               and "recipe/_test-examples-zig" in inputs_zig and "recipe/_test-examples-cmake" in inputs_zig
                and "path/helper.zig" in inputs_zig and "command" in inputs_zig,
                "zig-leg-inputs", ", ".join(k for k in inputs_zig if k.startswith(("recipe/", "path/helper", "command"))))
         inputs_gates, _ = leg_inputs(GATES, ctx0)
