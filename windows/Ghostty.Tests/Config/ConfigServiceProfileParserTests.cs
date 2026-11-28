@@ -224,4 +224,28 @@ public class ConfigServiceProfileParserTests
         Assert.Empty(fromPairs.ProfileWarnings); // archived's missing-name warning is suppressed
         Assert.Equal("Cased Profile", fromPairs.ParsedProfiles["cased"].Name); // "Profile." (mixed case) still matches
     }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("false", false)]
+    [InlineData("yes", false)]
+    [InlineData("true", true)]
+    [InlineData("True", true)]
+    public void ParseAll_SshHostsDiscovery_IsOptInTrueOnly(string? raw, bool expected)
+    {
+        var values = new Dictionary<string, string?> { ["ssh-hosts-discovery"] = raw };
+        var result = ConfigServiceProfileParser.ParseAll(string.Empty, key => FileValue(values, key));
+        Assert.Equal(expected, result.SshHostsDiscovery);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("   ", null)]
+    [InlineData(" jgill ", "jgill")]
+    public void ParseAll_SshHostsUser_TrimmedOrNull(string? raw, string? expected)
+    {
+        var values = new Dictionary<string, string?> { ["ssh-hosts-user"] = raw };
+        var result = ConfigServiceProfileParser.ParseAll(string.Empty, key => FileValue(values, key));
+        Assert.Equal(expected, result.SshHostsUser);
+    }
 }

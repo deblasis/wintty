@@ -94,6 +94,8 @@ internal sealed partial class ProfilesPage : Page
                 WarningsBar.IsOpen = true;
             }
 
+            RebindSsh();
+
             // When `command` is set and default-profile is not, the command is
             // what every new pane runs, so no profile is the default (#1136).
             DefaultProfileCard.Description = App.CommandInEffect is { } command

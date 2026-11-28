@@ -22,7 +22,9 @@ internal static class PaneContextMenuBuilder
         Func<bool> hasSelection,
         Func<bool> isZoomed,
         Action promptTabTitle,
-        Action promptTerminalTitle)
+        Action promptTerminalTitle,
+        string? sftpDownloadName = null,
+        Action? sftpDownload = null)
     {
         var flyout = new MenuFlyout
         {
@@ -44,7 +46,8 @@ internal static class PaneContextMenuBuilder
             flyout.Items.Clear();
             Populate(flyout, invokePaneAction, invokeBindingAction,
                 hasSelection(), isZoomed(),
-                promptTabTitle, promptTerminalTitle);
+                promptTabTitle, promptTerminalTitle,
+                sftpDownloadName, sftpDownload);
         };
 
         return flyout;
@@ -57,9 +60,12 @@ internal static class PaneContextMenuBuilder
         bool hasSelection,
         bool isZoomed,
         Action promptTabTitle,
-        Action promptTerminalTitle)
+        Action promptTerminalTitle,
+        string? sftpDownloadName,
+        Action? sftpDownload)
     {
-        foreach (var item in PaneContextMenuModel.Build(hasSelection, isZoomed))
+        foreach (var item in PaneContextMenuModel.Build(
+            hasSelection, isZoomed, sftpDownload is null ? null : sftpDownloadName))
         {
             if (item.Kind == PaneMenuItemKind.Separator)
             {
@@ -72,9 +78,12 @@ internal static class PaneContextMenuBuilder
                 Text = item.Label,
                 IsEnabled = item.IsEnabled,
             };
-            menuItem.Click += (_, _) => Dispatch(item.Command,
-                invokePaneAction, invokeBindingAction,
-                promptTabTitle, promptTerminalTitle);
+            if (item.Command == PaneMenuCommand.SftpDownload)
+                menuItem.Click += (_, _) => sftpDownload?.Invoke();
+            else
+                menuItem.Click += (_, _) => Dispatch(item.Command,
+                    invokePaneAction, invokeBindingAction,
+                    promptTabTitle, promptTerminalTitle);
             ApplyIcon(menuItem, item.Icon);
             flyout.Items.Add(menuItem);
         }
