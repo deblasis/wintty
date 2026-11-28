@@ -13627,6 +13627,7 @@ test "copy-on-select default uses the selection clipboard on Linux and macOS" {
     try testing.expectEqual(
         @as(CopyOnSelect, switch (builtin.target.os.tag) {
             .linux, .macos => .primary,
+            .windows => .clipboard,
             else => .none,
         }),
         cfg.@"copy-on-select",
