@@ -672,6 +672,43 @@ def self_test() -> int:
         ("lane-under-unix-only-is-not-a-lane-here",
          "\n[unix]\nlu: (_lane \"lu\" \"_x\" \"1m\")\n[windows]\nlu: echo w\n[windows]\nuse-lu:\n    just lu\n",
          ({"lu"}, {}, ["a bare `just lu` takes no lane: the line offers none, so the target's guard is the only check"])),
+        # a `} else {` inside a string is not an else; each else block ends at its own brace
+        ("a-quoted-string-cannot-forge-the-else",
+         "\n[windows]\nfs:\n    $inc = {{inc}}; $m = 'decoy } else { s'; if (Test-LaneReady -Keys @('wintty-desktop')) { & $inc run --queue wintty-desktop --reason dp -- just _x-body } ; $env:WINTTY_LANE_DECISION = 'bare'; just _x-body; if ($PROGRESS) { Write-Host \"done\" }\n",
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}},
+          ["a bare `just _x-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("a-hand-set-bare-call-before-a-real-decision",
+         "\n[windows]\nhb:\n    $inc = {{inc}}; $env:WINTTY_LANE_DECISION = 'bare'; just _x-body; if (Test-LaneReady -Keys @('wintty-desktop')) { & $inc run --queue wintty-desktop --reason x -- just _x-body } else { just _x-body }\n",
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}},
+          ["a bare `just _x-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("the-second-decisions-fallback-is-quiet",
+         "\n[windows]\nsd:\n    $inc = {{inc}}; if (Test-LaneReady -Keys @('wintty-build')) { & $inc run --queue wintty-build --reason a -- just build-win } else { echo a }; if (Test-LaneReady -Keys @('wintty-desktop')) { & $inc run --queue wintty-desktop --reason b -- just _x-body } else { $env:WINTTY_LANE_DECISION = 'bare'; just _x-body }\n",
+         ({"_x-body", "build-win"}, {"_x-body": {"wintty-desktop"}, "build-win": {"wintty-build"}}, [])),
+        # the lane call first, then a string opening `else {`, the bare call, and a real `}`:
+        # a walker that reads the raw text sees an else block around the bare call
+        ("a-strings-braces-are-not-structure",
+         "\n[windows]\nsb:\n    $inc = {{inc}}; if (Test-LaneReady -Keys @('wintty-desktop')) { & $inc run --queue wintty-desktop --reason dp -- just _x-body }; $m = 'else { '; $env:WINTTY_LANE_DECISION = 'bare'; just _x-body; if ($PROGRESS) { } }\n",
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}},
+          ["a bare `just _x-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        # braces are walked on the whole line, at any depth, outside strings
+        ("a-bare-call-in-a-multi-statement-while-block",
+         "\n[windows]\nwb:\n    $inc = {{inc}}; while ($true) { just _x-body; break }\n",
+         ({"_x-body"}, {},
+          ["a bare `just _x-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("a-bare-call-nested-two-blocks-deep",
+         "\n[windows]\nnb:\n    if ($x) { if ($y) { just _x-body } }\n",
+         ({"_x-body"}, {},
+          ["a bare `just _x-body` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("a-lane-call-inside-a-multi-statement-block",
+         "\n[windows]\nmb:\n    $inc = {{inc}}; if (Test-LaneReady -Keys @('wintty-desktop')) { $env:WINTTY_LANE_DECISION = 'lane'; & $inc run --queue wintty-desktop --reason m -- just _x-body; Write-Host x } else { just _x-body }\n",
+         ({"_x-body"}, {"_x-body": {"wintty-desktop"}}, [])),
+        # data on a header line cannot claim a lane
+        ("a-dependency-named-like-the-wrapper-is-not-the-wrapper",
+         "\n[windows]\nx: (_lane-thing \"a\")\n[private]\n_lane-thing a:\n    echo t\n[windows]\nuse-x:\n    just x\n",
+         ({"x"}, {}, ["a bare `just x` takes no lane: the line offers none, so the target's guard is the only check"])),
+        ("a-parameter-default-cannot-claim-a-lane",
+         "\n[windows]\nlp arg=\": (_lane t)\":\n    echo y\n[windows]\nuse-lp:\n    just lp\n",
+         ({"lp"}, {}, ["a bare `just lp` takes no lane: the line offers none, so the target's guard is the only check"])),
     ]:
         held, queues, problems = _in_lane_privates(base + text)
         # the wrapper `_build-x-in-lane` is held by name in every row; a row states the rest
@@ -1172,22 +1209,83 @@ def _read_caller(code):
     return val, keys, problems
 
 
+_INTERPOLATION = re.compile(r"\{\{.*?\}\}")
+_ELSE_WORD = re.compile(r"else\b")
+
+
+def _blank(code, keep_strings=False):
+    """The line with what is not code removed: a comment, `{{..}}` interpolations
+    (justfile text pasted before pwsh sees the line), and the contents of quoted
+    strings. Lengths are kept, so a position found here is a position in `code`.
+    This is the one place structure is read: block syntax and dependency lists
+    are looked for in the blanked text, never in the raw line, so a string
+    cannot pretend to be an `else` or a lane wrapper."""
+    out, quote, i = [], None, 0
+    code = _INTERPOLATION.sub(lambda m: " " * len(m.group(0)), code)
+    while i < len(code):
+        c = code[i]
+        if quote:
+            keep = keep_strings and c in "\"'"           # a string's quotes stay: its text is data
+            out.append(c if keep else " ")
+            if c == quote:
+                quote = None
+            elif c == "`":                              # pwsh's escape inside "..."
+                out.append(" ")
+                i += 1
+            i += 1
+            continue
+        if c == "#":
+            break
+        if c in "\"'":
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _else_blocks(code):
+    """(open, close) brace positions of each `else { .. }` block on one line,
+    read outside strings, each block ending at ITS matching brace."""
+    out, stack, pending, i = [], [], False, 0
+    blanked = _blank(code)
+    while i < len(blanked):
+        c = blanked[i]
+        if _ELSE_WORD.match(blanked, i) and (i == 0 or not (blanked[i - 1].isalnum() or blanked[i - 1] in "_-")):
+            pending = True
+            i += 4
+            continue
+        if c == "{":
+            stack.append((i, pending))
+            pending = False
+        elif c == "}" and stack:
+            start, was_else = stack.pop()
+            if was_else:
+                out.append((start, i))
+        i += 1
+    return out
+
+
 def _takes_own_lane(text):
     """Recipes whose header depends on a lane wrapper, on the definition THIS HOST
     runs: a name laned only under `[unix]` is not laned here, and the scan runs on
-    Windows. A recipe laned only through another dependency is not counted: that
-    would excuse a bare call on a reading of the file rather than on its own header."""
+    Windows. The dependency list is read with quoted strings blanked, so a
+    parameter default or an assignment value cannot claim a lane, and the wrapper
+    must be called by its own name: `(_lane-thing ..)` is another recipe."""
     out, attrs = set(), set()
     for line in text.splitlines():
         stripped = line.strip()
         if line[:1] == "[" and not line[0].isspace():
-            attrs = {a.lower() for a in re.findall(r"[a-z]+", line.split("#", 1)[0])}
+            attrs = {a.lower() for a in re.findall(r"[a-z]+", _blank(line))}
             continue
         if line and not line[0].isspace() and not stripped.startswith("#") and ":" in line:
             if not (attrs & {"unix", "linux", "macos", "posix"}):
-                header = re.sub(r"\s+#.*$", "", stripped)     # a comment cannot claim a lane
-                if re.match(r"^([A-Za-z_][\w-]*)[^:\n]*:.*\(_(?:lane|build-in-lane)\b", header):
-                    out.add(re.match(r"^([A-Za-z_][\w-]*)", header).group(1))
+                header = _blank(stripped, keep_strings=True)
+                m = re.match(r"^([A-Za-z_][\w-]*)[^:\n]*:", header)
+                if m and re.search(r"\(_(?:lane|build-in-lane)(?=\s*[\"'])", header[m.end():]):
+                    out.add(m.group(1))
             attrs = set()
     return out
 
@@ -1217,18 +1315,15 @@ def _in_lane_privates(text=None):
     takes_own_lane = _takes_own_lane(text)
     queues, problems = {}, []
     for raw in _logical_lines(text):
-        flat = [s for statement in _statements(raw) for s in _with_block_contents(statement)]
-        offered = {t for s in flat for t in (_read_caller(s)[0],) if t is not None}
-        # A caller's fallback is the bare call in the else branch of a lane decision:
+        placed = _line_statements(raw)
+        offered = {t for s, _at in placed for t in (_read_caller(s)[0],) if t is not None}
+        # A caller's fallback is the bare call in the else block of a lane decision:
         # it runs only when the lane is not usable. Offering the lane somewhere on
-        # the line is not enough: `& $inc run .. -- just X; just X` would then pass,
-        # and with WINTTY_LANE_DECISION set by hand that bare call opens the window.
-        else_at, else_end = raw.find("} else {"), raw.rfind("}")
-        cursor = 0
-        for statement in flat:
-            at = raw.find(statement, cursor)
-            if at >= 0:
-                cursor = at + len(statement)
+        # the line is not enough, and neither is a `} else {` inside a string, so
+        # the blocks are read outside strings, each ending at its own brace.
+        else_blocks = _else_blocks(raw)
+        decides = "Test-LaneReady" in _blank(raw)
+        for statement, at in placed:
             target, keys, probs = _read_caller(statement)
             problems += probs                       # each names its own unreadable shape
             if target is not None:
@@ -1238,8 +1333,8 @@ def _in_lane_privates(text=None):
                 if reached in _LANE_WRAPPERS or reached in takes_own_lane:
                     continue                         # the wrappers themselves, or a recipe that takes its own lane
                 held.add(reached)                   # reached with no lane: its guard is the only check
-                fallback = (reached in offered and "Test-LaneReady" in raw
-                            and else_at != -1 and else_at < at < else_end)
+                fallback = (reached in offered and decides
+                            and any(o < at < c for o, c in else_blocks))
                 if not fallback:
                     problems.append(f"a bare `just {reached}` takes no lane: the line offers none, so the target's guard is the only check")
     for target, qs in sorted(queues.items()):
@@ -1250,16 +1345,45 @@ def _in_lane_privates(text=None):
     return held, queues, problems
 
 
-def _with_block_contents(statement):
-    """The statement and, when it opens a control block, the statements inside
-    the block's braces. `if (Test-LaneReady ..) { ..; & $inc run .. }` is one
-    statement to a splitter that only knows `;`, so the caller inside it would
-    be read or missed depending on where the `;` falls."""
-    out = [statement]
-    if _BLOCK_CONTROL.match(_CALLER_CALL_OP.sub("", _strip_comment(statement))):
-        m = _SCRIPT_BLOCK.search(statement)
-        if m:
-            out += _statements(m.group(1))
+def _brace_regions(code):
+    """(start, end) of the text inside every `{ .. }` on one line, nested ones
+    included, read outside strings. Positions index `code`."""
+    out, stack, i = [], [], 0
+    blanked = _blank(code)
+    while i < len(blanked):
+        if blanked[i] == "{":
+            stack.append(i)
+        elif blanked[i] == "}" and stack:
+            start = stack.pop()
+            out.append((start + 1, i))
+        i += 1
+    return out
+
+
+def _line_statements(raw):
+    """(statement, position) for every statement on one logical line: those at
+    the top level, and those inside every brace region at any depth. Braces are
+    walked on the WHOLE line, because a splitter that only knows `;` cuts
+    `while ($x) { just Y; break }` into two halves that balance no brace between
+    them. The position is where the statement really sits, so a block test can be
+    made against it; searching for the text would find an earlier copy. Each
+    statement is yielded once, from the innermost block that holds it."""
+    out = []
+    top = (0, len(raw))
+    regions = _brace_regions(raw)
+    for start, end in [top] + regions:
+        cursor = start
+        for statement in _statements(raw[start:end]):
+            at = raw.find(statement, cursor)
+            if at < 0 or at >= end:
+                continue
+            cursor = at + len(statement)
+            # the innermost region that contains this position owns it: an
+            # enclosing span yields the same call again as the tail of a
+            # longer statement (`.. } else { just X }`), and it is one call
+            if any(start <= s and e <= end and (s, e) != (start, end) and s <= at < e for s, e in regions):
+                continue
+            out.append((statement, at))
     return out
 
 
